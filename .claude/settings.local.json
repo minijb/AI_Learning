@@ -1,0 +1,25 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(grep -c \"\\\\.md$\")",
+      "WebSearch",
+      "Bash(awk '{print $5, $9}')",
+      "Bash(mv 02-rendering-pipeline.md          _tmp-06.md)",
+      "Bash(mv 03-shader-programming.md           _tmp-07.md)",
+      "Bash(mv 04-lighting-and-materials.md       _tmp-09.md)",
+      "Bash(mv 05-scene-graph-and-spatial.md      _tmp-08.md)",
+      "Bash(mv 06-collision-detection.md          _tmp-14.md)",
+      "Bash(mv _tmp-02.md  02-memory-management.md)",
+      "Bash(mv _tmp-03.md  03-cs-core-supplement.md)",
+      "Bash(mv _tmp-04.md  04-ecs-architecture.md)",
+      "Bash(mv _tmp-05.md  05-platform-abstraction.md)",
+      "Bash(mv _tmp-06.md  06-rendering-pipeline.md)",
+      "Bash(ls *)",
+      "Bash(git init *)",
+      "Bash(git add *)",
+      "Bash(git commit *)"
+    ]
+  },
+  "skipWebFetchPreflight": true
+}
