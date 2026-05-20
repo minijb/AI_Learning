@@ -1,0 +1,103 @@
+{
+  "_schema": "1.0",
+  "_护栏规则": [
+    "智能体在执行过程中只能修改每个 feature 的 'passes' 字段（true/false）",
+    "如需修改 id、category、description、steps，必须由人类编辑此文件",
+    "plan-validate 会检查 JSON 结构、必填字段和占位符，但不会对比历史版本"
+  ],
+  "features": [
+    {
+      "id": "F1",
+      "category": "项目初始化",
+      "description": "使用 git worktree 在 Src/ 下创建 TypeScript React + Vite 项目骨架，配置 TypeScript/Vite/React 入口和全局样式",
+      "steps": [
+        "git worktree add Src",
+        "npm init + 安装 react/react-dom/react-router-dom/react-markdown/vite 等依赖",
+        "配置 tsconfig.json / vite.config.ts / index.html / main.tsx / App.tsx / App.css",
+        "根 .gitignore 追加 Src/node_modules/ 和 Src/dist/"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F2",
+      "category": "数据层",
+      "description": "构建时扫描 Markdown 生成 JSON 索引，包括学习数据索引和搜索倒排索引",
+      "steps": [
+        "scan-learning-data.ts 扫描 docs/ 下的 plans/exec-plans/deep-dives/knowledge-notes",
+        "build-search-index.ts 对所有 Markdown 内容分词构建倒排索引",
+        "定义 TypeScript 类型：LearningData / SearchIndex / UserProgress / UserNotes",
+        "配置 npm run scan 和 npm run index 命令"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F3",
+      "category": "导航与搜索",
+      "description": "实现侧边栏导航布局和全局搜索功能",
+      "steps": [
+        "Sidebar 组件：固定左侧、深色主题、5 个导航项 + active 高亮",
+        "SearchBar 组件：实时搜索 debounce、下拉结果列表、高亮预览、跳转到内容页",
+        "Layout 组件：Sidebar + Outlet 主内容区"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F4",
+      "category": "学习计划展示",
+      "description": "仪表盘、学习计划列表、计划详情页（含教程列表）",
+      "steps": [
+        "Dashboard：统计卡片 + 进行中计划列表 + 活跃执行计划",
+        "LearningPlans：计划卡片网格，含进度条",
+        "PlanDetail：面包屑 + 计划信息 + 教程列表（序号圆标），点击跳转 MarkdownViewer"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F5",
+      "category": "进度标记",
+      "description": "教程完成状态勾选，进度实时计算，localStorage 持久化",
+      "steps": [
+        "useProgress Hook：管理 Record<planId, completedTutorialIds[]>，读写 localStorage",
+        "PlanDetail 教程项添加 checkbox，绑定 toggleTutorial",
+        "进度条优先显示用户实际进度，fallback 静态 JSON 进度",
+        "Dashboard 和 LearningPlans 反映用户实际进度"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F6",
+      "category": "笔记标注",
+      "description": "在 Markdown 阅读页添加笔记面板，支持增删改，localStorage 持久化",
+      "steps": [
+        "useNotes Hook：管理 Record<documentPath, Note[]>，读写 localStorage",
+        "NoteEditor 组件：笔记列表 + 新增/编辑/删除",
+        "MarkdownViewer 布局改为左内容右笔记面板（可折叠）",
+        "笔记关联到具体文档路径"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F7",
+      "category": "内容渲染与辅助页",
+      "description": "Markdown 渲染页面和执行计划/深度探索/知识笔记列表页",
+      "steps": [
+        "fetchMarkdownContent 工具：从 ../docs/ 加载 .md",
+        "MarkdownViewer：react-markdown + remark-gfm 渲染，完整样式",
+        "ExecPlans / DeepDives / KnowledgeNotes 页面"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F8",
+      "category": "构建验证",
+      "description": "生产构建通过，TypeScript 无错误，所有功能可访问",
+      "steps": [
+        "vite.config.ts 配置 server.fs.allow 包含 ../docs",
+        "npm run scan && npm run index 生成数据",
+        "npm run build 生成 dist/",
+        "npx tsc --noEmit 验证类型"
+      ],
+      "passes": false
+    }
+  ]
+}
