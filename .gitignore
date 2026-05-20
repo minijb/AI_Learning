@@ -1,0 +1,6 @@
+# Claude/Pi IDE configs
+.claude/
+.pi/
+
+# Temp files
+CLAUDE_TEMP.md
