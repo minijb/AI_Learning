@@ -1,0 +1,84 @@
+{
+  "_schema": "1.0",
+  "_护栏规则": [
+    "智能体在执行过程中只能修改每个 feature 的 'passes' 字段（true/false）",
+    "如需修改 id、category、description、steps，必须由人类编辑此文件",
+    "plan-validate 会检查 JSON 结构、必填字段和占位符，但不会对比历史版本"
+  ],
+  "features": [
+    {
+      "id": "F1",
+      "category": "模板层",
+      "description": "新增 task-template.md 模板，定义拆分 Task 文件的标准结构（# Task NN: 标题、Files 清单、Step checkbox 列表、验证命令格式）",
+      "steps": [
+        "在 templates/ 下创建 task-template.md",
+        "模板包含 # Task [NN]: 标题、Files 清单、Step 模板、验证命令格式"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F2",
+      "category": "模板层",
+      "description": "修改 exec-plan.md 模板，保留内联 Task 格式，追加拆分 Task 的引用写法说明和示例（tasks/task-NN-xxx.md 链接）",
+      "steps": [
+        "在 exec-plan.md 模板末尾追加拆分 Task 的 HTML 注释说明",
+        "说明何时拆分（>5步/>50行代码/跨3+文件/需独立subagent）",
+        "说明如何拆分（复制 task-template.md → tasks/ → 填充 → 在 exec-plan.md 中替换为引用链接）"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F3",
+      "category": "验证脚本",
+      "description": "修改 plan-validate.py，tasks/ 目录存在时验证其结构（Task 文件标题、占位符扫描），不存在时不报错",
+      "steps": [
+        "tasks/ 目录不存在 → 不报错（可选目录）",
+        "tasks/ 目录存在且为空 → warning 提示",
+        "tasks/ 目录存在且有 .md 文件 → 检查 '# Task NN:' 标题 + 零占位符扫描"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F4",
+      "category": "执行脚本",
+      "description": "修改 plan-status.py，存在 tasks/ 目录时统计 Task 文件完成情况并显示；不存在时使用现有逻辑",
+      "steps": [
+        "在 is_dir 分支中检测 tasks/ 子目录",
+        "统计 tasks/ 下 .md 文件数量和 checkbox 完成情况",
+        "作为补充信息显示（不替代 feature-list.json 统计）"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F5",
+      "category": "公共库",
+      "description": "修改两个 common.py 的 get_progress_summary，存在 tasks/ 时填充 task_total 和 task_done 字段；两份文件 diff 无差异",
+      "steps": [
+        "在 writing-plans/scripts/common.py 的 get_progress_summary 末尾添加 tasks/ 统计",
+        "在 executing-plans/scripts/common.py 中做完全相同的修改",
+        "验证两个 common.py 文件 diff 无差异"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F6",
+      "category": "文档更新",
+      "description": "更新 writing-plans 的 SKILL.md 和 self-review-checklist.md：说明拆分标准、拆分方法、自审清单",
+      "steps": [
+        "SKILL.md Exec Plan 模板末尾追加拆分说明（4条量化标准）",
+        "self-review-checklist.md 追加 Task 拆分合理性检查项"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F7",
+      "category": "文档更新",
+      "description": "更新 executing-plans 的 SKILL.md 和 docs/workflow.md：执行时判断 Task 类型（内联 vs 拆分），拆分时按链接读取 tasks/ 文件",
+      "steps": [
+        "SKILL.md 阶段2增加 Task 类型判断步骤",
+        "workflow.md 逐 Task 执行时先确定 Task 位置（内联或 tasks/ 文件）"
+      ],
+      "passes": false
+    }
+  ]
+}
