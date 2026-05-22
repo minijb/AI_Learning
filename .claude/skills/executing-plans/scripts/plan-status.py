@@ -65,6 +65,22 @@ def main():
 
             print(f"{plan_name:<40} {type_mark} {status}  {done_count}/{feat_count} ({pct}%)")
 
+            # 若存在 tasks/ 目录，统计 Task 文件完成情况
+            tasks_dir = item / "tasks"
+            if tasks_dir.is_dir():
+                task_files = sorted([f for f in tasks_dir.iterdir() if f.suffix == '.md'])
+                if task_files:
+                    task_total = len(task_files)
+                    task_done = 0
+                    for tf in task_files:
+                        tcontent = tf.read_text(encoding="utf-8")
+                        all_cb = len(re.findall(r'- \[.\]', tcontent))
+                        done_cb = len(re.findall(r'- \[x\]', tcontent))
+                        if all_cb > 0 and done_cb >= all_cb:
+                            task_done += 1
+                    # 用 tasks/ 统计补充显示（不替代 feature-list.json 统计，两者并存）
+                    print(f"  Tasks: {task_done}/{task_total} 完成")
+
         else:
             type_mark = "[QUICK]"
             content = item.read_text(encoding="utf-8")

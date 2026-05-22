@@ -20,7 +20,16 @@
       "Bash(git add *)",
       "Bash(git commit *)",
       "Bash(git remote *)",
-      "Bash(git push *)"
+      "Bash(git push *)",
+      "Bash(mkdir -p \"D:/AI_Learning/.claude/skills/writing-plans-workspace/iteration-1\")",
+      "Bash(mkdir -p \"D:/AI_Learning/.claude/skills/writing-plans-workspace/skill-snapshot\")",
+      "Bash(git stash *)",
+      "Bash(cp -r \".claude/skills/writing-plans\" \".claude/skills/writing-plans-workspace/skill-snapshot/writing-plans-old\")",
+      "Bash(mkdir -p \"D:/AI_Learning/.claude/skills/writing-plans-workspace/iteration-1/eval-0-feature-plan/with_skill/outputs\")",
+      "Bash(mkdir -p \"D:/AI_Learning/.claude/skills/writing-plans-workspace/iteration-1/eval-0-feature-plan/old_skill/outputs\")",
+      "Bash(mkdir -p \"D:/AI_Learning/.claude/skills/writing-plans-workspace/iteration-1/eval-1-refactor-plan/with_skill/outputs\")",
+      "Bash(mkdir -p \"D:/AI_Learning/.claude/skills/writing-plans-workspace/iteration-1/eval-1-refactor-plan/old_skill/outputs\")",
+      "Bash(grep *)"
     ]
   },
   "skipWebFetchPreflight": true

@@ -39,7 +39,7 @@ python scripts/plan-new.py --full '订单模块缓存层'
 
 这会创建 `docs/exec-plans/active/订单模块缓存层/` 目录。
 
-**填充 exec-plan.md 时遵循 TDD 节奏：**
+**填充 exec-plan.md 时遵循 TDD 节奏（配置文件写完整内容，应用代码写规格）：**
 
 ```markdown
 ## Task 1: Redis 连接管理
@@ -57,14 +57,10 @@ python scripts/plan-new.py --full '订单模块缓存层'
   - 验证：`pytest tests/cache/test_redis_client.py::test_connect_to_redis -v` → 预期 FAIL
 
 - [ ] **Step 2: 实现 RedisClient**
-  ```python
-  import redis
-  class RedisClient:
-      def __init__(self, host, port):
-          self._conn = redis.Redis(host=host, port=port)
-      def ping(self):
-          return self._conn.ping()
-  ```
+  - 文件：`src/cache/redis_client.py`
+  - 签名：`class RedisClient(host: str, port: int)`
+  - 行为：构造时连接 Redis，`ping()` 返回 `True` 表示连通
+  - 关键约束：连接失败抛 `ConnectionError`；支持 context manager 自动关闭
   - 验证：`pytest tests/cache/test_redis_client.py::test_connect_to_redis -v` → 预期 PASS
 
 - [ ] **Step 3: Commit**

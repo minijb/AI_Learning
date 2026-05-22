@@ -1,0 +1,18 @@
+# Progress: exec-plan任务文件拆分
+# 创建于: 2026-05-21
+
+状态: COMPLETED
+最后更新: 2026-05-22
+
+步骤进度:
+- [x] Task 1 — 新增 task-template.md 模板 [DONE]
+- [x] Task 2 — 修改 exec-plan.md 模板支持双模式 [DONE]
+- [x] Task 3 — 修改 plan-validate.py 可选验证 tasks/ [DONE]
+- [x] Task 4 — 修改 plan-status.py 统计 tasks/ [DONE]
+- [x] Task 5 — 修改两个 common.py 同步进度逻辑 [DONE]
+- [x] Task 6 — 修改 writing-plans SKILL.md + docs [DONE]
+- [x] Task 7 — 修改 executing-plans SKILL.md + docs [DONE]
+
+阻塞项: 无
+
+完成日期: 2026-05-22

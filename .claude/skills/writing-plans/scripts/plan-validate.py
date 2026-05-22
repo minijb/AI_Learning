@@ -113,6 +113,20 @@ def validate_full_plan(plan_dir: Path):
         if not (plan_dir / fname).is_file():
             add_error(f"缺少文件: {fname}", "使用技能目录下 templates/ 中的文件补全。")
 
+    # tasks/ 目录为可选——存在时验证结构，不存在不报错
+    tasks_dir = plan_dir / "tasks"
+    if tasks_dir.is_dir():
+        task_files = sorted([f for f in tasks_dir.iterdir() if f.suffix == '.md'])
+        if not task_files:
+            add_warn("tasks/ 目录存在但为空，建议添加 Task 文件或删除空目录")
+        else:
+            for tf in task_files:
+                tcontent = tf.read_text(encoding="utf-8")
+                if not re.search(r'# Task\s+\d+:', tcontent):
+                    add_error(f"tasks/{tf.name} 缺少 '# Task NN:' 标题", "按 task-template.md 格式添加标题。")
+                # 零占位符检查
+                check_no_placeholders(tcontent, f"{plan_dir.name}/tasks/{tf.name}")
+
     exec_plan = plan_dir / "exec-plan.md"
     if exec_plan.exists():
         content = exec_plan.read_text(encoding="utf-8")

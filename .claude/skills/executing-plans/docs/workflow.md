@@ -7,7 +7,7 @@
 ## 总览
 
 ```
-加载计划 → 批判性审阅 → 逐 Task 执行 → 验证 → 更新进度/memory → 全部完成 → 归档(plan-complete)
+加载计划 → 批判性审阅 → 逐 Task 执行 → 每个 Task 闭环(验证→勾选→feature-list→memory→progress) → 全部完成 → 归档(plan-complete)
 ```
 
 ---
@@ -41,13 +41,26 @@ python scripts/plan-status.py
 
 ### 对每个 Task：
 
-1. **读取完整 Task**（所有 Step + 代码）
-2. **逐 Step 执行**：
-   - 严格按照代码写——不"优化"
+1. **确定 Task 位置** — 内联在 exec-plan.md 或拆分到 tasks/task-NN-xxx.md
+2. **读取 Task 完整内容** — 所有 Step + 代码 + 验证命令
+3. **逐 Step 执行**：
+   - **配置文件/脚本** → 严格按照计划中的代码写，不"优化"
+   - **应用代码** → 读取规格（接口契约 + 行为描述 + 约束），自主实现，不超出规格范围
    - 运行验证命令——核对预期输出
    - 验证不通过 → **停**
-3. **Commit**（按计划指示）
-4. **更新进度**
+4. **Commit**（按计划指示）
+
+### 每个 Task 闭环（必须立即执行，禁止积攒）
+
+**Step 全部完成并通过验证后，必须立即按顺序执行以下 5 步，完成后方可开始下一个 Task：**
+
+1. **验证** — 运行该 Task 的最终验证命令，确认通过
+2. **勾选 checkbox** — 将该 Task 的所有 Step 从 `- [ ]` 改为 `- [x]`（内联 Task 在 exec-plan.md 中改，拆分 Task 在 tasks/ 文件中改）
+3. **更新 feature-list.json** — 将对应 feature 的 `"passes"` 设为 `true`
+4. **更新 memory.md** — 记录该 Task 产生的文件、关键决策
+5. **更新 progress.txt** — 将该 Task 标记为 `[DONE]`
+
+> **禁止：** 连续执行多个 Task 后再批量更新以上文件。每个 Task 必须独立闭环。
 
 ### 进度更新
 
@@ -65,7 +78,7 @@ python scripts/plan-status.py
 
 ---
 
-## 阶段 3：Subagent 模式（推荐，若平台支持）
+## Subagent 模式（推荐，若平台支持）
 
 当平台支持时，对每个 Task：
 
@@ -81,7 +94,7 @@ Dispatch code quality reviewer → 检查代码质量
 
 ---
 
-## 阶段 4：完成归档
+## 阶段 3：完成归档
 
 所有 Task 完成且验证通过后：
 

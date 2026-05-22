@@ -1,0 +1,12 @@
+计划: exec-plan任务文件拆分
+完成日期: 2026-05-22
+归档时间: 2026-05-22T14:47:56
+
+功能点完成情况:
+  [x] F1: 新增 task-template.md 模板，定义拆分 Task 文件的标准结构（# Task NN: 标题、Files 清单、Step checkbox 列表、验证命令格式）
+  [x] F2: 修改 exec-plan.md 模板，保留内联 Task 格式，追加拆分 Task 的引用写法说明和示例（tasks/task-NN-xxx.md 链接）
+  [x] F3: 修改 plan-validate.py，tasks/ 目录存在时验证其结构（Task 文件标题、占位符扫描），不存在时不报错
+  [x] F4: 修改 plan-status.py，存在 tasks/ 目录时统计 Task 文件完成情况并显示；不存在时使用现有逻辑
+  [x] F5: 修改两个 common.py 的 get_progress_summary，存在 tasks/ 时填充 task_total 和 task_done 字段；两份文件 diff 无差异
+  [x] F6: 更新 writing-plans 的 SKILL.md 和 self-review-checklist.md：说明拆分标准、拆分方法、自审清单
+  [x] F7: 更新 executing-plans 的 SKILL.md 和 docs/workflow.md：执行时判断 Task 类型（内联 vs 拆分），拆分时按链接读取 tasks/ 文件

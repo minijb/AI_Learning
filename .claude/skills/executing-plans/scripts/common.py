@@ -174,6 +174,22 @@ def get_progress_summary(plan_dir: Path | str) -> dict:
         content = progress_file.read_text(encoding="utf-8")
         summary["blocked"] = content.count("[BLOCKED]")
 
+    # 可选 tasks/ 目录统计
+    tasks_dir = plan_dir / "tasks"
+    if tasks_dir.is_dir():
+        import re as _re
+        task_files = sorted([f for f in tasks_dir.iterdir() if f.suffix == '.md'])
+        if task_files:
+            summary["task_total"] = len(task_files)
+            task_done = 0
+            for tf in task_files:
+                tcontent = tf.read_text(encoding="utf-8")
+                all_cb = len(_re.findall(r'- \[.\]', tcontent))
+                done_cb = len(_re.findall(r'- \[x\]', tcontent))
+                if all_cb > 0 and done_cb >= all_cb:
+                    task_done += 1
+            summary["task_done"] = task_done
+
     return summary
 
 

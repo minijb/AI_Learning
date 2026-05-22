@@ -30,13 +30,14 @@
   ```
   - 验证：`pytest tests/path/test_file.py::test_specific_behavior -v` → 预期 **FAIL**（功能未实现）
 
-- [ ] **Step 2: 实现最小代码**
-  ```python
-  # [写出完整实现代码，含 import]
-  def function_name(input_value):
-      return expected_value
-  ```
+- [ ] **Step 2: 按规格实现**
+  - 文件：`exact/path/to/new_file.py`
+  - 签名：`def function_name(input_value: str) -> dict:`
+  - 行为：接收 X，校验 Y 不为空，调用 Z 获取数据，返回 `{id, name, status}`
+  - 关键约束：Y 为空时抛 `ValueError("Y is required")`；Z 超时 3s
   - 验证：`pytest tests/path/test_file.py::test_specific_behavior -v` → 预期 **PASS**
+  
+  > 配置文件/脚本类 Step 写完整内容。应用代码类 Step 写上述规格——执行者根据规格自主实现。
 
 - [ ] **Step 3: Commit**
   ```bash
@@ -66,6 +67,24 @@
 ---
 
 <!-- 根据实际需要增减 Task -->
+
+<!--
+当某个 Task 特别复杂（步骤 >5、代码块 >50 行、跨多个文件）时，可将其拆分为独立文件：
+
+1. 在计划目录下创建 tasks/ 子目录
+2. 复制 templates/task-template.md 到 tasks/task-NN-<name>.md 并填充
+3. 在 exec-plan.md 中将该 Task 的内联内容替换为引用链接：
+
+## Task 2: [复杂组件名] → 拆分
+
+> 此 Task 较复杂，详细步骤见 [tasks/task-02-xxx.md](tasks/task-02-xxx.md)
+
+**Files (概要):**
+- Create: `path/to/file.py`
+- Modify: `path/to/other.py`
+
+执行时请读取对应的 Task 文件获取完整步骤和验证命令。
+-->
 
 ---
 

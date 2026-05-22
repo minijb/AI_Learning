@@ -14,7 +14,7 @@
         "在 templates/ 下创建 task-template.md",
         "模板包含 # Task [NN]: 标题、Files 清单、Step 模板、验证命令格式"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "F2",
@@ -25,7 +25,7 @@
         "说明何时拆分（>5步/>50行代码/跨3+文件/需独立subagent）",
         "说明如何拆分（复制 task-template.md → tasks/ → 填充 → 在 exec-plan.md 中替换为引用链接）"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "F3",
@@ -36,7 +36,7 @@
         "tasks/ 目录存在且为空 → warning 提示",
         "tasks/ 目录存在且有 .md 文件 → 检查 '# Task NN:' 标题 + 零占位符扫描"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "F4",
@@ -47,7 +47,7 @@
         "统计 tasks/ 下 .md 文件数量和 checkbox 完成情况",
         "作为补充信息显示（不替代 feature-list.json 统计）"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "F5",
@@ -58,7 +58,7 @@
         "在 executing-plans/scripts/common.py 中做完全相同的修改",
         "验证两个 common.py 文件 diff 无差异"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "F6",
@@ -68,7 +68,7 @@
         "SKILL.md Exec Plan 模板末尾追加拆分说明（4条量化标准）",
         "self-review-checklist.md 追加 Task 拆分合理性检查项"
       ],
-      "passes": false
+      "passes": true
     },
     {
       "id": "F7",
@@ -78,7 +78,7 @@
         "SKILL.md 阶段2增加 Task 类型判断步骤",
         "workflow.md 逐 Task 执行时先确定 Task 位置（内联或 tasks/ 文件）"
       ],
-      "passes": false
+      "passes": true
     }
   ]
 }
