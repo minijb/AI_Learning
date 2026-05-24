@@ -4,6 +4,7 @@ plan-status.py — 查看所有活跃计划的进度（跨平台 Python）
 输出格式: grep-friendly，含显式状态标记
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -85,7 +86,6 @@ def main():
             type_mark = "[QUICK]"
             content = item.read_text(encoding="utf-8")
 
-            import re
             step_total = len(re.findall(r"- \[.\] \*\*Step", content))
             step_done = len(re.findall(r"- \[x\] \*\*Step", content))
 

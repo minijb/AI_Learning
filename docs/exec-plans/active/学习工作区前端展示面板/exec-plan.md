@@ -8,7 +8,7 @@
 
 **Goal:** 使用 git worktree 在 `Src/` 目录下创建基于 TypeScript + React + Vite 的前端项目，可视化展示 AI_Learning 工作区中的学习计划、教程内容、执行计划状态和知识笔记，提供学习进度标记、笔记标注和全文搜索功能。
 
-**Architecture:** 前端使用 React 18 + TypeScript + Vite 构建 SPA。构建时扫描 `docs/` 和 `temp/docs/` 生成 JSON 数据索引和搜索倒排索引。运行时加载静态索引渲染页面。用户状态（进度、笔记）持久化到 `localStorage`。搜索基于预构建倒排索引在客户端完成。
+**Architecture:** 前端使用 React 18 + TypeScript + Vite 构建 SPA。构建时扫描 `docs/` 生成 JSON 数据索引和搜索倒排索引。运行时加载静态索引渲染页面。用户状态（进度、笔记）持久化到 `localStorage`。搜索基于预构建倒排索引在客户端完成。
 
 **Tech Stack:** TypeScript 5.4 / React 18 / Vite 5 / react-router-dom / react-markdown / remark-gfm / CSS Modules
 
@@ -49,7 +49,7 @@
 ├─────────────────────────────────────────────────────────────────────────┤
 │  Build Pipeline                                                          │
 │  ┌──────────────────────────────────────────────────────────────────┐  │
-│  │  scan-learning-data.ts  →  扫描 docs/ & temp/docs/  →  JSON      │  │
+│  │  scan-learning-data.ts  →  扫描 docs/  →  JSON                      │  │
 │  │  build-search-index.ts  →  分词 + 倒排索引  →  search-index.json │  │
 │  └──────────────────────────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────┘

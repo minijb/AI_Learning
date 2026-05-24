@@ -68,6 +68,7 @@ Based on the user interview, fill in these components:
 - **compatibility**: Required tools, dependencies (optional, rarely needed)
 - **the rest of the skill :)**
 
+> **文档规范：** 编写 SKILL.md 时遵循 `.omp/skills/markdown/SKILL.md` 的 Markdown 书写规范。
 ### Skill Writing Guide
 
 #### Anatomy of a Skill

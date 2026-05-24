@@ -10,11 +10,11 @@ compatibility: Python 3.8+ (跨平台，无需额外依赖)
 
 > 维护 docs/ 下的索引、分类和归档。所有 Skill 通过此 Skill 访问和修改 docs 系统。
 >
-> **其他 Skill 调用方式**：直接执行本 Skill 的脚本，路径相对于工作区根目录 `D:/Tur/temp/`：
-> - 更新学习计划索引: `python .pi/skills/docs-manager/scripts/update-index.py learning-plans`
-> - 更新深度探索索引: `python .pi/skills/docs-manager/scripts/update-index.py deep-dives`
-> - 更新知识笔记索引: `python .pi/skills/docs-manager/scripts/update-index.py knowledge-notes`
-> - 归档学习计划: `python .pi/skills/docs-manager/scripts/archive-plan.py <plan-name>`
+> **其他 Skill 调用方式**：直接执行本 Skill 的脚本，路径相对于工作区根目录：
+> - 更新学习计划索引: `python .omp/skills/docs-manager/scripts/update-index.py learning-plans`
+> - 更新深度探索索引: `python .omp/skills/docs-manager/scripts/update-index.py deep-dives`
+> - 更新知识笔记索引: `python .omp/skills/docs-manager/scripts/update-index.py knowledge-notes`
+> - 归档学习计划: `python .omp/skills/docs-manager/scripts/archive-plan.py <plan-name>`
 
 ---
 
@@ -105,3 +105,4 @@ compatibility: Python 3.8+ (跨平台，无需额外依赖)
 1. **唯一写入入口** — 所有索引更新必须通过本 Skill 的脚本，不直接编辑 INDEX.md
 2. **索引一致性** — 每次增删学习计划/笔记后立即更新对应索引
 3. **归档不可逆** — 归档操作有确认步骤，防止误操作
+4. **文档规范** — 生成的所有 Markdown 文件（含 INDEX.md）遵循 `.omp/skills/markdown/SKILL.md`。

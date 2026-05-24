@@ -34,7 +34,7 @@ description: >
 | 我想... | 命令/操作 | 详细指南 |
 |---------|----------|----------|
 | 创建计划 | `python scripts/plan-new.py --quick\|--full '名称'` | `docs/quickstart.md` |
-| 搜索已有计划 | `python scripts/plan-search.py <关键词>` | `docs/managing-plans.md` |
+| 搜索已有计划 | `python scripts/plan-search.py <关键词>` | `../executing-plans/docs/managing-plans.md` |
 | 验证计划 | `python scripts/plan-validate.py <路径>` | `docs/workflow.md` |
 | 完整命令参考 | 读取 `docs/script-reference.md` | `docs/script-reference.md` |
 
@@ -271,6 +271,7 @@ Step N — 实现某功能
 
 5. **成功沉默** — 验证通过不输出；失败才输出含修复指令的错误。
    *为什么：* 噪声淹没信号。
+6. **文档规范** — 输出的所有计划 Markdown 文件遵循 `.omp/skills/markdown/SKILL.md`。
 
 ---
 
@@ -287,7 +288,7 @@ Step N — 实现某功能
 | `templates/quick-plan.md` | Quick Plan 模板 | 创建 Quick Plan |
 | `templates/exec-plan.md` | Exec Plan 模板 | 创建 Exec Plan |
 | `templates/task-template.md` | 拆分 Task 模板 | 复杂 Task 需拆分到独立文件时 |
-| `docs/exec-plans/tech-debt-tracker.md` | 技术债务追踪 | 记录计划执行中发现的技术债务 |
+| `../../docs/exec-plans/tech-debt-tracker.md` | 技术债务追踪 | 记录计划执行中发现的技术债务 |
 
 ---
 

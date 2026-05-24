@@ -69,7 +69,7 @@ compatibility: Python 3.8+ (跨平台，无需额外依赖)
 1. **需求澄清** — 确认领域范围、学习者当前水平、学习目标
 2. **搭建骨架** — 运行脚手架脚本创建目录结构：
    ```bash
-   python .pi/skills/learning-plans/scripts/scaffold-plan.py "<计划名称>"
+   python .omp/skills/learning-plans/scripts/scaffold-plan.py "<计划名称>"
    ```
 3. **路径设计** — 参考 `docs/learning-plan-design.md` 中的拆分原则和覆盖清单，分解知识点，排序，估算每节耗时
 4. **填充 plan.md** — 按 `templates/plan-template.md` 格式完善学习路径总览
@@ -78,7 +78,7 @@ compatibility: Python 3.8+ (跨平台，无需额外依赖)
 7. **标记进度** — 初始化 progress.md，所有节标记为未完成
 8. **更新索引** — 调用 docs-manager 脚本更新索引：
    ```bash
-   python .pi/skills/docs-manager/scripts/update-index.py learning-plans
+   python .omp/skills/docs-manager/scripts/update-index.py learning-plans
    ```
 
 ---
@@ -89,3 +89,4 @@ compatibility: Python 3.8+ (跨平台，无需额外依赖)
 2. **知识点粒度** — 每个知识点可在一小时内学完（读+练）
 3. **零占位符** — 禁止 TBD/TODO，每节必须是完整内容
 4. **实际可运行** — 代码示例必须注明运行环境要求，确保可复现
+5. **文档规范** — 输出的所有 Markdown 文件遵循 `.omp/skills/markdown/SKILL.md`。

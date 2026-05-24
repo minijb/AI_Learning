@@ -1,0 +1,75 @@
+{
+  "_schema": "1.0",
+  "_护栏规则": [
+    "智能体在执行过程中只能修改每个 feature 的 'passes' 字段（true/false）",
+    "如需修改 id、category、description、steps，必须由人类编辑此文件",
+    "plan-validate 会检查 JSON 结构、必填字段和占位符，但不会对比历史版本"
+  ],
+  "features": [
+    {
+      "id": "F1",
+      "category": "活跃计划展示",
+      "description": "plan-active.py：列出所有活跃计划，每个计划以多行卡片显示，包含目标摘要、10 格 Unicode 进度条、任务状态列表、阻塞项信息，底部汇总总进度和计划数",
+      "steps": [
+        "从 active_dir 读取所有计划目录和 .md 文件",
+        "从 exec-plan.md 提取 Goal/Architecture 行",
+        "从 feature-list.json 和 progress.txt 获取进度数据",
+        "输出 Unicode box-drawing 多行卡片格式",
+        "底部输出汇总统计"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F2",
+      "category": "已完成计划展示",
+      "description": "plan-completed.py：列出所有已完成计划，从 completed_dir 目录和 PLAN_COMPLETED.md 两个数据源收集，每个计划显示完成日期、类型、摘要、功能点通过情况，按日期倒序排列",
+      "steps": [
+        "从 completed_dir 目录和 PLAN_COMPLETED.md 收集已完成的计划",
+        "合并去重，按完成日期倒序排列",
+        "提取 *-summary.txt 或 exec-plan.md Goal 行作为摘要",
+        "读取 feature-list.json 显示功能点通过状态",
+        "输出与 plan-active.py 一致风格的卡片"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F3",
+      "category": "单计划详细状态",
+      "description": "plan-detail.py <name>：搜索活跃和已完成计划，模糊匹配名称，输出 5 段详细信息（概览、功能点清单、任务进度、阻塞项、文件清单），多匹配时列出候选项",
+      "steps": [
+        "接受 plan_name 位置参数，在 active_dir 和 completed_dir 模糊搜索",
+        "无匹配输出错误并返回非零退出码",
+        "多匹配列出候选项",
+        "输出 5 段详细信息：概览 / 功能点 / 任务进度 / 阻塞项 / 文件清单",
+        "已完成计划额外显示完成日期"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F4",
+      "category": "边界处理",
+      "description": "处理各种边界情况：无活跃计划、无已完成计划、空 feature-list.json、缺失 progress.txt、终端非 UTF-8、超窄终端",
+      "steps": [
+        "无活跃/已完成计划时输出友好提示而非报错",
+        "feature-list.json 不存在时跳过功能点段",
+        "progress.txt 不存在时跳过阻塞项段",
+        "启动时 reconfigure stdout 为 utf-8",
+        "检测终端宽度动态调整 box 列宽"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F5",
+      "category": "集成验证",
+      "description": "三个脚本端到端验证通过，现有 plan-status.py 行为不变",
+      "steps": [
+        "plan-active.py 正确显示所有活跃计划",
+        "plan-completed.py 正确显示所有已完成计划",
+        "plan-detail.py 活跃和已完成计划均正确显示",
+        "plan-detail.py 不存在的计划报错退出",
+        "plan-status.py 输出格式与改动前一致"
+      ],
+      "passes": false
+    }
+  ]
+}

@@ -9,16 +9,16 @@
 
 | 文件路径 | 操作(新增/修改/删除) | 关联步骤 | 说明 |
 |---------|-------------------|---------|------|
-| .claude/skills/writing-plans/templates/task-template.md | 新增 | Task 1 | 拆分 Task 文件的标准模板 |
-| .claude/skills/writing-plans/templates/exec-plan.md | 修改 | Task 2 | 追加拆分 Task 引用写法说明 |
-| .claude/skills/writing-plans/scripts/plan-validate.py | 修改 | Task 3 | 添加 tasks/ 可选验证逻辑 |
-| .claude/skills/executing-plans/scripts/plan-status.py | 修改 | Task 4 | 添加 tasks/ 进度统计显示 |
-| .claude/skills/writing-plans/scripts/common.py | 修改 | Task 5 | get_progress_summary 增加 tasks/ 统计字段 |
-| .claude/skills/executing-plans/scripts/common.py | 修改 | Task 5 | 同上，两份文件保持一致 |
-| .claude/skills/writing-plans/SKILL.md | 修改 | Task 6 | 追加拆分标准说明（4条量化标准） |
-| .claude/skills/writing-plans/docs/self-review-checklist.md | 修改 | Task 6 | 追加 Task 拆分合理性检查项 |
-| .claude/skills/executing-plans/SKILL.md | 修改 | Task 7 | 阶段2增加 Task 类型判断步骤 |
-| .claude/skills/executing-plans/docs/workflow.md | 修改 | Task 7 | 逐 Task 执行增加位置确定步骤 |
+| .omp/skills/writing-plans/templates/task-template.md | 新增 | Task 1 | 拆分 Task 文件的标准模板 |
+| .omp/skills/writing-plans/templates/exec-plan.md | 修改 | Task 2 | 追加拆分 Task 引用写法说明 |
+| .omp/skills/writing-plans/scripts/plan-validate.py | 修改 | Task 3 | 添加 tasks/ 可选验证逻辑 |
+| .omp/skills/executing-plans/scripts/plan-status.py | 修改 | Task 4 | 添加 tasks/ 进度统计显示 |
+| .omp/skills/writing-plans/scripts/common.py | 修改 | Task 5 | get_progress_summary 增加 tasks/ 统计字段 |
+| .omp/skills/executing-plans/scripts/common.py | 修改 | Task 5 | 同上，两份文件保持一致 |
+| .omp/skills/writing-plans/SKILL.md | 修改 | Task 6 | 追加拆分标准说明（4条量化标准） |
+| .omp/skills/writing-plans/docs/self-review-checklist.md | 修改 | Task 6 | 追加 Task 拆分合理性检查项 |
+| .omp/skills/executing-plans/SKILL.md | 修改 | Task 7 | 阶段2增加 Task 类型判断步骤 |
+| .omp/skills/executing-plans/docs/workflow.md | 修改 | Task 7 | 逐 Task 执行增加位置确定步骤 |
 
 ## 关键决策
 

@@ -30,7 +30,7 @@
 ## Task 1: 新增 task-template.md 模板
 
 **Files:**
-- Create: `.claude/skills/writing-plans/templates/task-template.md`
+- Create: `.omp/skills/writing-plans/templates/task-template.md`
 
 - [ ] **Step 1: 创建 Task 模板文件**
   ```markdown
@@ -67,14 +67,14 @@
     ```
     - 验证：`git log -1 --oneline` → 预期：`feat: [简短描述]`
   ```
-  - 验证：`python -c "from pathlib import Path; p = Path('.claude/skills/writing-plans/templates/task-template.md'); print('OK' if p.exists() else 'FAIL')"` → 预期 **OK**
+  - 验证：`python -c "from pathlib import Path; p = Path('.omp/skills/writing-plans/templates/task-template.md'); print('OK' if p.exists() else 'FAIL')"` → 预期 **OK**
 
 ---
 
 ## Task 2: 修改 exec-plan.md 模板支持双模式
 
 **Files:**
-- Modify: `.claude/skills/writing-plans/templates/exec-plan.md`
+- Modify: `.omp/skills/writing-plans/templates/exec-plan.md`
 
 - [ ] **Step 1: 在模板中增加拆分 Task 引用写法**
   在现有 exec-plan.md 模板末尾（`<!-- 根据实际需要增减 Task -->` 注释之后）追加一段说明和示例：
@@ -97,14 +97,14 @@
   执行时请读取对应的 Task 文件获取完整步骤和验证命令。
   -->
   ````
-  - 验证：`python -c "from pathlib import Path; c = Path('.claude/skills/writing-plans/templates/exec-plan.md').read_text(encoding='utf-8'); assert 'tasks/' in c; assert 'task-template.md' in c; print('OK')"` → 预期 **OK**
+  - 验证：`python -c "from pathlib import Path; c = Path('.omp/skills/writing-plans/templates/exec-plan.md').read_text(encoding='utf-8'); assert 'tasks/' in c; assert 'task-template.md' in c; print('OK')"` → 预期 **OK**
 
 ---
 
 ## Task 3: 修改 plan-validate.py 可选验证 tasks/
 
 **Files:**
-- Modify: `.claude/skills/writing-plans/scripts/plan-validate.py`
+- Modify: `.omp/skills/writing-plans/scripts/plan-validate.py`
 
 - [ ] **Step 1: 在 validate_full_plan() 中添加 tasks/ 的温和检查**
   在 `validate_full_plan` 函数的 `required_files` 检查之后添加：
@@ -124,14 +124,14 @@
               check_no_placeholders(tcontent, f"{plan_dir.name}/tasks/{tf.name}")
   ```
   注意：不检查 "缺少 tasks/ 目录"——它是可选的。
-  - 验证：`python .claude/skills/writing-plans/scripts/plan-validate.py docs/exec-plans/active/exec-plan任务文件拆分` → 预期 **PASS**
+  - 验证：`python .omp/skills/writing-plans/scripts/plan-validate.py docs/exec-plans/active/exec-plan任务文件拆分` → 预期 **PASS**
 
 ---
 
 ## Task 4: 修改 executing-plans plan-status.py 统计 tasks/
 
 **Files:**
-- Modify: `.claude/skills/executing-plans/scripts/plan-status.py`
+- Modify: `.omp/skills/executing-plans/scripts/plan-status.py`
 
 - [ ] **Step 1: 在 is_dir 分支中增加 tasks/ 统计**
   在 `if item.is_dir():` 分支的进度统计中，增加检测 tasks/ 目录的逻辑：
@@ -152,15 +152,15 @@
           # 用 tasks/ 统计补充显示（不替代 feature-list.json 统计，两者并存）
           print(f"  Tasks: {task_done}/{task_total} 完成")
   ```
-  - 验证：`python .claude/skills/executing-plans/scripts/plan-status.py` → 预期 输出含本计划信息
+  - 验证：`python .omp/skills/executing-plans/scripts/plan-status.py` → 预期 输出含本计划信息
 
 ---
 
 ## Task 5: 修改两个 common.py 同步进度逻辑
 
 **Files:**
-- Modify: `.claude/skills/writing-plans/scripts/common.py`
-- Modify: `.claude/skills/executing-plans/scripts/common.py`
+- Modify: `.omp/skills/writing-plans/scripts/common.py`
+- Modify: `.omp/skills/executing-plans/scripts/common.py`
 
 - [ ] **Step 1: 在 get_progress_summary() 中添加 tasks/ 统计字段**
   在两个 common.py 的 `get_progress_summary` 函数末尾（return 之前）添加：
@@ -182,15 +182,15 @@
           summary["task_done"] = task_done
   ```
   两份 common.py 做**完全相同**的修改。
-  - 验证：`diff .claude/skills/writing-plans/scripts/common.py .claude/skills/executing-plans/scripts/common.py` → 预期 无差异
+  - 验证：`diff .omp/skills/writing-plans/scripts/common.py .omp/skills/executing-plans/scripts/common.py` → 预期 无差异
 
 ---
 
 ## Task 6: 修改 writing-plans SKILL.md + docs
 
 **Files:**
-- Modify: `.claude/skills/writing-plans/SKILL.md`
-- Modify: `.claude/skills/writing-plans/docs/self-review-checklist.md`
+- Modify: `.omp/skills/writing-plans/SKILL.md`
+- Modify: `.omp/skills/writing-plans/docs/self-review-checklist.md`
 
 - [ ] **Step 1: 更新 SKILL.md 中的 Exec Plan 模板**
   在 SKILL.md 的 Exec Plan 模板最后，追加说明：
@@ -224,8 +224,8 @@
 ## Task 7: 修改 executing-plans SKILL.md + docs
 
 **Files:**
-- Modify: `.claude/skills/executing-plans/SKILL.md`
-- Modify: `.claude/skills/executing-plans/docs/workflow.md`
+- Modify: `.omp/skills/executing-plans/SKILL.md`
+- Modify: `.omp/skills/executing-plans/docs/workflow.md`
 
 - [ ] **Step 1: 更新 SKILL.md 执行协议**
   在 SKILL.md 的「阶段 2：逐任务执行」部分，在现有描述前添加：

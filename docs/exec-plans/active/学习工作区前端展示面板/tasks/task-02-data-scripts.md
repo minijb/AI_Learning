@@ -19,7 +19,6 @@
   import * as path from 'path';
 
   const DOCS_ROOT = path.resolve(__dirname, '..', '..', '..', 'docs');
-  const TEMP_DOCS_ROOT = path.resolve(__dirname, '..', '..', '..', 'temp', 'docs');
   const OUTPUT_DIR = path.resolve(__dirname, '..', 'public', 'data');
 
   function getTitle(mdPath: string): string {
@@ -130,18 +129,6 @@
         path: `docs/${subdir}/${f}`
       });
     }
-    const td = path.join(TEMP_DOCS_ROOT, subdir);
-    if (fs.existsSync(td)) {
-      for (const f of fs.readdirSync(td)) {
-        if (!f.endsWith('.md') || f === 'INDEX.md') continue;
-        const fpath = path.join(td, f);
-        articles.push({
-          id: f.replace('.md', ''),
-          title: getTitle(fpath) || f,
-          path: `temp/docs/${subdir}/${f}`
-        });
-      }
-    }
     return articles;
   }
 
@@ -172,7 +159,6 @@
   import * as path from 'path';
 
   const DOCS_ROOT = path.resolve(__dirname, '..', '..', '..', 'docs');
-  const TEMP_DOCS_ROOT = path.resolve(__dirname, '..', '..', '..', 'temp', 'docs');
   const DATA_DIR = path.resolve(__dirname, '..', 'public', 'data');
 
   function tokenize(text: string): string[] {
@@ -233,15 +219,7 @@
     for (const kn of data.knowledgeNotes || []) {
       const filePath = kn.path.replace(/^docs\//, '');
       const fullPath = path.join(DOCS_ROOT, filePath);
-      if (!fs.existsSync(fullPath) && kn.path.startsWith('temp/')) {
-        const tempPath = kn.path.replace(/^temp\/docs\//, '');
-        docPaths.push({
-          path: path.join(TEMP_DOCS_ROOT, tempPath),
-          title: kn.title
-        });
-      } else {
-        docPaths.push({ path: fullPath, title: kn.title });
-      }
+      docPaths.push({ path: fullPath, title: kn.title });
     }
 
     for (const doc of docPaths) {

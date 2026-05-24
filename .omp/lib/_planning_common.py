@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Planning System — Python Common Library
-All scripts share this module for env init, path utils, logging, JSON ops, etc.
+Planning System — Python Common Library (single source of truth)
+All plan-related scripts share this module for env init, path utils, logging, JSON ops, etc.
 
-⚠️ 本文件与 .claude/skills/executing-plans/scripts/common.py 内容完全同步。
-   修改时请同时更新另一份副本，避免版本漂移。
+Location: .omp/lib/_planning_common.py
+Used by: .omp/skills/writing-plans/scripts/common.py (thin wrapper)
+         .omp/skills/executing-plans/scripts/common.py (thin wrapper)
 """
 
 import json

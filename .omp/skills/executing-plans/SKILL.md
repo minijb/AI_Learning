@@ -228,6 +228,7 @@ python scripts/plan-status.py
 
 6. **逐 Task 闭环** — 每个 Task 完成后立即：验证 → 勾选 checkbox → 更新 feature-list.json → 更新 memory.md → 更新 progress.txt。禁止积攒多个 Task 后批量处理。
    *为什么：* 批量处理导致进度文件与实际状态不符、feature-list 滞后于实际完成情况、跨会话恢复时状态混乱。Task 完成和记录之间零延迟。
+7. **文档规范** — 更新/创建的所有 Markdown 文件（memory.md、progress.txt 等）遵循 `.omp/skills/markdown/SKILL.md`。
 
 ---
 

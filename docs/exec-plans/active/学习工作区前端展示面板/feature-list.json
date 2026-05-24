@@ -25,7 +25,7 @@
       "description": "构建时扫描 Markdown 生成 JSON 索引，包括学习数据索引（LearningData 类型定义 + scan-learning-data.ts 脚本）和搜索倒排索引（build-search-index.ts 脚本）。脚本类写完整内容。",
       "steps": [
         "定义 TypeScript 类型：LearningData / SearchIndex / UserProgress / UserNotes（完整内容）",
-        "scan-learning-data.ts 扫描 docs/ 和 temp/docs/ 下的 plans/exec-plans/deep-dives/knowledge-notes（完整脚本内容）",
+        "scan-learning-data.ts 扫描 docs/ 下的 plans/exec-plans/deep-dives/knowledge-notes（完整脚本内容）",
         "build-search-index.ts 对所有 Markdown 内容按字/英文分词构建倒排索引（完整脚本内容）",
         "配置 npm run scan 和 npm run index 命令"
       ],

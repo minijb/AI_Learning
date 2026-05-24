@@ -45,7 +45,7 @@
 
 ```bash
 # 更新全部索引
-python .pi/skills/docs-manager/scripts/update-index.py --all
+python .omp/skills/docs-manager/scripts/update-index.py --all
 ```
 
 ---
