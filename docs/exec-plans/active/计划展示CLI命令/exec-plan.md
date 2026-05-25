@@ -19,7 +19,7 @@
 **Files:**
 - Create: `.omp/skills/executing-plans/scripts/plan-active.py`
 
-- [ ] **Step 1: 实现 plan-active.py**
+- [x] **Step 1: 实现 plan-active.py**
   - 文件：`.omp/skills/executing-plans/scripts/plan-active.py`
   - 签名：`def main():`
   - 文件末尾必须包含 `if __name__ == '__main__': main()`
@@ -60,7 +60,7 @@
     ```
     → 预期：退出码 0，显示 "学习工作区前端展示面板" 和 "计划展示CLI命令" 的卡片，含目标和进度
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   ```bash
   git add .omp/skills/executing-plans/scripts/plan-active.py
   git commit -m "feat: add plan-active.py — rich multi-line active plan listing"
@@ -74,7 +74,7 @@
 **Files:**
 - Create: `.omp/skills/executing-plans/scripts/plan-completed.py`
 
-- [ ] **Step 1: 实现 plan-completed.py**
+- [x] **Step 1: 实现 plan-completed.py**
   - 文件：`.omp/skills/executing-plans/scripts/plan-completed.py`
   - 签名：`def main():`
   - 文件末尾必须包含 `if __name__ == '__main__': main()`
@@ -108,7 +108,7 @@
     ```
     → 预期：退出码 0，显示 "exec-plan任务文件拆分" 及完成日期和摘要
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   ```bash
   git add .omp/skills/executing-plans/scripts/plan-completed.py
   git commit -m "feat: add plan-completed.py — rich multi-line completed plan listing"
@@ -122,7 +122,7 @@
 **Files:**
 - Create: `.omp/skills/executing-plans/scripts/plan-detail.py`
 
-- [ ] **Step 1: 实现 plan-detail.py**
+- [x] **Step 1: 实现 plan-detail.py**
   - 文件：`.omp/skills/executing-plans/scripts/plan-detail.py`
   - 签名：`def main():`
   - 文件末尾必须包含 `if __name__ == '__main__': main()`
@@ -188,7 +188,7 @@
     ```
     → 预期：退出码 0，显示 5 段详细信息，含 8 个功能点状态和 8 个 Task 进度
 
-- [ ] **Step 2: Commit**
+- [x] **Step 2: Commit**
   ```bash
   git add .omp/skills/executing-plans/scripts/plan-detail.py
   git commit -m "feat: add plan-detail.py — detailed single-plan status view"
@@ -199,7 +199,7 @@
 
 ## Task 4: 修复存量 bug + 端到端验证
 
-- [ ] **Step 0: 修复 plan-status.py 的 re import bug**
+- [x] **Step 0: 修复 plan-status.py 的 re import bug**
   - 文件：`.omp/skills/executing-plans/scripts/plan-status.py`
   - 问题：第 77-78 行在 `import re`（第 88 行）之前使用 `re.findall`，导致含 tasks/ 目录的 FULL 计划统计崩溃
   - 修复：在文件顶部（其他 import 之后）添加 `import re`
@@ -209,38 +209,38 @@
     ```
     → 预期：退出码 0，输出与修复前一致（不再报 NameError）
 
-- [ ] **Step 1: 运行 plan-active.py**
+- [x] **Step 1: 运行 plan-active.py**
   ```bash
   python .omp/skills/executing-plans/scripts/plan-active.py
   ```
   - 验证：退出码 0，输出包含 "学习工作区前端展示面板" 和 "计划展示CLI命令" 的卡片
 
-- [ ] **Step 2: 运行 plan-completed.py**
+- [x] **Step 2: 运行 plan-completed.py**
   ```bash
   python .omp/skills/executing-plans/scripts/plan-completed.py
   ```
   - 验证：退出码 0，输出包含 "exec-plan任务文件拆分" 的卡片
 
-- [ ] **Step 3: 运行 plan-detail.py（活跃计划 + 已完成计划）**
+- [x] **Step 3: 运行 plan-detail.py（活跃计划 + 已完成计划）**
   ```bash
   python .omp/skills/executing-plans/scripts/plan-detail.py "学习工作区前端展示面板"
   python .omp/skills/executing-plans/scripts/plan-detail.py "exec-plan任务文件拆分"
   ```
   - 验证：两次均退出码 0，分别显示活跃和已完成计划的 5 段详细信息
 
-- [ ] **Step 4: 测试错误路径**
+- [x] **Step 4: 测试错误路径**
   ```bash
   python .omp/skills/executing-plans/scripts/plan-detail.py "不存在的计划"
   ```
   - 验证：退出码非 0，输出 "未找到计划: 不存在的计划"
 
-- [ ] **Step 5: 确认 plan-status.py 行为不变**
+- [x] **Step 5: 确认 plan-status.py 行为不变**
   ```bash
   python .omp/skills/executing-plans/scripts/plan-status.py
   ```
   - 验证：退出码 0，输出格式与修复前一致（仅不再因 re import 崩溃）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
   ```bash
   git add .omp/skills/executing-plans/scripts/
   git commit -m "chore: end-to-end verification of plan display scripts, fix plan-status.py re import bug"
@@ -263,14 +263,14 @@
 
 ## 验收标准
 
-- [ ] `plan-active.py` 输出所有活跃计划，每个卡片含目标摘要、10 格进度条、任务状态
-- [ ] `plan-completed.py` 输出所有已完成计划，每个卡片含完成日期和摘要
-- [ ] `plan-detail.py <name>` 输出指定计划的 5 段详细信息
-- [ ] `plan-detail.py "不存在的计划"` 返回非 0 退出码并输出错误信息
-- [ ] 三个脚本均在 Windows 终端正确输出 UTF-8 字符（含 box-drawing）；非 UTF-8 终端不崩溃
-- [ ] `plan-status.py` 修复 re import bug 后行为不变
-- [ ] 所有 feature-list.json 中 `passes` 为 `true`
-- [ ] 边界情况全部覆盖：无活跃计划、无已完成计划、空 feature-list.json、缺失 progress.txt、缺失 exec-plan.md、PLAN_COMPLETED.md-only 匹配、除零保护
+- [x] `plan-active.py` 输出所有活跃计划，每个卡片含目标摘要、10 格进度条、任务状态
+- [x] `plan-completed.py` 输出所有已完成计划，每个卡片含完成日期和摘要
+- [x] `plan-detail.py <name>` 输出指定计划的 5 段详细信息
+- [x] `plan-detail.py "不存在的计划"` 返回非 0 退出码并输出错误信息
+- [x] 三个脚本均在 Windows 终端正确输出 UTF-8 字符（含 box-drawing）；非 UTF-8 终端不崩溃
+- [x] `plan-status.py` 修复 re import bug 后行为不变
+- [x] 所有 feature-list.json 中 `passes` 为 `true`
+- [x] 边界情况全部覆盖：无活跃计划、无已完成计划、空 feature-list.json、缺失 progress.txt、缺失 exec-plan.md、PLAN_COMPLETED.md-only 匹配、除零保护
 
 ---
 
