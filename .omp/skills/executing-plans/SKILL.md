@@ -307,3 +307,19 @@ python scripts/plan-status.py
 Subagent 模式需平台支持（Claude Code / Codex / pi 均可）。
 
 所有脚本使用 Python 标准库。
+
+## 故障排查
+
+### `plan-status.py` 显示已归档的计划仍为活跃
+
+**症状：** `plan-status.py` 列出了已通过 `plan-complete.py` 归档的计划，显示为 `[IN_PROGRESS] 0/0`。
+
+**原因：** Windows 下 `shutil.move` 可能因 `.gitkeep` 或文件锁定残留空目录。
+
+**修复：**
+```bash
+# 手动清理残留的空目录
+rmdir "docs/exec-plans/active/<计划名称>"
+```
+
+`plan-complete.py` 现已包含自动清理回退逻辑（v2026-05-25+）。

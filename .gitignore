@@ -3,3 +3,6 @@
 
 # Temp files
 CLAUDE_TEMP.md
+
+# Python cache
+__pycache__/

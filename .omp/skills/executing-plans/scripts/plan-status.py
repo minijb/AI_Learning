@@ -45,6 +45,11 @@ def main():
         plan_name = item.stem if item.is_file() else item.name
 
         if item.is_dir():
+            # Skip stale/empty plan directories missing required files
+            has_exec = (item / "exec-plan.md").exists()
+            has_features = (item / "feature-list.json").exists()
+            if not has_exec and not has_features:
+                continue
             type_mark = "[FULL]"
             summary = get_progress_summary(item)
             done_count = summary["done"]

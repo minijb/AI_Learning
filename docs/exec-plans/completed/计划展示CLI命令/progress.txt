@@ -1,7 +1,7 @@
 # Progress: 计划展示CLI命令
 # 创建于: 2026-05-24
 
-状态: DONE
+状态: COMPLETED
 最后更新: 2026-05-25
 
 - [x] Task 1 — 实现 plan-active.py [DONE]
@@ -10,3 +10,5 @@
 - [x] Task 4 — 修复存量 bug + 端到端验证 [DONE]
 
 阻塞项: 无
+
+完成日期: 2026-05-25

@@ -107,6 +107,15 @@ def main():
         dest = completed_dir / new_name
 
     shutil.move(str(plan_path), str(dest))
+    # Cleanup: remove empty directory if shutil.move left residue (e.g. Windows .gitkeep)
+    if plan_path.exists():
+        try:
+            if plan_path.is_dir():
+                shutil.rmtree(str(plan_path), ignore_errors=True)
+            else:
+                plan_path.unlink(missing_ok=True)
+        except Exception:
+            pass
     info(f"计划已归档到: {dest}")
 
     # 迁移 INDEX 条目: PLAN.md → PLAN_COMPLETED.md
