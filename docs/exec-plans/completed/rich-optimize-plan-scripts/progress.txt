@@ -1,0 +1,19 @@
+# Progress: rich-optimize-plan-scripts
+# 创建于: 2026-05-25
+
+状态: DONE
+最后更新: 2026-05-25
+
+步骤进度:
+- [x] Task 1 — 升级 `_planning_common.py` — 共享 Rich Console 和样式 [DONE]
+- [x] Task 2 — 重写 `plan-status.py` — 表格化输出 [DONE]
+- [x] Task 3 — 重写 `plan-active.py` — Panel 卡片 [DONE]
+- [x] Task 4 — 重写 `plan-detail.py` — 分区 Panel [DONE]
+- [x] Task 5 — 重写 `plan-completed.py` — Panel 卡片 [DONE]
+- [x] Task 6 — 重写 `plan-complete.py` — 样式化流程输出 [DONE]
+- [x] Task 7 — 重写 `plan-cleanup.py` — 表格化清理预览 [DONE]
+- [x] Task 8 — 重写 `plan-validate.py` — 分区错误输出 [DONE]
+- [x] Task 9 — 重写 `plan-search.py` — 表格化搜索结果 [DONE]
+- [x] Task 10 — 重写 `plan-new.py` — 样式化创建确认 [DONE]
+
+阻塞项: 无

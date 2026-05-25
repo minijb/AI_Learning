@@ -1,0 +1,23 @@
+{
+  "skill_name": "textual-output",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "写一个终端应用，显示歌曲列表（数据：[{name:'晴天', artist:'周杰伦', duration:'4:30'}, {name:'七里香', artist:'周杰伦', duration:'4:58'}, ...]共6首）。用户用键盘上下键选择歌曲，回车查看详情弹窗。要有顶栏标题和底栏快捷键提示。",
+      "expected_output": "A Textual app with ListView/DataTable for song list, detail popup on selection, Header and Footer widgets.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "做一个终端里的系统监控面板：左侧显示CPU使用率（数字+进度条），右侧显示内存使用率（数字+进度条）。数据每1秒刷新一次。用Textual实现。",
+      "expected_output": "A Textual app with reactive CPU/memory display using ProgressBar or custom widgets, updating via set_interval.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "写一个终端里的用户注册表单。让用户输入：用户名、邮箱、选择部门（技术部/市场部/人事部 下拉选择），然后点'提交'按钮。提交后显示确认信息。用Textual实现。",
+      "expected_output": "A Textual app with Input widgets, Select dropdown, Button, and form submission flow with confirmation.",
+      "files": []
+    }
+  ]
+}

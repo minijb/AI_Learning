@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-plan-new.py — 创建新执行计划（跨平台 Python）
+plan-new.py — 创建新执行计划
 用法: python plan-new.py --quick '计划名称'
        python plan-new.py --full '计划名称'
 """
@@ -10,17 +10,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Windows terminal UTF-8 support
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-
 sys.path.insert(0, str(Path(__file__).parent))
 from common import (
     add_to_plan_index, copy_plan_template, error_exit, get_env, info,
-    init_index_files, sanitize_name,
+    init_index_files, sanitize_name, get_console,
 )
+from rich.tree import Tree
+from rich.panel import Panel
+from rich.text import Text
 
 
 def main():
@@ -34,10 +31,10 @@ def main():
     args = parser.parse_args()
 
     env = get_env()
+    console = get_console()
     date_str = datetime.now().strftime("%Y-%m-%d")
     safe_name = sanitize_name(args.name)
 
-    # 初始化 INDEX 文件和 tech-debt-tracker
     init_index_files()
     tech_debt_file = env.plans_dir / "tech-debt-tracker.md"
     if not tech_debt_file.exists():
@@ -62,14 +59,15 @@ def main():
         content = content.replace("[日期]", date_str)
         plan_file.write_text(content, encoding="utf-8")
 
-        info(f"轻量计划已创建: {plan_file}")
+        console.print(f"[success]✓[/success] 轻量计划已创建: [plan.name]{plan_file.name}[/plan.name]")
 
-        # 更新 PLAN.md 索引
         plan_type = "QUICK"
         summary = args.summary if args.summary else args.name
         add_to_plan_index(safe_name, plan_type, summary, args.depends)
 
-        info("下一步: 编辑计划文件，填充验收标准和步骤")
+        console.print()
+        console.print("[highlight]下一步:[/highlight]")
+        console.print("  编辑计划文件，填充验收标准和步骤")
     else:
         plan_dir = env.active_dir / safe_name
         if plan_dir.exists():
@@ -80,7 +78,6 @@ def main():
         copy_plan_template("feature-list.json", plan_dir / "feature-list.json")
         copy_plan_template("memory.md", plan_dir / "memory.md")
 
-        # 替换占位符
         exec_plan = plan_dir / "exec-plan.md"
         exec_plan.write_text(
             exec_plan.read_text(encoding="utf-8")
@@ -95,7 +92,6 @@ def main():
             encoding="utf-8",
         )
 
-        # 创建 progress.txt
         progress = plan_dir / "progress.txt"
         progress.write_text(
             f"# Progress: {args.name}\n"
@@ -110,22 +106,25 @@ def main():
             encoding="utf-8",
         )
 
-        info(f"完整执行计划已创建: {plan_dir}/")
-        info("文件:")
-        info("  - exec-plan.md       (填充技术方案和步骤)")
-        info("  - feature-list.json  (定义功能点，只允许修改 passes)")
-        info("  - memory.md          (记录关键工件和决策)")
-        info("  - progress.txt       (执行时更新进度)")
+        console.print(f"[success]✓[/success] 完整执行计划已创建: [plan.name]{plan_dir.name}/[/plan.name]")
 
-        # 更新 PLAN.md 索引
+        # File tree
+        tree = Tree("", style="muted")
+        tree.add("[bold]exec-plan.md[/bold]     填充技术方案和步骤")
+        tree.add("[bold]feature-list.json[/bold] 定义功能点，只允许修改 passes")
+        tree.add("[bold]memory.md[/bold]        记录关键工件和决策")
+        tree.add("[bold]progress.txt[/bold]     执行时更新进度")
+        console.print(Panel(tree, title="创建的文件", title_align="left", border_style="muted"))
+        console.print()
+
         plan_type = "FULL"
         summary = args.summary if args.summary else args.name
         add_to_plan_index(safe_name, plan_type, summary, args.depends)
 
-        info("下一步:")
-        info("  1. 编辑 exec-plan.md 填充具体方案")
-        info("  2. 编辑 feature-list.json 定义功能点")
-        info(f"  3. 运行 plan-validate.py '{safe_name}' 验证计划完整性")
+        console.print("[highlight]下一步:[/highlight]")
+        console.print("  1. 编辑 [bold]exec-plan.md[/bold] 填充具体方案")
+        console.print("  2. 编辑 [bold]feature-list.json[/bold] 定义功能点")
+        console.print(f"  3. 运行 [bold]plan-validate.py '{safe_name}'[/bold] 验证计划完整性")
 
 
 if __name__ == "__main__":

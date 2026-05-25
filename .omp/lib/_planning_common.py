@@ -15,6 +15,57 @@ import subprocess
 import sys
 from pathlib import Path
 
+import shutil
+from typing import Optional
+
+# Rich — terminal beautification
+from rich.console import Console
+from rich.theme import Theme
+from rich.panel import Panel
+from rich.table import Table
+from rich.tree import Tree
+from rich import box
+
+_PLAN_THEME = Theme({
+    "info": "dim cyan",
+    "warn": "yellow",
+    "error": "bold red",
+    "success": "bold green",
+    "plan.name": "bold cyan",
+    "plan.status.done": "bold green",
+    "plan.status.blocked": "bold red",
+    "plan.status.progress": "bold yellow",
+    "plan.status.pending": "dim",
+    "plan.type": "bold magenta",
+    "progress.bar.complete": "green",
+    "progress.bar.incomplete": "dim",
+    "heading": "bold underline",
+    "muted": "dim",
+    "highlight": "bold",
+})
+
+_console: Optional[Console] = None
+
+
+def get_console() -> Console:
+    global _console
+    if _console is None:
+        # Ensure UTF-8 output on Windows
+        if sys.platform == "win32":
+            for stream in (sys.stdout, sys.stderr):
+                if hasattr(stream, "reconfigure"):
+                    try:
+                        stream.reconfigure(encoding="utf-8")
+                    except Exception:
+                        pass
+        # force_terminal + legacy_windows=False avoids GBK codec issues on Windows
+        _console = Console(
+            theme=_PLAN_THEME,
+            highlight=False,
+            force_terminal=True,
+            legacy_windows=False,
+        )
+    return _console
 
 
 
@@ -76,17 +127,17 @@ def get_env() -> PlanningEnv:
 # ============================================================
 
 def info(msg: str):
-    print(f"[INFO] {msg}")
+    get_console().print(f"[info]▸[/info] {msg}")
 
 
 def warn(msg: str):
-    print(f"[WARN] {msg}")
+    get_console().print(f"[warn]⚠[/warn] {msg}")
 
 
 def error(msg: str, fix: str = ""):
-    print(f"[ERROR] {msg}", file=sys.stderr)
+    get_console().print(f"[error]✗[/error] {msg}")
     if fix:
-        print(f"  → 修复: {fix}", file=sys.stderr)
+        get_console().print(f"  [muted]→ 修复:[/muted] {fix}")
 
 
 def error_exit(msg: str, fix: str = ""):
@@ -193,6 +244,88 @@ def get_progress_summary(plan_dir: Path | str) -> dict:
 
     return summary
 
+
+# ============================================================
+# Shared Helpers (used by multiple plan scripts)
+# ============================================================
+
+def read_file_safe(path: Path) -> Optional[str]:
+    """Read a text file, returning None on any error (missing, encoding, etc.)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def extract_goal(content: str, max_len: int = 120) -> str:
+    """Extract the **Goal:** line from an exec-plan.md or quick-plan."""
+    m = re.search(r'\*\*Goal:\*\*\s*(.+)$', content, re.M)
+    if m:
+        goal = m.group(1).strip()
+        return goal[:max_len]
+    return "（无目标摘要）"
+
+
+def extract_task_titles(content: str) -> list[str]:
+    """Parse ## Task N: titles from exec-plan.md content.
+
+    Returns labels like 'Task 1 — Description' or just 'Task 1'.
+    """
+    tasks = []
+    for m in re.finditer(r'^##\s+(Task\s+\d+)[ :]', content, re.M):
+        label = m.group(1)
+        line_end = content.find('\n', m.end())
+        if line_end == -1:
+            line_end = len(content)
+        rest = content[m.end():line_end].strip()
+        desc = re.sub(r'^[—：:]\s*', '', rest)
+        if desc:
+            label = f"{label} — {desc}"
+        tasks.append(label)
+    return tasks
+
+
+def extract_blocked_lines(progress_content: str) -> list[str]:
+    """Extract lines with [BLOCKED] from progress.txt."""
+    blocked = []
+    for line in progress_content.splitlines():
+        stripped = line.strip()
+        if re.match(r'^-\s*\[[ x]\]', stripped) and '[BLOCKED]' in stripped:
+            blocked.append(stripped)
+    return blocked
+
+
+def parse_task_checkboxes(progress_content: str) -> dict[str, bool]:
+    """Parse - [x]/- [ ] lines from progress.txt, return {task_label: done}."""
+    status: dict[str, bool] = {}
+    for line in progress_content.splitlines():
+        m = re.match(r'^-\s*\[([ x])\]\s+(.+)', line)
+        if m:
+            status[m.group(2).strip()] = m.group(1) == 'x'
+    return status
+
+
+def render_progress_bar(done: int, total: int, width: int = 10) -> str:
+    """Render a Rich-markup progress bar string like '[green]████[/green][dim]░░[/dim]'.
+
+    Returns a string safe for use inside Rich markup.
+    """
+    if total <= 0:
+        return f"[muted]{'░' * width}[/muted]"
+    pct = done * 100 // total
+    filled = max(1, pct * width // 100) if pct > 0 else 0
+    bar = ('█' * filled + '░' * (width - filled))
+    return f"[progress.bar.complete]{bar[:filled]}[/progress.bar.complete]" \
+           f"[progress.bar.incomplete]{bar[filled:]}[/progress.bar.incomplete]"
+
+
+# Compatibility aliases for scripts that defined these locally
+_read_file_safe = read_file_safe
+_extract_goal = extract_goal
+_extract_task_titles = extract_task_titles
+_extract_blocked_lines = extract_blocked_lines
+_parse_task_checkboxes = parse_task_checkboxes
+_render_progress_bar = render_progress_bar
 
 # ============================================================
 # Index File Operations (PLAN.md / PLAN_COMPLETED.md)

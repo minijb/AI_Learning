@@ -1,0 +1,23 @@
+{
+  "skill_name": "rich-output",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "我有一个学生成绩CSV文件（columns: 姓名,语文,数学,英语），帮我写一个Python脚本用好看的表格把数据展示出来。要求：表格要有标题、不同列用不同对齐方式、用颜色标记出不及格（<60）的分数。",
+      "expected_output": "A Python script using Rich Table with title, column alignment, color markup for failing scores.",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "写个Python脚本，模拟批量下载5个文件（每个用time.sleep模拟耗时），用Rich的进度条显示整体进度和当前正在处理的文件名。下载完成后打印一个汇总表格，列出每个文件的下载状态（成功/失败）。",
+      "expected_output": "A Python script using Rich Progress bar and Table for summary, tracking per-file status.",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "帮我封装一个日志工具类，用Rich的Console实现：INFO用蓝色、WARNING用黄色、ERROR用红色加粗。同时要有自动美化traceback的能力。给一个使用示例。",
+      "expected_output": "A Python script with a logger class using Rich Console with themed styles and traceback installation.",
+      "files": []
+    }
+  ]
+}

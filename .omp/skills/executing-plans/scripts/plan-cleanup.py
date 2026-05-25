@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-plan-cleanup.py — 清理计划文件（跨平台 Python）
+plan-cleanup.py — 清理计划文件
 用法: python plan-cleanup.py --all --what-if
 """
 
@@ -11,20 +11,22 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Windows terminal UTF-8 support
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-
 sys.path.insert(0, str(Path(__file__).parent))
-from common import error, error_exit, get_env, info, read_plan_json, warn
+from common import error, error_exit, get_env, info, read_plan_json, warn, get_console
+from rich.table import Table
+from rich import box
 
 
 def cleanup_completed(completed_dir: Path, days: int, what_if: bool, force: bool) -> int:
+    console = get_console()
     deleted = 0
-    found = False
+    found_any = False
     cutoff = datetime.now(timezone.utc).timestamp() - days * 86400
+
+    table = Table(title=f"旧归档清理（>{days}天）", box=box.SIMPLE, padding=(0, 1))
+    table.add_column("计划", style="plan.name")
+    table.add_column("天数前", justify="right")
+    table.add_column("操作", style="muted")
 
     for item in completed_dir.iterdir():
         if item.name == ".gitkeep":
@@ -34,10 +36,10 @@ def cleanup_completed(completed_dir: Path, days: int, what_if: bool, force: bool
         except OSError:
             continue
         if mtime < cutoff:
-            found = True
+            found_any = True
             age_days = int((datetime.now(timezone.utc).timestamp() - mtime) / 86400)
-            prefix = "[WHATIF] " if what_if else ""
-            print(f"{prefix}{item.name:<50} {age_days}天前")
+            action = "[muted]预览[/muted]" if what_if else "[error]删除[/error]"
+            table.add_row(item.name, str(age_days), action)
             if not what_if:
                 if item.is_dir():
                     shutil.rmtree(item)
@@ -45,45 +47,59 @@ def cleanup_completed(completed_dir: Path, days: int, what_if: bool, force: bool
                     item.unlink()
                 deleted += 1
 
-    if not found:
-        info(f"completed/ 中没有超过 {days} 天的文件。")
+    if found_any:
+        console.print(table)
+    else:
+        console.print(f"[info]▸[/info] completed/ 中没有超过 {days} 天的文件。")
     return deleted
 
 
 def cleanup_orphaned(completed_dir: Path, what_if: bool) -> int:
+    console = get_console()
     deleted = 0
-    found = False
     if not completed_dir.exists():
-        info("没有 summary 文件需要清理。")
+        console.print("[info]▸[/info] 没有 summary 文件需要清理。")
         return deleted
 
     summaries = [p for p in completed_dir.iterdir() if p.name.endswith("-summary.txt")]
     if not summaries:
-        info("没有 summary 文件需要清理。")
+        console.print("[info]▸[/info] 没有 summary 文件需要清理。")
         return deleted
+
+    found_any = False
+    table = Table(title="孤立 Summary 清理", box=box.SIMPLE, padding=(0, 1))
+    table.add_column("文件")
+    table.add_column("操作", style="muted")
 
     for s in summaries:
         base = s.stem.replace("-summary", "")
         has_plan = (completed_dir / f"{base}.md").exists() or (completed_dir / base).is_dir()
         if not has_plan:
-            found = True
-            prefix = "[WHATIF] " if what_if else ""
-            print(f"{prefix}{s.name}")
+            found_any = True
+            action = "[muted]预览[/muted]" if what_if else "[error]删除[/error]"
+            table.add_row(s.name, action)
             if not what_if:
                 s.unlink()
                 deleted += 1
 
-    if not found:
-        info("没有孤立的 summary 文件。")
+    if found_any:
+        console.print(table)
+    else:
+        console.print("[info]▸[/info] 没有孤立的 summary 文件。")
     return deleted
 
 
 def cleanup_empty(active_dir: Path, what_if: bool) -> int:
+    console = get_console()
     deleted = 0
-    found = False
     if not active_dir.exists():
-        info("active/ 中没有未开始的计划。")
+        console.print("[info]▸[/info] active/ 中没有未开始的计划。")
         return deleted
+
+    found_any = False
+    table = Table(title="空计划清理（未开始 / 0%）", box=box.SIMPLE, padding=(0, 1))
+    table.add_column("计划", style="plan.name")
+    table.add_column("操作", style="muted")
 
     for item in active_dir.iterdir():
         if item.name == ".gitkeep":
@@ -117,9 +133,9 @@ def cleanup_empty(active_dir: Path, what_if: bool) -> int:
                 is_empty = True
 
         if is_empty:
-            found = True
-            prefix = "[WHATIF] " if what_if else ""
-            print(f"{prefix}{item.name}")
+            found_any = True
+            action = "[muted]预览[/muted]" if what_if else "[error]删除[/error]"
+            table.add_row(item.name, action)
             if not what_if:
                 if item.is_dir():
                     shutil.rmtree(item)
@@ -127,8 +143,10 @@ def cleanup_empty(active_dir: Path, what_if: bool) -> int:
                     item.unlink()
                 deleted += 1
 
-    if not found:
-        info("active/ 中没有未开始的计划。")
+    if found_any:
+        console.print(table)
+    else:
+        console.print("[info]▸[/info] active/ 中没有未开始的计划。")
     return deleted
 
 
@@ -144,6 +162,7 @@ def main():
     args = parser.parse_args()
 
     env = get_env()
+    console = get_console()
 
     flag_completed = args.completed or args.all
     flag_orphaned = args.orphaned or args.all
@@ -156,39 +175,39 @@ def main():
         )
 
     if not args.force and not args.what_if:
-        print("即将执行以下清理操作:")
+        ops = []
         if flag_completed:
-            print(f"  - 清理 {args.days}天前的归档")
+            ops.append(f"清理 {args.days}天前的归档")
         if flag_orphaned:
-            print("  - 清理孤立 summary")
+            ops.append("清理孤立 summary")
         if flag_empty:
-            print("  - 清理未开始的活跃计划")
+            ops.append("清理未开始的活跃计划")
+        console.print("[warn]即将执行以下清理操作:[/warn]")
+        for op in ops:
+            console.print(f"  - {op}")
         confirm = input("继续? (y/N): ").strip().lower()
         if confirm != "y":
-            print("已取消。")
+            console.print("已取消。")
             return
 
     deleted_total = 0
     if flag_completed:
-        print()
-        print(f"===== 旧归档清理（>{args.days}天） =====")
+        console.print()
         deleted_total += cleanup_completed(env.completed_dir, args.days, args.what_if, args.force)
 
     if flag_orphaned:
-        print()
-        print("===== 孤立 Summary 清理 =====")
+        console.print()
         deleted_total += cleanup_orphaned(env.completed_dir, args.what_if)
 
     if flag_empty:
-        print()
-        print("===== 空计划清理（未开始 / 0%） =====")
+        console.print()
         deleted_total += cleanup_empty(env.active_dir, args.what_if)
 
-    print()
+    console.print()
     if args.what_if:
         info("本次为预览模式，未执行任何删除。")
     else:
-        info(f"清理完成。删除了 {deleted_total} 个项目。")
+        console.print(f"[success]✓[/success] 清理完成。删除了 {deleted_total} 个项目。")
 
 
 if __name__ == "__main__":

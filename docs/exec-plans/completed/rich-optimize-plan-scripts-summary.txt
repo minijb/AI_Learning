@@ -1,0 +1,13 @@
+计划: rich-optimize-plan-scripts
+完成日期: 2026-05-26
+归档时间: 2026-05-26T00:38:47
+
+功能点完成情况:
+  [x] F1: 共享 Rich 基础设施 — _planning_common.py 提供 Console/Theme/get_console/info/warn/error/error_exit/_read_file_safe/_extract_goal
+  [x] F2: 表格化输出 — plan-status.py 和 plan-search.py 使用 rich.table.Table
+  [x] F3: Panel 卡片输出 — plan-active.py / plan-detail.py / plan-completed.py 使用 rich.panel.Panel
+  [x] F4: 样式化流程输出 — plan-complete.py / plan-cleanup.py / plan-validate.py / plan-new.py 通过共享库自动获 Rich 样式
+  [x] F5: 管道/重定向时自动降级为纯文本，无 ANSI 乱码
+  [x] F6: 所有脚本不再有手动 box-drawing 代码（╭╰├─ 等 Unicode 字符）
+  [x] F7: 所有脚本不再有手动 UTF-8 设置代码（sys.stdout.reconfigure / PYTHONIOENCODING）
+  [x] F8: 端到端验证 — 所有 plan 脚本正常运行且输出正确

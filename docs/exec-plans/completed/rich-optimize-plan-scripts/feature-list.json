@@ -1,0 +1,107 @@
+{
+  "_schema": "1.0",
+  "_护栏规则": [
+    "智能体在执行过程中只能修改每个 feature 的 'passes' 字段（true/false）",
+    "如需修改 id、category、description、steps，必须由人类编辑此文件",
+    "plan-validate 会检查 JSON 结构、必填字段和占位符，但不会对比历史版本"
+  ],
+  "features": [
+    {
+      "id": "F1",
+      "category": "核心功能",
+      "description": "共享 Rich 基础设施 — _planning_common.py 提供 Console/Theme/get_console/info/warn/error/error_exit/_read_file_safe/_extract_goal",
+      "steps": [
+        "定义 Theme（info: dim cyan, warning: yellow, danger: bold red, success: green）",
+        "创建全局 Console 实例 get_console()",
+        "重写 info/warn/error/error_exit 使用 Rich 样式",
+        "添加 _read_file_safe() 到共享库",
+        "添加 _extract_goal() 到共享库",
+        "消除 Windows UTF-8 设置代码",
+        "验证：所有现有脚本导入新共享库无报错"
+      ],
+      "passes": true
+    },
+    {
+      "id": "F2",
+      "category": "核心功能",
+      "description": "表格化输出 — plan-status.py 和 plan-search.py 使用 rich.table.Table",
+      "steps": [
+        "plan-status.py: Table 替代固定列宽 print，进度百分比彩色文本，汇总行 Panel 包裹",
+        "plan-search.py: Table 替代手动格式化 print",
+        "验证：python plan-status.py → 结构化表格，管道输出降级为纯文本"
+      ],
+      "passes": true
+    },
+    {
+      "id": "F3",
+      "category": "核心功能",
+      "description": "Panel 卡片输出 — plan-active.py / plan-detail.py / plan-completed.py 使用 rich.panel.Panel",
+      "steps": [
+        "plan-active.py: Panel 替代手动 Unicode box-drawing，进度条用 Rich renderable bar，任务状态用 Tree",
+        "plan-detail.py: 概览/功能点/任务进度/阻塞项/文件清单各用 Panel 包裹，功能点表格用 Table，文件清单用 Tree",
+        "plan-completed.py: 同 plan-active.py 模式，Panel 卡片",
+        "验证：python plan-active.py → Rich Panel 卡片，无手动 box-drawing 字符"
+      ],
+      "passes": true
+    },
+    {
+      "id": "F4",
+      "category": "核心功能",
+      "description": "样式化流程输出 — plan-complete.py / plan-cleanup.py / plan-validate.py / plan-new.py 通过共享库自动获 Rich 样式",
+      "steps": [
+        "plan-complete.py: info/warn 通过 _planning_common.py 自动 Rich 样式",
+        "plan-cleanup.py: 清理预览 Table 展示，info/warn Rich 样式",
+        "plan-validate.py: 错误/警告分组 Panel，info/warn Rich 样式",
+        "plan-new.py: info Rich 样式，文件清单用 Tree",
+        "验证：python plan-validate.py <path> → 错误用 Panel 分区展示"
+      ],
+      "passes": true
+    },
+    {
+      "id": "F5",
+      "category": "边界处理",
+      "description": "管道/重定向时自动降级为纯文本，无 ANSI 乱码",
+      "steps": [
+        "验证：python plan-status.py | cat → 纯文本表格，无 ANSI 转义序列",
+        "验证：python plan-active.py > /dev/null → 不报错"
+      ],
+      "passes": true
+    },
+    {
+      "id": "F6",
+      "category": "集成验证",
+      "description": "所有脚本不再有手动 box-drawing 代码（╭╰├─ 等 Unicode 字符）",
+      "steps": [
+        "搜索所有 plan-*.py 中的 Unicode box-drawing 字符，确认已由 Rich 替代"
+      ],
+      "passes": true
+    },
+    {
+      "id": "F7",
+      "category": "集成验证",
+      "description": "所有脚本不再有手动 UTF-8 设置代码（sys.stdout.reconfigure / PYTHONIOENCODING）",
+      "steps": [
+        "搜索所有 plan-*.py 中的 UTF-8 设置代码，确认已消除"
+      ],
+      "passes": true
+    },
+    {
+      "id": "F8",
+      "category": "集成验证",
+      "description": "端到端验证 — 所有 plan 脚本正常运行且输出正确",
+      "steps": [
+        "python plan-status.py → 结构化表格",
+        "python plan-active.py → Rich Panel 卡片",
+        "python plan-detail.py <name> → 分区 Panel",
+        "python plan-completed.py → Rich Panel 卡片",
+        "python plan-search.py <keyword> → Table 结果",
+        "python plan-validate.py <path> → Panel 分区错误",
+        "python plan-new.py --full 'test' → 样式化确认，然后删除测试计划",
+        "python plan-complete.py --help → Rich 样式帮助",
+        "python plan-cleanup.py --all --what-if → Table 预览",
+        "所有脚本管道输出降级为纯文本无乱码"
+      ],
+      "passes": true
+    }
+  ]
+}

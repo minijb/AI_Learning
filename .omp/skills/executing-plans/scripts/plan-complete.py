@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-plan-complete.py — 标记计划完成并归档（跨平台 Python）
+plan-complete.py — 标记计划完成并归档
 用法: python plan-complete.py '计划名称'
 """
 
@@ -11,25 +11,21 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Windows terminal UTF-8 support
-if sys.platform == "win32":
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-        sys.stderr.reconfigure(encoding="utf-8")
-
 sys.path.insert(0, str(Path(__file__).parent))
-from common import error, error_exit, get_env, info, move_to_completed_index, read_plan_json, warn
+from common import error, error_exit, get_env, info, move_to_completed_index, read_plan_json, warn, get_console
+from rich.table import Table
+from rich.panel import Panel
+from rich.text import Text
 
 
-def find_plan(active_dir: Path, plan_name: str) -> Path:
+def find_plan(active_dir: Path, plan_name: str):
+    console = get_console()
     exact = active_dir / plan_name
     if exact.exists():
         return exact
 
-    # 模糊匹配目录
     matches = [p for p in active_dir.iterdir() if p.is_dir() and p.name.startswith(plan_name)]
     if not matches:
-        # 模糊匹配文件
         matches = [p for p in active_dir.iterdir() if p.is_file() and p.name.startswith(plan_name) and p.suffix == ".md"]
 
     if len(matches) == 0:
@@ -38,7 +34,7 @@ def find_plan(active_dir: Path, plan_name: str) -> Path:
         error("找到多个匹配计划:")
         for m in matches:
             kind = "[DIR]" if m.is_dir() else "[FILE]"
-            print(f"  - {kind} {m.name}")
+            console.print(f"  - [plan.type]{kind}[/plan.type] {m.name}")
         error_exit("", "使用更精确的名称。")
     return matches[0]
 
@@ -50,15 +46,21 @@ def main():
     args = parser.parse_args()
 
     env = get_env()
+    console = get_console()
     plan_path = find_plan(env.active_dir, args.name)
     base_name = plan_path.name
     completed_dir = env.completed_dir
     completed_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"计划: {base_name}")
-    print(f"路径: {plan_path}")
-    print(f"目标: {completed_dir / base_name}")
-    print()
+    # Info panel
+    info_table = Table.grid(padding=(0, 1))
+    info_table.add_column(style="muted", justify="right")
+    info_table.add_column()
+    info_table.add_row("计划:", f"[plan.name]{base_name}[/plan.name]")
+    info_table.add_row("路径:", str(plan_path))
+    info_table.add_row("目标:", str(completed_dir / base_name))
+    console.print(Panel(info_table, title="归档确认", title_align="left", border_style="muted"))
+    console.print()
 
     today = datetime.now().strftime("%Y-%m-%d")
 
@@ -74,7 +76,7 @@ def main():
                         warn(f"并非所有功能点都已完成 ({done_count}/{feat_count})")
                         confirm = input("  继续归档? (y/N): ").strip().lower()
                         if confirm != "y":
-                            print("已取消。")
+                            console.print("已取消。")
                             return
 
             progress_file = plan_path / "progress.txt"
@@ -90,12 +92,12 @@ def main():
                 warn("仍有未完成的步骤")
                 confirm = input("  继续归档? (y/N): ").strip().lower()
                 if confirm != "y":
-                    print("已取消。")
+                    console.print("已取消。")
                     return
             content = content.replace("| 计划完成 | [待填写]", f"| 计划完成 | {today}")
             plan_path.write_text(content, encoding="utf-8")
 
-    # 执行归档
+    # Execute archive
     dest = completed_dir / base_name
     if dest.exists():
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -107,7 +109,6 @@ def main():
         dest = completed_dir / new_name
 
     shutil.move(str(plan_path), str(dest))
-    # Cleanup: remove empty directory if shutil.move left residue (e.g. Windows .gitkeep)
     if plan_path.exists():
         try:
             if plan_path.is_dir():
@@ -116,18 +117,20 @@ def main():
                 plan_path.unlink(missing_ok=True)
         except Exception:
             pass
-    info(f"计划已归档到: {dest}")
 
-    # 迁移 INDEX 条目: PLAN.md → PLAN_COMPLETED.md
+    console.print(f"[success]✓[/success] 计划已归档到: {dest}")
+
+    # Migrate index entry
     base = Path(base_name)
-    plan_name = base.stem if base.suffix == ".md" else base.name
-    move_to_completed_index(plan_name, today)
+    plan_name_for_idx = base.stem if base.suffix == ".md" else base.name
+    move_to_completed_index(plan_name_for_idx, today)
 
-    # 生成摘要
+    # Generate summary
     summary_name = f"{Path(base_name).stem}-summary.txt"
     summary_file = completed_dir / summary_name
     try:
-        lines = [f"计划: {base_name}", f"完成日期: {today}", f"归档时间: {datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}", ""]
+        lines = [f"计划: {base_name}", f"完成日期: {today}",
+                 f"归档时间: {datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}", ""]
         if dest.is_dir():
             feature_file = dest / "feature-list.json"
             if feature_file.exists():
@@ -139,7 +142,7 @@ def main():
                         lines.append(f"  [{mark}] {f['id']}: {f['description']}")
         summary_file.write_text("\n".join(lines), encoding="utf-8")
     except Exception:
-        pass  # 摘要生成失败不影响主流程
+        pass
 
 
 if __name__ == "__main__":
