@@ -71,6 +71,9 @@ def main():
         sys.exit(0)
 
     items = [p for p in active_dir.iterdir() if p.name != ".gitkeep"]
+    # Filter out empty/stale directories (no recognizable plan files)
+    items = [p for p in items if not p.is_dir() or
+             any((p / f).exists() for f in ["exec-plan.md", "feature-list.json", "progress.txt"])]
     if not items:
         print("没有活跃计划。")
         sys.exit(0)

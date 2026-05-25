@@ -54,6 +54,9 @@ def _fuzzy_search(query: str, items: list[Path]) -> list[Path]:
 def _find_plan(plan_name: str, env) -> tuple[Path | None, str, str | None]:
     """Search active_dir then completed_dir. Returns (path, source, matched_name)."""
     items_active = [p for p in env.active_dir.iterdir() if p.name != ".gitkeep"] if env.active_dir.exists() else []
+    # Filter out empty/stale directories
+    items_active = [p for p in items_active if not p.is_dir() or
+                    any((p / f).exists() for f in ["exec-plan.md", "feature-list.json", "progress.txt"])]
     matches = _fuzzy_search(plan_name, items_active)
 
     if matches:
