@@ -213,6 +213,16 @@ def get_progress_summary(plan_dir: Path | str) -> dict:
     plan_dir = Path(plan_dir)
     summary = {"total": 0, "done": 0, "blocked": 0}
 
+    # QUICK plan: standalone .md file → parse checkbox lines directly
+    if plan_dir.is_file() and plan_dir.suffix == ".md":
+        import re as _re
+        content = plan_dir.read_text(encoding="utf-8")
+        summary["total"] = len(_re.findall(r'^- \[.\]', content, _re.M))
+        summary["done"] = len(_re.findall(r'^- \[x\]', content, _re.M))
+        summary["blocked"] = content.count("[BLOCKED]")
+        return summary
+
+    # FULL plan: directory with feature-list.json / progress.txt / tasks/
     feature_file = plan_dir / "feature-list.json"
     if feature_file.exists():
         data = read_plan_json(feature_file)
