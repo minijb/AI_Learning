@@ -550,116 +550,943 @@ ptr->~T();
 **引擎中的应用：池分配器**：
 
 ```cpp
+// ============================================================================
+// ObjectPool<T> — 固定容量、O(1) 分配/释放的对象池
+// ============================================================================
+// 设计目标:
+//   1. 避免每次分配都调用 malloc/new（系统调用开销 ~28ns/次）
+//   2. 保证所有对象在连续内存上（缓存友好，避免 TLB 抖动）
+//   3. acquire()/release() 都是 O(1)，无锁（单线程场景）
+//   4. 不限制 T 的类型——即使 T 不是 POD 也能正常工作
+//
+// 核心思路:
+//   - 构造函数一次性申请一大块原始内存（只分配，不构造对象）
+//   - 在这块内存上建立一个"侵入式空闲链表"
+//   - acquire() 从链表头取一个槽位 → placement new 构造对象 → 返回指针
+//   - release() 显式析构对象 → 把槽位插回链表头 → O(1)
+//
+// 侵入式链表的技巧（内存复用）:
+//   当一个槽位空闲时，它的 sizeof(T) 字节被解释为 T*（即链表指针）。
+//   前提: sizeof(T) >= sizeof(T*)，即 T 的大小至少能存下一个指针。
+//   如果 T 太小（如 char），这个实现会越界写——生产代码需要 static_assert。
+// ============================================================================
 template<typename T>
 class ObjectPool {
 public:
+    // ——————————————————————————————————————————————————————————————————
+    // 构造函数: 一次性分配 capacity 个 T 所需的连续原始内存
+    // ——————————————————————————————————————————————————————————————————
     explicit ObjectPool(size_t capacity) {
-        // 一次性分配原始内存（不构造对象）
+        // ——— 步骤 1: 分配对齐的原始内存（不构造任何 T 对象）———
+        //
+        // ::operator new[] 只分配内存，不调用构造函数。
+        // 与 new T[capacity] 的区别:
+        //   new T[capacity]  = ::operator new[](size) + 调用 T()  capacity 次
+        //   ::operator new[]  = 只做内存分配，返回 void* 指向未初始化的字节
+        //
+        // std::align_val_t{alignof(T)}:
+        //   C++17 对齐分配。如果 T 的对齐要求是 16（如 alignas(16)），
+        //   分配器必须返回地址为 16 的倍数的内存。
+        //   没有这个参数，operator new[] 只保证 alignof(std::max_align_t)（通常 8 或 16）。
+        //   对于 SIMD 类型（alignas(32)），缺少对齐 → 未定义行为。
         memory_ = static_cast<std::byte*>(
             ::operator new[](sizeof(T) * capacity, std::align_val_t{alignof(T)})
         );
         capacity_ = capacity;
-        freeCount_ = capacity;
+        freeCount_ = capacity;    // 初始时所有槽位都空闲
 
-        // 初始化自由列表
+        // ——— 步骤 2: 初始化侵入式空闲链表 ———
+        //
+        // 内存布局（假设 capacity=4）:
+        //
+        //   memory_ ────┐
+        //               ▼
+        //   ┌──────────┬──────────┬──────────┬──────────┐
+        //   │ slot[0]  │ slot[1]  │ slot[2]  │ slot[3]  │
+        //   │ (空闲)   │ (空闲)   │ (空闲)   │ (空闲)   │
+        //   │ next → 1 │ next → 2 │ next → 3 │ next → ∎ │
+        //   └──────────┴──────────┴──────────┴──────────┘
+        //        ↑
+        //   freeList_（链表头，指向第一个空闲槽位）
+        //
+        // 关键技巧:
+        //   每个空闲槽位的前 sizeof(T*) 字节被复用来存储"下一个空闲槽位"的指针。
+        //   因为空闲槽位尚未构造对象，这 sizeof(T*) 字节是"无主"的，
+        //   我们可以安全地写入——这叫做"侵入式链表"（intrusive linked list）。
         for (size_t i = 0; i < capacity; ++i) {
+            // 计算第 i 个槽位的地址
             T* slot = reinterpret_cast<T*>(memory_ + i * sizeof(T));
+
+            // 把 slot 的前 sizeof(T*) 字节当成 T* 来写
+            // ——写入"下一个空闲槽位"的地址:
+            //   最后一个槽位 (i == capacity-1)  → 写入 nullptr（链表尾）
+            //   其他槽位                          → 写入下一个槽位的地址
+            //
+            // ⚠️ 严格别名规则 (strict aliasing) 问题:
+            //
+            //   下面这行代码的转换链:
+            //     slot                          T*   → 指向一块 sizeof(T) 的原始内存
+            //     reinterpret_cast<T**>(slot)    T**  → "把这块内存当成存放 T* 的盒子"
+            //     *reinterpret_cast<T**>(slot)   T*&  → 解引用盒子，拿到盒子里"存的"那个 T* 的引用 → 写入 next 指针
+            //
+            //   为什么形式上是 UB:
+            //     C++ 严格别名规则 (strict aliasing rule) 规定: 程序只能通过
+            //     与对象实际类型兼容的指针/引用来访问该对象的内存。
+            //     - slot 指向的内存，其"实际类型"是 T（或尚未构造的 T 槽位）
+            //     - 代码通过 T**（本质是 T* 的左值）去写入这块内存
+            //     - T 和 T* 是不兼容的类型 → 违反严格别名 → 形式上未定义行为
+            //     编译器的类型别名分析 (TBAA) 可以合法地假设"通过 T** 写入的值
+            //     不会改变 T 类型对象的内容"，从而对指令做错误的重排序优化。
+            //
+            //   为什么实际上能跑:
+            //     (1) 所有主流编译器 (GCC, Clang, MSVC) 在 -O2 下都对此宽容
+            //     (2) 用 -fno-strict-aliasing 编译时完全安全
+            //     (3) 这里没有同时以 T 类型去读写同一块内存——只要不混用，编译器实际不会误判
+            //     (4) 引擎开发者已经这样写了 20 年
+            //
+            //   生产代码的正确写法 (零性能损失的合法替代):
+            //     T* next = (i == capacity - 1) ? nullptr
+            //               : reinterpret_cast<T*>(memory_ + (i + 1) * sizeof(T));
+            //     std::memcpy(slot, &next, sizeof(T*));
+            //     // memcpy 被标准委员会明确豁免 TBAA; 在优化级别下会被内联为相同的机器码
             *reinterpret_cast<T**>(slot) = (i == capacity - 1)
                 ? nullptr
                 : reinterpret_cast<T*>(memory_ + (i + 1) * sizeof(T));
         }
+        // 链表头指向第一个槽位
         freeList_ = reinterpret_cast<T*>(memory_);
     }
 
+    // ——————————————————————————————————————————————————————————————————
+    // 析构函数: 释放整块原始内存
+    // ——————————————————————————————————————————————————————————————————
     ~ObjectPool() {
-        // 注意：如果还有存活对象，这里不会调用析构函数
-        // 生产代码需要断言或处理
+        // ⚠️ 严重警告:
+        //   如果此时还有对象存活（freeCount_ < capacity_），
+        //   这些对象的析构函数不会被调用！
+        //   → 如果 T 持有非平凡资源（文件句柄、GPU buffer、mutex），
+        //     资源将永久泄漏。
+        //
+        // 生产代码应该:
+        //   assert(freeCount_ == capacity_ && "Pool destroyed with live objects");
+        // 或者:
+        //   遍历所有槽位，对已分配的调用 obj->~T()
+        //   但这需要额外的"已分配"标记位（不能再用 freeList 判断，
+        //   因为对象构造后 freeList 链接已经失效）。
+        //
+        // ::operator delete[] 的参数必须与 ::operator new[] 严格匹配。
+        // 对齐版本 new[] 必须用对齐版本 delete[]。
         ::operator delete[](memory_, std::align_val_t{alignof(T)});
     }
 
+    // ——————————————————————————————————————————————————————————————————
+    // acquire(): 从池中获取一个对象（O(1)）
+    // ——————————————————————————————————————————————————————————————————
     template<typename... Args>
     T* acquire(Args&&... args) {
+        // 空闲链表为空 → 池已满，返回 nullptr
         if (!freeList_) return nullptr;
 
+        // ——— 步骤 1: 从空闲链表头"弹出"一个槽位 ———
         T* slot = freeList_;
+        // 当前槽位的前 sizeof(T*) 字节存着"下一个空闲槽位"的地址
+        // 读出它，更新链表头
         freeList_ = *reinterpret_cast<T**>(slot);
         --freeCount_;
 
-        // placement new：在预分配的内存上构造对象
+        // ——— 步骤 2: Placement new 在槽位上构造对象 ———
+        //
+        // new (slot) T(args...) 语法的含义:
+        //   "在 slot 指向的内存地址上调用 T 的构造函数"
+        //   - 不分配任何新内存
+        //   - slot 必须满足 alignof(T)，否则未定义行为
+        //   - 构造函数抛出异常时，对象不会构造，slot 不会自动归还
+        //     （生产代码需要用 try-catch 保护并归还 freeList_）
+        //
+        // std::forward<Args>(args)... — 完美转发:
+        //   如果 args 里有左值 → 以左值引用传给 T 的构造
+        //   如果 args 里有右值 → 以右值引用（移动）传给 T 的构造
+        //   避免不必要的拷贝。例如:
+        //     pool.acquire(std::move(someString))  → 移动字符串，不拷贝
+        //     pool.acquire(someString)             → 拷贝字符串
         new (slot) T(std::forward<Args>(args)...);
         return slot;
     }
 
+    // ——————————————————————————————————————————————————————————————————
+    // release(): 归还对象到池中（O(1)）
+    // ——————————————————————————————————————————————————————————————————
     void release(T* obj) {
         if (!obj) return;
 
-        // 显式调用析构函数
+        // ——— 步骤 1: 显式调用析构函数 ———
+        //
+        // 与 delete 的区别:
+        //   delete obj  = 调用析构函数 + 释放内存（::operator delete）
+        //   obj->~T()   = 只调用析构函数，不释放内存
+        //
+        // Placement new 构造的对象必须显式析构。
+        // 如果忘记调用析构 → 资源泄漏（同 ~ObjectPool() 的警告）。
         obj->~T();
 
-        // 归还到自由列表
-        *reinterpret_cast<T**>(obj) = freeList_;
-        freeList_ = obj;
+        // ——— 步骤 2: 把槽位"压入"空闲链表头 ———
+        //
+        // 槽位现在又是"无主"内存了，可以复用存放链表指针。
+        // 这是一个典型的 LIFO 栈入栈操作（链表头插法）。
+        //
+        // 操作前:  freeList_ → [slotA] → [slotB] → nullptr
+        //                       ↑ obj
+        // 操作后:  freeList_ → [obj] → [slotA] → [slotB] → nullptr
+        //
+        *reinterpret_cast<T**>(obj) = freeList_;  // obj 的"next"指向旧链表头
+        freeList_ = obj;                            // 新链表头 = obj
         ++freeCount_;
     }
 
 private:
-    std::byte* memory_;
-    T* freeList_ = nullptr;
-    size_t capacity_ = 0;
-    size_t freeCount_ = 0;
+    std::byte* memory_;            // 整块原始内存的起始地址（未构造对象）
+    T* freeList_ = nullptr;        // 空闲链表头（指向第一个空闲槽位）
+    size_t capacity_ = 0;          // 池的最大容量（槽位总数）
+    size_t freeCount_ = 0;         // 当前空闲槽位数量（freeCount_ 描述状态）
 };
 ```
+
+
+#### 严格别名规则详解：为什么 `*reinterpret_cast<T**>(slot)` 是 UB
+
+C++ 标准规定了一个核心原则：**严格别名规则 (strict aliasing rule)**——程序只能通过**与实际对象类型兼容的类型**来访问该对象的内存。违反此规则即为**形式上未定义行为 (UB)**。
+
+在 ObjectPool 的空闲链表初始化中，关键操作是：
+
+```cpp
+T* slot = reinterpret_cast<T*>(memory_ + i * sizeof(T));
+*reinterpret_cast<T**>(slot) = /* next 指针 */;
+```
+
+**转换链拆解：**
+
+```
+slot                          T*     → 指向一块 sizeof(T) 的原始内存
+reinterpret_cast<T**>(slot)   T**    → "把这块内存当成存放 T* 的盒子来看"
+*reinterpret_cast<T**>(slot)  T*&    → 解引用盒子，拿到盒子里"存的"那个 T* 的引用
+                                       然后通过这个引用写入 next 指针
+```
+
+也就是：**把 `slot`（`T*`）强转成 `T**`，再解引用，从而把一块 `sizeof(T)` 的内存当作 `sizeof(T*)` 的存储空间来写入指针**。
+
+**为什么违反严格别名：**
+
+C++ 的严格别名规则（[basic.lval]/11）规定，对一块内存的访问（读或写），只能通过以下**兼容类型**的 glvalue 进行：
+- 该内存上实际存在的对象类型
+- 该类型的 signed/unsigned 变体
+- `char`、`unsigned char`、`std::byte`（万能通行证）
+- ……
+
+这里的关键矛盾：
+
+- `slot` 指向的这块内存，从编译器的视角看，其**动态类型**是 `T`（将来要在上面构造 `T` 对象）
+- 代码通过 `T**`（本质上是 `T*` 的左值，即 `T*&`）去读写这块内存
+- `T` 和 `T*` 是**不兼容的类型**——没有任何合法路径让一个 `T` 对象通过 `T*` 的左值来访问
+
+→ 违反严格别名 → **形式上 UB**。
+
+编译器的类型别名分析（Type-Based Alias Analysis, TBAA）可以合法地做如下推理：
+
+- "通过 `T**` 写入的值，不会改变 `T` 类型对象的内容"（因为它们不兼容）
+- 因此可以把后续对 `T` 类型成员的读取提到这次写入之前
+- 或者干脆删除"多余的"写入
+
+这就是 UB 的真正危险：**代码看起来能跑，但在某个优化级别下突然产生错误结果**。
+
+**为什么实际上能跑：**
+
+1. **所有主流编译器（GCC、Clang、MSVC）在 `-O2` 下都对此宽容**——引擎开发者已经这样写了 20 年，编译器厂商不会为了严格符合标准而破坏真实的代码
+2. **`-fno-strict-aliasing`** 编译选项让编译器放弃 TBAA 优化，完全安全
+3. **这里没有混用**：同一块内存，要么当作空闲链表节点（存 `T*`），要么构造了 `T` 对象——不会同时以两种类型去访问。只要不混用，编译器实际不会误判
+
+**生产代码的正确写法（零性能损失的合法替代）：**
+
+```cpp
+// 方案：std::memcpy（标准明确豁免 TBAA，最实用）
+T* next = (i == capacity - 1) ? nullptr
+          : reinterpret_cast<T*>(memory_ + (i + 1) * sizeof(T));
+std::memcpy(slot, &next, sizeof(T*));
+```
+
+`std::memcpy` 被 C++ 标准明确豁免了 TBAA 约束——编译器必须假设 `memcpy` 可以改变任何对象的内容。在优化级别下，`memcpy` 会被编译器**完全内联**为与 `*reinterpret_cast<T**>(slot) = ...` 相同的机器码，**零性能损失，且合法**。
+
+**其他方案：**
+
+```cpp
+// 方案 2：通过 std::byte* 中转（char/byte 是 TBAA 的万能通行证）
+std::byte* raw = reinterpret_cast<std::byte*>(slot);
+// 但直接写入仍然需要 memcpy，因为不能通过 byte* 写入 T* 的字节表示
+// → 本质上等同于方案 1
+
+// 方案 3：C++20 std::bit_cast
+// 不适合此场景：bit_cast 要求源和目标的 sizeof 相同，虽然这里是按字节复制
+// 但语法上是"按值转换"，而非"在指定地址上写入"
+
+// 不推荐的方案：std::launder
+// std::launder 解决的是"placement new 后旧指针失效"的问题，与 TBAA 无关，用错了
+```
+
+**引擎实践建议：**
+
+- **新代码**：用 `std::memcpy`，一行的事，零风险
+- **旧代码**：如果已有工作良好的 `reinterpret_cast<T**>` 模式且测试充分，加 `-fno-strict-aliasing` 编译选项即可
+- **面试/代码审查**：理解这个 UB 并能解释为什么实际没问题，是区分"会用 C++"和"理解 C++"的标志
 
 ### 5.2 对齐分配（C++17）
 
-```cpp
-// C++17 之前：平台相关函数
-// MSVC: _aligned_malloc(size, alignment)
-// POSIX: posix_memalign(&ptr, alignment, size)
+#### 5.2.1 什么是对齐——从硬件说起
 
-// C++17 标准对齐分配
-void* aligned = ::operator new(size, std::align_val_t{64});  // 64 字节对齐
-::operator delete(aligned, std::align_val_t{64});
+CPU 从内存读取数据不是逐字节的，而是**按"字"（word）读取**——32 位 CPU 一次读 4 字节，64 位 CPU 一次读 8 字节。内存总线以对齐边界为单位工作：地址 0、8、16、24… 是 8 字节对齐边界。
 
-// new 表达式也支持对齐
-struct alignas(64) CacheLineData {
-    float data[16];  // 64 字节
-};
+当一个 8 字节的 `double` 存储在地址 6（跨越了 8 字节边界）时，CPU 需要**两次内存访问**：
 
-CacheLineData* arr = new CacheLineData[100];  // 每个元素 64 字节对齐
+```
+地址:  0   1   2   3   4   5   6   7   8   9  10  11  12  13  14  15
+       └─────── word 0 ───────┘ └─────── word 1 ───────┘
+                                ├── double at addr 6 ──┤
+                                需要读 word 0 的后 2B + word 1 的前 6B
 ```
 
-**引擎中的应用：SIMD 对齐**：
+这就是**未对齐访问（unaligned access）**：
+
+| 架构 | 未对齐访问的后果 |
+|------|----------------|
+| **x86/x86_64** | 允许，但有性能惩罚（~2-3× 延迟，取决于跨缓存行的程度） |
+| **ARMv7 及更早** | 部分指令**直接崩溃**（SIGBUS），部分允许 |
+| **AArch64 (ARMv8)** | 普通 load/store 允许，但原子操作和 exclusive load/store 必须对齐 |
+| **SSE `movaps`** | **必须 16 字节对齐**，否则硬件异常（`movups` 允许未对齐） |
+| **AVX `vmovaps`** | **必须 32 字节对齐**，否则硬件异常（`vmovups` 允许未对齐） |
+
+**引擎中的关键影响**：使用对齐加载指令（`movaps`/`vmovaps`）比未对齐版本（`movups`/`vmovups`）**快 10-30%**，因为对齐加载不跨越缓存行边界，且使用更少微操作。
+
+#### 5.2.2 `alignof` 和 `alignas` — 编译期工具
 
 ```cpp
-// SSE/AVX 需要严格对齐
-struct alignas(32) Vec8f {
-    float data[8];  // 256 bit = 32 byte，AVX 对齐
+#include <cstddef>
+
+// alignof: 查询类型的对齐要求（编译期常量）
+static_assert(alignof(int) == 4);
+static_assert(alignof(double) == 8);
+static_assert(alignof(void*) == 8);   // 64 位平台
+
+// alignas: 强制指定对齐（只能增大，不能缩小）
+struct alignas(16) Vec4 {
+    float x, y, z, w;  // 16 字节对齐，SSE 可以直接用 movaps
+};
+static_assert(alignof(Vec4) == 16);
+
+struct alignas(64) CacheLineAligned {
+    int data[16];  // 64 字节对齐，独占一个缓存行 --- 重要
+};
+static_assert(alignof(CacheLineAligned) == 64);
+```
+
+**`alignas` 的规则**：
+- 只能**增大**对齐要求，不能缩小——`alignas(1) struct Big { double d; };` 仍然按 8 对齐（编译器取 `max(alignas, 自然对齐)`）
+- 对栈变量、全局变量、struct/class 成员都生效
+- 必须是 2 的幂
+
+**引擎中为什么关心 `alignof`**：池分配器必须按 `alignof(T)` 对齐分配内存，否则 placement new 构造 `T` 时是 UB：
+
+```cpp
+// 错误：buffer 的对齐可能不满足 T 的要求
+char buffer[sizeof(T)];
+new (buffer) T(args);  // 如果 alignof(T) > alignof(char) = 1 → UB!
+
+// 正确：用 alignas 强制对齐
+alignas(T) char buffer[sizeof(T)];
+new (buffer) T(args);  // OK，buffer 现在满足 T 的对齐要求
+```
+
+这也是为什么 `ObjectPool` 的实现中，构造函数使用 `std::align_val_t{alignof(T)}` —— 保证整块 buffer 的起始地址满足 `T` 的对齐。
+
+#### 5.2.3 `std::align_val_t` — C++17 的过度对齐分配
+
+C++17 之前，`operator new` 只保证返回的地址对齐到 `alignof(std::max_align_t)`（通常是 8 或 16 字节）。对于 SSE（16B）、AVX（32B）、缓存行（64B）等更大的对齐需求，只能用平台特定 API。
+
+C++17 引入了**带对齐参数的 `operator new`**：
+
+```cpp
+// 新的重载签名（C++17）
+void* operator new(std::size_t count, std::align_val_t alignment);
+void* operator new[](std::size_t count, std::align_val_t alignment);
+void  operator delete(void* ptr, std::align_val_t alignment) noexcept;
+void  operator delete[](void* ptr, std::align_val_t alignment) noexcept;
+```
+
+**用法**：
+
+```cpp
+// 直接调用
+void* p = ::operator new(1024, std::align_val_t{64});
+::operator delete(p, std::align_val_t{64});
+
+// alignas + new 表达式自动选择对齐版本
+struct alignas(32) AVXData { double lanes[4]; };
+AVXData* arr = new AVXData[100];   // 自动调用 operator new[](size, align_val_t{32})
+delete[] arr;                       // 自动调用 operator delete[](ptr, align_val_t{32})
+```
+
+**`std::align_val_t` 的本质**：
+
+```cpp
+// 就是一个强类型的 size_t 包装
+enum class align_val_t : size_t {};
+```
+
+它存在的意义是**让对齐信息成为类型系统的一部分**——不能隐式从 `size_t` 转换，必须显式构造。这让编译器和分配器能区分"请求了多少字节"和"要求什么对齐"。
+
+**编译器如何选择 `operator new` 重载**：当 `new` 的类型的 `alignof(T) > __STDCPP_DEFAULT_NEW_ALIGNMENT__`（通常是 16）时，编译器自动插入 `std::align_val_t{alignof(T)}` 参数。对于普通类型（如 `int`，对齐 4），仍然调用传统的不带对齐参数的重载。
+
+#### 5.2.4 缓存行对齐与伪共享
+
+CPU 缓存以**缓存行（cache line）**为单位操作——现代 x86_64 的缓存行是 **64 字节**。当两个核心同时访问同一缓存行内的不同数据时，即使它们逻辑上不相关，也会互相逐出对方的缓存，这就是**伪共享（false sharing）**。 -- 重要
+
+```cpp
+// 问题代码：两个核心各自递增自己的计数器，但因为它们在同一个缓存行内，
+// 每次写入都会使对方的缓存行失效 → 性能灾难
+struct Counters {
+    std::atomic<uint64_t> core0_count;  // offset 0
+    std::atomic<uint64_t> core1_count;  // offset 8 — 和 core0_count 在同一缓存行！
 };
 
-// 动态分配 SIMD 友好的数组
+// 修复：用 alignas 隔离到不同缓存行
+struct alignas(64) CacheLinePaddedCounter {
+    std::atomic<uint64_t> count;
+    // 剩余 56 字节被 padding 占满——无其他数据与此计数器共享缓存行
+};
+
+CountersFixed {
+    CacheLinePaddedCounter core0_count;  // 独占缓存行 1
+    CacheLinePaddedCounter core1_count;  // 独占缓存行 2
+};
+```
+
+**引擎中的典型应用**：Job System 中每个 worker 线程有自己的本地队列，这些队列的 head/tail 指针必须放到独立的缓存行上，否则 16 个 worker 互相逐出，吞吐量下降 50-80%。 -- 重要
+
+#### 5.2.5 SIMD 对齐——引擎性能的关键
+
+SIMD 指令集有不同的对齐要求：
+
+| 指令集 | 寄存器宽度 | 对齐加载指令 | 要求对齐 | 未对齐加载指令 |
+|--------|-----------|------------|---------|-------------|
+| SSE | 128 bit (16B) | `movaps` | 16 字节 | `movups` |
+| AVX | 256 bit (32B) | `vmovaps` | 32 字节 | `vmovups` |
+| AVX-512 | 512 bit (64B) | `vmovaps` (zmm) | 64 字节 | `vmovups` (zmm) |
+| NEON (ARM) | 128 bit (16B) | `vld1.32 {q0}, [r0:128]` | 16 字节 | `vld1.32 {q0}, [r0]` |
+
+**对齐 vs 未对齐的实测差距**：
+
+```
+// Haswell i7-4770, 4GHz, 吞吐量 (GB/s)
+操作          对齐地址    未对齐地址    差距
+────────────────────────────────────────────
+movaps (16B)    32.0        — (崩溃)     —
+movups (16B)    30.5        17.3        1.8×
+vmovaps (32B)   54.2        — (崩溃)     —
+vmovups (32B)   52.8        28.1        1.9×
+```
+
+如果数据跨越了**缓存行边界**（未对齐到 64B），性能进一步下降 2-3 倍。
+
+**引擎中的最佳实践**：
+
+```cpp
+// 向量类型：同时对齐到自然边界和 SIMD 宽度
+struct alignas(16) Vector4 {
+    float x, y, z, w;
+};
+
+// 矩阵类型：AVX 对齐
+struct alignas(32) Matrix4x4 {
+    Vector4 rows[4];  // 每行 16B，4 行 = 64B
+};
+
+// SoA 布局的粒子系统：每个属性数组独立对齐
+struct alignas(64) ParticleSystem {
+    // 缓存行对齐 + SIMD 对齐，方便批量处理
+    alignas(32) float posX[MAX_PARTICLES];
+    alignas(32) float posY[MAX_PARTICLES];
+    alignas(32) float velX[MAX_PARTICLES];
+    alignas(32) float velY[MAX_PARTICLES];
+};
+```
+
+#### 5.2.6 跨平台对齐分配 API
+
+C++17 的 `std::align_val_t` 是理想方案，但引擎经常需要支持更老的编译器或 C 接口。以下是各平台 API 的对照：
+
+```cpp
+// ============================================================================
+// AlignedAllocator<T> — 跨平台 SIMD 对齐分配器
+// ============================================================================
+//
+// 引擎需要在 x64 (MSVC/Clang/GCC)、ARM (Clang/GCC)、主机 (专有工具链)
+// 上统一分配对齐内存。各平台 API 不兼容，必须用条件编译统一封装。
+//
+// ╔══════════════════════════════════════════════════════════════════╗
+// ║  平台         │  分配 API                 │  释放 API          ║
+// ╠══════════════════════════════════════════════════════════════════╣
+// ║  C++17+       │  ::operator new[](n,      │  ::operator        ║
+// ║               │    align_val_t{a})         │  delete[](p, a)    ║
+// ║  MSVC (所有)  │  _aligned_malloc(n, a)    │  _aligned_free(p)  ║
+// ║  POSIX        │  posix_memalign(&p, a, n) │  free(p)           ║
+// ║  C11          │  aligned_alloc(a, n)      │  free(p)           ║
+// ╚══════════════════════════════════════════════════════════════════╝
+// ============================================================================
+
 template<typename T>
-T* alignedAlloc(size_t count, size_t alignment = alignof(T)) {
-    size_t bytes = count * sizeof(T);
-    void* ptr = nullptr;
+struct AlignedAllocator {
 
-#if defined(_WIN32)
-    ptr = _aligned_malloc(bytes, alignment);
+    // ——————————————————————————————————————————————————————————————————
+    // allocate(): 分配 count 个 T，按 alignment 字节对齐
+    // ——————————————————————————————————————————————————————————————————
+    // 参数:
+    //   count     — 要分配的 T 类型元素数量
+    //   alignment — 要求的内存对齐（字节），必须是 2 的幂
+    //               默认值 alignof(T): 取 T 的自然对齐
+    //               调用方可传入更大的值（如 alignof(T)=4，但需要 AVX 的 32）
+    // 返回:
+    //   满足对齐要求的 T* 指针，指向未初始化的原始内存
+    //   （调用方需要用 placement new 构造对象，或直接用 memcpy 填 POD 数据）
+    // ==================================================================
+    static T* allocate(size_t count, size_t alignment = alignof(T)) {
+
+        // ——— 计算总字节数 ———
+        //
+        // sizeof(T) 是编译器在编译期确定的——它是 T 的"静态大小"，
+        // 不考虑多态下的实际对象大小。C++ 的内存分配始终以编译期
+        // 类型的大小为准。
+        size_t bytes = count * sizeof(T);
+
+        // ——— 防御性保护: 绝不允许 alignment 小于 T 的自然对齐 ———
+        //
+        // 为什么这是必须的:
+        //   假设 T 是 alignof(T)=8 的 struct（含 double 成员），
+        //   而调用方误传了 alignment=4。如果分配器返回一个 4 对齐
+        //   但不 8 对齐的地址，后续 placement new 构造 T 时：
+        //     — 编译器可能插入需要 8 对齐的 SIMD 指令（如 movsd）
+        //     — 访问 misaligned double → x86 上慢 2-3 倍, ARM 上崩溃
+        //     — 这是未定义行为（[basic.align]/1）
+        //
+        // 取 max 确保: 实际对齐 ≥ max(调用方要求, T 自身要求)
+        if (alignment < alignof(T)) alignment = alignof(T);
+
+        // ═══════════════════════════════════════════════════════════════
+        // 平台分发: 按编译器/OS 选择对齐分配 API
+        // ═══════════════════════════════════════════════════════════════
+
+#if __cplusplus >= 201703L
+        // ── 路径 A: C++17+ 标准方案 ──
+        //
+        // ::operator new[](size, align_val_t) 是 C++17 新增的重载。
+        //
+        // std::align_val_t{alignment}:
+        //   — 类型: enum class align_val_t : size_t {}
+        //   — 不是普通的 size_t！它是强类型枚举，不能从 size_t 隐式转换。
+        //     这防止了"把字节数当对齐值误传"的 bug。
+        //   — 编译器看到带 align_val_t 的 new 表达式时,
+        //     会在返回的指针前额外存储对齐值(通常用 malloc 的头部)，
+        //     这样 delete 时可以取出对齐值正确释放。
+        //
+        // ::operator new[] vs ::operator new:
+        //   — new[] 分配数组，编译器可能在返回指针前存储元素数量
+        //     (用于 delete[] 时知道调用多少次析构)
+        //   — 对于 POD/平凡类型的对齐分配，两者实际行为相同
+        //   — 这里用 new[] 是为了语义一致: allocate 的"count"暗示数组
+        //
+        // 返回 void*，需要 static_cast<T*> 转为目标类型。
+        // 不要用 reinterpret_cast——void* 到 T* 的标准转换是 static_cast。
+        return static_cast<T*>(
+            ::operator new[](bytes, std::align_val_t{alignment})
+        );
+
+#elif defined(_WIN32)
+        // ── 路径 B: MSVC Windows ──
+        //
+        // _aligned_malloc(size, alignment):
+        //   — MSVC 专有 API，声明在 <malloc.h>
+        //   — 分配 size 字节，返回地址是 alignment 的倍数
+        //   — alignment 必须是 2 的幂
+        //   — 失败返回 nullptr（不抛异常，不调用 new_handler）
+        //   — 必须用 _aligned_free 释放，用普通 free 的行为是未定义的
+        //     （_aligned_malloc 可能用 _aligned_offset_malloc 实现，
+        //      它分配额外内存存储原始指针，free 不知道这个偏移）
+        //
+        // 引擎项目中通常不检查 nullptr——分配失败意味着 OOM，
+        // 此时引擎无论如何都无法继续运行。让 nullptr 向上传播到
+        // placement new 时触发硬件异常，或在上层用 assert 捕获。
+        return static_cast<T*>(_aligned_malloc(bytes, alignment));
+
 #else
-    posix_memalign(&ptr, alignment, bytes);
-#endif
+        // ── 路径 C: POSIX (Linux, macOS, BSD, 主机 SDK) ──
+        //
+        // posix_memalign(void** memptr, size_t alignment, size_t size):
+        //   — POSIX.1-2001 标准函数，声明在 <stdlib.h>
+        //   — 通过 **memptr 返回指针（而不是 return），这是一套
+        //     别扭的 C API 风格——用输出参数让返回值专用于错误码
+        //   — 返回 0 表示成功，非 0 表示失败（EINVAL 或 ENOMEM）
+        //   — ⚠️ alignment 必须同时满足:
+        //        (1) 是 2 的幂（1, 2, 4, 8, 16, ...）
+        //        (2) 是 sizeof(void*) 的倍数
+        //           在 32 位平台上 sizeof(void*)==4，所以 alignment 至少是 4
+        //           在 64 位平台上 sizeof(void*)==8，所以 alignment 至少是 8
+        //     → 这意味着你不能请求"1 字节对齐"——即使你只需要放一个 char。
+        //       对于引擎来说这不是问题，因为 SIMD 对齐远大于 8。
+        //   — 释放用普通的 free()（不像 _aligned_malloc 需要专用释放函数）
+        //     这是 posix_memalign 相较于 memalign 的主要优势
+        //
+        void* ptr = nullptr;
 
-    return static_cast<T*>(ptr);
+        // posix_memalign 返回 int 错误码:
+        //   0     = 成功，ptr 被设置为对齐地址
+        //   EINVAL (22) = alignment 不是 2 的幂，或不是 sizeof(void*) 的倍数
+        //   ENOMEM (12) = 内存不足
+        // 返回值不是 0 即失败，此时 ptr 保持 nullptr
+        if (posix_memalign(&ptr, alignment, bytes) != 0) {
+            // 引擎禁用异常（见 §2.3），但分配器写成"若失败则抛"便于在
+            // 工具代码中使用。实际引擎中这里应返回 nullptr，由上层处理。
+            throw std::bad_alloc();
+        }
+        return static_cast<T*>(ptr);
+
+#endif
+    }
+
+    // ——————————————————————————————————————————————————————————————————
+    // deallocate(): 释放 allocate() 分配的内存
+    // ——————————————————————————————————————————————————————————————————
+    // 参数:
+    //   ptr       — 之前由 allocate() 返回的指针
+    //   alignment — 必须与分配时传入的 alignment 完全一致
+    //               （默认 alignof(T) 假设分配时用了默认值）
+    // ⚠️ 调用方必须保证 alignment 参数与分配时一致，
+    //    否则 C++17 路径上会调用错误的 operator delete 重载 → UB
+    // ==================================================================
+    static void deallocate(T* ptr, size_t alignment = alignof(T)) {
+
+        // ——— nullptr 检查 ———
+        //
+        // C 标准规定 free(nullptr) 是合法 no-op，C++ 的 operator delete
+        // 对 nullptr 同理。这里的显式检查不是必须的，但作为防御措施：
+        //   — 让意图更清晰（"我们预期可能收到 nullptr"）
+        //   — 避免在内部执行不必要的对齐值提取逻辑（如果将来实现变化）
+        if (!ptr) return;
+
+#if __cplusplus >= 201703L
+        // ── 路径 A: C++17+ ──
+        //
+        // ⚠️ 关键规则: 带 align_val_t 的 new 必须配带 align_val_t 的 delete!
+        //
+        // 为什么:
+        //   C++17 的 operator new(size, align_val_t) 在分配时可能使用
+        //   不同的内部策略（如不同的 malloc 大小类/池），分配器在返回的
+        //   指针附近存储了元数据（对齐值、原始分配地址）。
+        //   如果 delete 不传 align_val_t，会调用传统的 operator delete(void*)，
+        //   它不知道对齐信息，可能:
+        //     — 用错误的偏移计算原始地址 → 释放野指针 → 崩溃
+        //     — 放回错误的大小类 → 堆损坏 → 随机崩溃(最难调试)
+        //
+        // 对于带 alignas(N) 标记的类型 (如 alignas(32) struct AVXData {...})，
+        // 编译器自动调用匹配的 delete 重载，不需手动管理。
+        // 但手动调用 ::operator new[]/delete[] 时必须自己配对。
+        //
+        // operator delete[] vs operator delete:
+        //   必须与分配时一致。这里用 new[] 分配所以用 delete[] 释放。
+        //   不一致 → UB（通常表现为堆损坏，但可能数小时后才崩溃）。
+        ::operator delete[](ptr, std::align_val_t{alignment});
+
+#elif defined(_WIN32)
+        // ── 路径 B: MSVC Windows ──
+        //
+        // ⚠️ 绝对不能用 free() 释放 _aligned_malloc 分配的内存！
+        //
+        // _aligned_malloc 的内部实现相当于:
+        //   (1) malloc(size + alignment + sizeof(void*))  —— 多分配对齐所需的额外空间
+        //   (2) 在分配块的前部存储"原始 malloc 返回的指针"
+        //   (3) 返回对齐后的地址
+        //
+        // _aligned_free 的内部实现相当于:
+        //   (1) 向前查找存储的原始指针
+        //   (2) free(原始指针)
+        //
+        // 如果直接 free(对齐后的地址)，free 的实现期望收到的地址
+        // 就是 malloc 返回的地址，但这里收到的是"偏移后的地址"，
+        // → 堆元数据损坏 → malloc/free 内部数据结构错乱
+        // → 下次任何 malloc/free 都可能随机崩溃
+        // → 崩溃位置远在出错点之后,极难定位
+        _aligned_free(ptr);
+
+#else
+        // ── 路径 C: POSIX ──
+        //
+        // posix_memalign 返回的内存用 free 释放。
+        //
+        // 为什么不像 _aligned_malloc/_aligned_free 那样需要专用释放函数:
+        //   posix_memalign 的实现在 POSIX 系统上通过 malloc 内部的
+        //   对齐分配路径实现。现代 glibc/musl 的 malloc 本身就支持
+        //   对齐分配（通过内部的对齐感知大小类），返回的指针就是
+        //   原始分配指针，没有偏移。
+        //   因此 free 可以直接工作——它拿到的地址就是分配器内部记录的地址。
+        //
+        // 注意: 这是实现约定，不是标准保证。但所有主流 POSIX 实现
+        // (glibc, musl, bionic, Apple libmalloc) 都遵循此约定。
+        free(ptr);
+
+#endif
+    }
+};
+```
+
+**各 API 的陷阱：**
+
+| API | 陷阱 |
+|-----|------|
+| `_aligned_malloc` | 必须配对 `_aligned_free`，用 `free` 会崩溃——`_aligned_malloc` 内部分配了更大的块并在返回前做了偏移，`free` 看不到这个偏移导致堆损坏 |
+| `posix_memalign` | `alignment` 必须 ≥ `sizeof(void*)` 且是 2 的幂——请求 1 字节对齐会返回 EINVAL（22），不是分配失败而是参数错误 |
+| `aligned_alloc` (C11) | `size` 必须是 `alignment` 的整数倍——`aligned_alloc(64, 100)` 是 UB，虽然大部分实现会默默接受，但不应依赖 |
+| `::operator new(align_val_t)` | 必须配对带 `align_val_t` 的 `delete`——对 `alignas` 标记的类型编译器自动处理，但手动调用时必须人工保证配对 |
+| `memalign` | 已废弃 (obsolete)——它在某些平台上用 `free` 释放会导致崩溃（行为与 `_aligned_malloc` 类似），用 `posix_memalign` 或 `aligned_alloc`
+### 5.2.7 Arena 分配器中的对齐
+
+Arena（线性分配器）需要在每次分配时手动处理对齐：
+```cpp
+// ============================================================================
+// ArenaAllocator — 线性分配器中手动对齐的完整演示
+// ============================================================================
+//
+// 为什么 Arena 需要手动对齐:
+//   与 malloc 不同，Arena 是"从一大块连续内存中切小块"。
+//   每次调用 allocate() 时，当前偏移量 (offset_) 指向上次分配的末尾，
+//   这个位置几乎肯定不满足下一次请求的对齐要求。
+//   必须在每次分配前插入 padding 字节，将偏移量"推"到对齐边界上。
+//
+//   示例: 先分配了 3 字节的 char，offset_ = 3
+//         然后请求 8 字节对齐的 double → 不能直接在偏移 3 放置 double
+//         → 需要插入 5 字节 padding → offset_ 跳到 8 → 分配 double
+//
+//   memory_ ──┐
+//             ▼
+//   ┌───┬───┬───┬───┬───┬───┬───┬───┬─────────────────────┬───
+//   │ a │ b │ c │ P │ P │ P │ P │ P │      double          │ ...
+//   └───┴───┴───┴───┴───┴───┴───┴───┴─────────────────────┴───
+//    ◄─ 3B ──► ◄────── 5B padding ──────► ◄───── 8B ──────►
+//                                            (地址 = 8, 满足 8 对齐)
+// ============================================================================
+
+class ArenaAllocator {
+public:
+    // ——————————————————————————————————————————————————————————————————
+    // 构造函数: 从堆上预分配一整块连续内存作为 Arena 的后备存储
+    // ——————————————————————————————————————————————————————————————————
+    // 参数:
+    //   size — Arena 的总容量（字节）
+    //
+    // 成员初始化:
+    //   memory_  = 指向新分配的 size 字节的堆内存，类型是 std::byte*
+    //              std::byte (C++17) 是"原始字节"的标准类型，
+    //              替代 unsigned char / char 来表达"这不是字符, 这是内存"
+    //   capacity_= Arena 总容量，分配后不再改变
+    //   offset_  = 当前已分配区域的尾部偏移，初始为 0（空 Arena）
+    //
+    // 注意: 这里用 new std::byte[size] 仅仅是为了演示简洁。
+    //       生产代码中应该用:
+    //         — ::operator new(size, align_val_t{64}) 保证缓存行对齐
+    //         — mmap / VirtualAlloc 分配大块（可预留+提交, 支持 huge pages）
+    //         — 栈上的 char buffer[N] 用于帧内临时分配
+    // ==================================================================
+    explicit ArenaAllocator(size_t size)
+        : memory_(new std::byte[size]), capacity_(size), offset_(0) {}
+
+    // ——————————————————————————————————————————————————————————————————
+    // allocate(): 从 Arena 中切出 bytes 字节, 按 alignment 对齐
+    // ——————————————————————————————————————————————————————————————————
+    // 参数:
+    //   bytes     — 请求的字节数
+    //   alignment — 请求的对齐, 必须是 2 的幂
+    //
+    // 返回:
+    //   对齐后的内存地址 (void*), 调用方应 static_cast 为目标类型
+    //   如果 Arena 空间不足, 返回 nullptr
+    //
+    // 关键不变量:
+    //   调用后 offset_ 总是指向下一次分配的起始位置。
+    //   Arena 不支持 free/单个释放——所有释放通过 reset() 一次性完成。
+    // ==================================================================
+    void* allocate(size_t bytes, size_t alignment) {
+
+        // ——— 步骤 1: 计算"当前未对齐的地址" ———
+        //
+        // memory_ 是 Arena 后备 buffer 的起始地址 (std::byte*)。
+        // offset_ 是已分配掉的字节数。
+        // memory_ + offset_ 是"如果不考虑对齐, 下一个对象应该放哪里"。
+        //
+        // reinterpret_cast<uintptr_t>:
+        //   uintptr_t 是"足够放下一个指针的无符号整数类型" (C99/C++11)。
+        //   把指针转成 uintptr_t 是为了做算术运算——你不能直接对指针做
+        //   位运算 (&, |, ^, ~), 只能对整数做。这是 C++ 标准允许的少数
+        //   指针↔整数转换之一 (结果是实现定义的, 但在所有现代平台上
+        //   就是地址的数值)。
+        //
+        // 例: memory_ = 0x1000, offset_ = 5 → current = 0x1005
+        uintptr_t current = reinterpret_cast<uintptr_t>(memory_) + offset_;
+
+        // ——— 步骤 2: 对齐——将 current 向上取整到 alignment 的倍数 ———
+        //
+        // 核心公式: align_up(x, N) = (x + N - 1) & ~(N - 1)
+        //
+        // 这个公式对所有 2 的幂 N 成立。分解:
+        //
+        //   x + N - 1:
+        //     如果 x 已经是 N 的倍数 → x + N - 1 跨入了下一个对齐区间 →
+        //     下一步 & ~(N-1) 会把它拉回来到原来的 x (因为高位没变)
+        //     如果 x 不是 N 的倍数 → 加上 N-1 后至少够到下一个对齐边界
+        //
+        //     例: x=8,  N=8 → x+N-1=15 → 15 & ~7 = 8  (8 的倍数, 不变)
+        //     例: x=10, N=8 → x+N-1=17 → 17 & ~7 = 16 (从 10 跳到 16)
+        //
+        //   & ~(N - 1):
+        //     N-1 的低 log2(N) 位全是 1, 其余位是 0。
+        //     ~(N-1) 把低位 mask 反转为 0, 高位保持 1。
+        //     x & ~(N-1) 把 x 的低位全部清零——强制对齐。
+        //
+        //     例: N=8 → N-1=7=0b0111 → ~7=0b...11111000
+        //          15 & ~7 = 0b1111 & 0b...1000 = 0b1000 = 8
+        //          17 & ~7 = 0b10001 & 0b...1000 = 0b10000 = 16
+        //
+        //     为什么 N 必须是 2 的幂:
+        //       只有 2 的幂的 N-1 才有"低位全 1"的性质。
+        //       如果 N=6, N-1=5=0b0101 → ~(N-1) 不能干净地清零低位。
+        //
+        // 为什么用位运算而不是乘法/除法:
+        //   位运算 & 是单周期指令 (latency 1), 除法和取模运算需要 20-80 周期。
+        //   引擎的热路径上每帧可能调用数百次 allocate, 这累积差距是显著的。
+        uintptr_t aligned = (current + alignment - 1) & ~(alignment - 1);
+
+        // ——— 步骤 3: 计算对齐填充 (padding) ———
+        //
+        // aligned 是"对齐后应该放置对象的地址"。
+        // current 是"如果不管对齐, 对象应该放哪里"。
+        // padding = aligned - current 是两者之间的"浪费的字节"。
+        //
+        // 这就是 Arena 的代价: 每次对齐分配都会产生少量不可用的空隙。
+        // 在最坏情况下, padding = alignment - 1 (即地址差一点就对上了)。
+        //
+        // 缓解策略:
+        //   按"对齐要求从大到小"的顺序分配 → 大的先占好对齐位置,
+        //   小的填充剩余的"不对齐"间隙 → 减少总 padding。
+        //   或者对每个对齐级别独立一个 Arena。
+        size_t padding = aligned - current;
+
+        // ——— 步骤 4: 检查容量 ———
+        //
+        // 当前已分配的 offset_ + 本次的 padding + 实际数据 bytes
+        // 如果超过 capacity_, Arena 已经用尽。
+        //
+        // 返回 nullptr 而非抛异常: 引擎禁用异常 (见 §2.3),
+        // 调用方应该:
+        //   — 换到一个更大的 Arena
+        //   — 先 reset() 再重试
+        //   — 降级到 malloc 作为后备
+        if (offset_ + padding + bytes > capacity_) {
+            return nullptr;  // Arena 用尽
+        }
+
+        // ——— 步骤 5: 推进 offset_ ———
+        //
+        // 将 offset_ 移动 (padding + bytes) 字节。
+        // 下次 allocate() 调用时, current 会自动从这个新位置开始。
+        //
+        // 注意: padding 字节被永久"浪费"了——Arena 不支持释放,
+        //       除非整个 Arena 被 reset(), 这些字节无法回收。
+        //       这是线性分配器的设计取舍: 用空间换时间 (O(1) 分配)。
+        offset_ += padding + bytes;
+
+        // ——— 步骤 6: 返回对齐后的地址 ———
+        //
+        // aligned 是 uintptr_t, 需要转回指针。
+        // reinterpret_cast 是必需的——int↔ptr 转换只能用 reinterpret_cast。
+        // 返回 void* 让调用方根据自己的类型做 static_cast<T*>。
+        return reinterpret_cast<void*>(aligned);
+    }
+
+    // ——————————————————————————————————————————————————————————————————
+    // reset(): 一次性回收整个 Arena
+    // ——————————————————————————————————————————————————————————————————
+    // 线性分配器的核心操作:
+    //   offset_ = 0 让所有之前的分配"消失"——下一次 allocate() 从头开始。
+    //
+    // ⚠️ 不会调用已分配对象的析构函数！
+    //   如果 Arena 上分配了持有非平凡资源的对象 (如 std::string, GPU handle),
+    //   这些资源会泄漏。引擎中通常通过在 Arena 上只分配 POD 或平凡类型,
+    //   或者由调用方在 reset() 前手动遍历并析构对象来规避。
+    //
+    //   对于需要析构的场景, 可以用 TypedArena<T> 包装:
+    //     void reset() {
+    //         for (auto& obj : *this) obj.~T();  // 逐个析构
+    //         offset_ = 0;
+    //     }
+    //
+    // ⚠️ memory_ 指向的堆内存在 ~ArenaAllocator() 析构时才释放,
+    //   reset() 不释放堆内存——只重置内部指针。
+    //   这允许在同一个后备 buffer 上反复分配/重置（如每帧一次）。
+    // ==================================================================
+    void reset() { offset_ = 0; }
+
+    // ——————————————————————————————————————————————————————————————————
+    // 析构函数: 释放 Arena 的后备堆内存
+    // ——————————————————————————————————————————————————————————————————
+    // 与构造函数中的 new[] 配对。
+    // 如果构造时用了 ::operator new(align_val_t), 这里必须用对应的
+    // ::operator delete(align_val_t)。
+    // ==================================================================
+    ~ArenaAllocator() { delete[] memory_; }
+
+private:
+    std::byte* memory_;    // Arena 后备 buffer 的起始地址
+                           // std::byte* 而非 char*: 语义明确——这是原始内存,
+                           // 不是字符数组 (C++17 最佳实践)
+
+    size_t capacity_;      // Arena 总容量 (字节), 构造时设定, 之后不变
+
+    size_t offset_;        // 已分配区域的尾部偏移 (字节)
+                           // 不变量: 0 ≤ offset_ ≤ capacity_
+                           // 含义: memory_[0..offset_-1] 已被分配,
+                           //       memory_[offset_..capacity_-1] 空闲
+};
+```
+
+#### 5.2.8 对齐的运行时检查
+
+```cpp
+// 运行时检查某个指针是否对齐
+bool isAligned(const void* ptr, size_t alignment) {
+    // 地址的低 log2(alignment) 位必须全为 0
+    return (reinterpret_cast<uintptr_t>(ptr) & (alignment - 1)) == 0;
 }
 
-void alignedFree(void* ptr) {
-#if defined(_WIN32)
-    _aligned_free(ptr);
-#else
-    free(ptr);
-#endif
+// 使用：
+void* p = ::operator new(64, std::align_val_t{32});
+assert(isAligned(p, 32));  // 保证成立
+
+// debug 模式下在关键路径上插入检查
+void simdAdd(float* dst, const float* a, const float* b, size_t count) {
+    assert(isAligned(dst, 32) && "dst must be 32-byte aligned for AVX");
+    assert(isAligned(a, 32));
+    assert(isAligned(b, 32));
+    // ... AVX 优化路径 ...
 }
 ```
+
+**引擎中的实践经验**：
+- **Debug 构建**：所有 SIMD 入口函数断言对齐要求
+- **Release 构建**：省略断言（已验证过），直接用 `vmovaps`
+- **混合策略**：热路径中对齐已知的数据用 `movaps`；外部数据（如文件 I/O buffer）永远用 `movups` 避免崩溃
 
 ### 5.3 对齐的陷阱
 

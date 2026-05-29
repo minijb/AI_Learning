@@ -1,13 +1,18 @@
 # 深度探索索引
 
-> 自动生成于 2026-05-28
+> 自动生成于 2026-05-29
 
+- [cpp-casts](cpp-casts.md)
 - [cpp-coroutines-raii](cpp-coroutines-raii.md)
+- [cpp-mem-operations](cpp-mem-operations.md)
 - [cpp-memory-order-game-engine](cpp-memory-order-game-engine.md)
+- [cpp-perfect-forwarding](cpp-perfect-forwarding.md)
 - [cpp-pmr-polymorphic-memory-resources](cpp-pmr-polymorphic-memory-resources.md)
 - [cpp-smart-pointers](cpp-smart-pointers.md)
 - [cpp-special-member-functions](cpp-special-member-functions.md)
+- [cpp-std-expected](cpp-std-expected.md)
 - [custom-allocators-arena](custom-allocators-arena.md)
 - [lock-guard-scoped-lock](lock-guard-scoped-lock.md)
+- [placement-new-aligned-allocation](placement-new-aligned-allocation.md)
 - [raii-complete-analysis](raii-complete-analysis.md)
 - [stack-unwinding](stack-unwinding.md)
