@@ -1,6 +1,6 @@
 # 学习计划索引
 
-> 自动生成于 2026-06-01
+> 自动生成于 2026-06-03
 
 ## 进行中
 
@@ -10,6 +10,8 @@
 | battle-system | — |
 | cpp-for-game-engineers | — |
 | ecs-system | — |
+| frame-state-sync | — |
+| game-ai-fsm-bt | — |
 | game-engine-dev | — |
 | game-performance-optimization | — |
 | neovim-lua-config | — |
