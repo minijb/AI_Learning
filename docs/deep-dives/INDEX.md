@@ -1,6 +1,6 @@
 # 深度探索索引
 
-> 自动生成于 2026-06-01
+> 自动生成于 2026-06-02
 
 - [cpp-casts](cpp-casts.md)
 - [cpp-coroutines-raii](cpp-coroutines-raii.md)
@@ -14,6 +14,7 @@
 - [custom-allocators-arena](custom-allocators-arena.md)
 - [fixed-timestep](fixed-timestep.md)
 - [lock-guard-scoped-lock](lock-guard-scoped-lock.md)
+- [luajit-vs-lua](luajit-vs-lua.md)
 - [placement-new-aligned-allocation](placement-new-aligned-allocation.md)
 - [raii-complete-analysis](raii-complete-analysis.md)
 - [stack-unwinding](stack-unwinding.md)

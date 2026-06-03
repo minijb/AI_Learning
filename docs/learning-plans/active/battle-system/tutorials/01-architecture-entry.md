@@ -48,24 +48,28 @@
 ```lua
 -- LuaGame.lua（简化）
 
+-- C# 的 XLuaManager 在 Start() 时回调此函数，是整个 Lua 业务层的启动入口
 -- C# 调用 Start() 时执行
 function Start()
     Init()          -- 初始化所有子系统（EventManager、StageManager、PanelManager 等）
     GotoStage("LoginStage", { mapid = 1 })  -- 跳转登录 Stage，开始状态机
 end
 
+-- C# 的 XLuaManager 每帧回调此函数，是 Lua 层的主循环驱动入口
 function Update()
     -- 所有每帧驱动均在此集中分发
-    local dt = UnityTime.deltaTime
-    timerMgr:update(dt)
+    local dt = UnityTime.deltaTime            -- 受 Time.timeScale 影响的逻辑帧时间
+    timerMgr:update(dt)                       -- 驱动所有定时器/延迟回调
     stageMgr:Update(dt)     -- 当前 Stage 的 Update 从这里触发
-    socketManager:update(dt, UnityTime.unscaledDeltaTime)
+    socketManager:update(dt, UnityTime.unscaledDeltaTime)  -- 网络层需要不受暂停影响的真实时间
 end
 
+-- C# 的 XLuaManager 在 LateUpdate() 时回调，渲染完成后执行，适合处理摄像机跟随等依赖渲染结果的操作
 function LateUpdate()
     stageMgr:LateUpdate()   -- 渲染后处理
 end
 
+-- 应用退出时回调，做全局资源释放——面板关闭、事件解绑、子系统销毁
 function Close()
     OnClose()  -- 解绑事件、销毁各子系统
 end
@@ -75,14 +79,16 @@ end
 
 ```lua
 -- LuaGame.lua – Init()
+-- 先加载并注册全局数据容器，后续模块可能依赖 BattleGlobalData 中的字段
 local BattleGlobalData = require("ClientBattle.BattleGlobalData")
 GLDeclare("BattleGlobalData", BattleGlobalData)   -- 注册全局战斗数据容器
 
-timerMgr  = TimeManager("ClientGlobal")
-eventMgr  = EventManager.GetInstance()
-stageMgr  = StageManager.GetInstance(); stageMgr:init()
-panelMgr  = PanelManager.GetInstance(); panelMgr:init()
-socketManager = require("Net.LuaSocketManager").GetInstance(); socketManager:init()
+-- 各子系统按依赖顺序初始化："获取单例 → 调用 init" 是项目约定模式
+timerMgr  = TimeManager("ClientGlobal")            -- "ClientGlobal" 是定时器的命名空间，用于分类管理
+eventMgr  = EventManager.GetInstance()             -- 事件系统不调用 init（构造时就已完成初始化）
+stageMgr  = StageManager.GetInstance(); stageMgr:init()    -- Stage 状态机必须初始化后才能使用
+panelMgr  = PanelManager.GetInstance(); panelMgr:init()    -- 面板管理器需在 Stage 之前就绪
+socketManager = require("Net.LuaSocketManager").GetInstance(); socketManager:init()  -- 网络模块通过 require 按需加载
 -- … 其余子系统依次初始化
 ```
 
@@ -98,25 +104,28 @@ socketManager = require("Net.LuaSocketManager").GetInstance(); socketManager:ini
 
 ```lua
 -- StageManager.lua
+-- 核心方法：先销毁旧 Stage，再创建新 Stage，保证同一时刻只有一个活跃 Stage
 function StageManager:ChangeStage(stageName, data)
+    -- 定义为局部闭包以捕获 stageName/data，避免作为回调传递时额外打包参数
     local function changeStage()
         local preStage = ''
-        if nil ~= self.curStage then
+        if nil ~= self.curStage then             -- Lua 惯用写法：nil ~= x 而非 x ~= nil
             preStage = self.curStage.name
             self.curStage:Exit(stageName, data)   -- 通知旧 Stage 退出
             self.curStage:destroy()               -- 销毁旧 Stage
         end
-        self.curStage = nil
-        local cls = require("Stage." .. stageName) -- 按名称动态加载
-        local newStage = cls()
+        self.curStage = nil                       -- 显式置 nil 防止悬空引用
+        local cls = require("Stage." .. stageName) -- 按名称动态加载，支持热更时按需 require
+        local newStage = cls()                     -- 实例化新 Stage
         self.curStage = newStage
         newStage:Enter(preStage, data)             -- 进入新 Stage
     end
     -- 切换到 LoadingStage 时需先打开 Loading 面板（遮挡画面）
+    -- OpenPanel 加载完面板后回调 changeStage，保证加载界面已显示再执行耗时操作
     if stageName == "LoadingStage" then
         panelMgr:OpenPanel("LoadingPanel", changeStage, stageName, 3)
     else
-        changeStage()
+        changeStage()                              -- 非 LoadingStage 直接切换，无需过渡面板
     end
 end
 ```
@@ -139,19 +148,24 @@ end
 
 ```lua
 -- GoToStage.lua
+-- 所有 Stage 切换的统一路由：根据目标 Stage 类型决定是否需要 Loading 过渡
 local function GotoStage(targetStage, stageData)
+    -- 记录跳转日志，短路求值避免 stageData 为 nil 时访问 .nextStage 崩溃
     log(string.format("GotoStage %s %s", targetStage, stageData and stageData.nextStage))
     if targetStage == "BattleStage" then
         -- 必须经过 LoadingStage 加载地图资源，再跳转 BattleStage
         stageMgr:ChangeStage("LoadingStage", { data = stageData, nextStage = targetStage })
     elseif targetStage == "WorldStage" then
+        -- WorldStage 场景资源重，同样需要 Loading 过渡
         stageMgr:ChangeStage("LoadingStage", { data = stageData, nextStage = targetStage })
     elseif targetStage == "LoginStage" or targetStage == "EmptyStage" then
+        -- Login/Empty 是轻量 Stage，无需 Loading 面板，直接切换
         stageMgr:ChangeStage(targetStage, stageData)  -- 直接切换，无需 Loading
     -- … 其余 Stage
     end
 end
 
+-- 注册为全局函数后，全工程任意位置均可直接调用 GotoStage(xxx)，无需 require
 GLDeclare("GotoStage", GotoStage)  -- 注册为全局函数，全工程可直接调用
 ```
 
@@ -184,9 +198,10 @@ BattleStage（战斗中触发下一战）
 
 ```lua
 -- BattleGlobalData.lua（类型注解）
----@class BattleGlobalData
----@field public battle ClientBattle|nil  -- 客户端战斗对象（表现层）
----@field public logicBattle Battle|nil   -- 逻辑层战斗对象（确定性逻辑）
+-- EmmyLua 类型注解：三横线 --- 开头是类型注解，双横线 -- 是普通注释，二者不可混淆
+---@class BattleGlobalData                       -- 声明一个类，供 IDE 类型检查和自动补全
+---@field public battle ClientBattle|nil  -- 客户端战斗对象（表现层），竖线 |nil 表示可为空
+---@field public logicBattle Battle|nil   -- 逻辑层战斗对象（确定性逻辑），非 BattleStage 期间为 nil
 ```
 
 | 字段 | 类型 | 所在目录 | 职责 |
@@ -200,38 +215,39 @@ BattleStage（战斗中触发下一战）
 
 ```lua
 -- BattleStage.lua – Enter()（精简注释版）
+-- 战斗 Stage 的初始化入口——取引用、绑事件、根据参数分流到不同子状态
 function BattleStage:Enter(preStage, data)
-    BattleGlobalData.battlePause = false     -- 重置暂停标志
+    BattleGlobalData.battlePause = false     -- 重置暂停标志，确保每次进入战斗默认不暂停
 
-    -- 初始化 C# 侧的 HUD 按钮和伤害数字显示器
+    -- 初始化 C# 侧的 HUD 按钮和伤害数字显示器（CS. 前缀通过 xLua 桥接访问 C# 类）
     CS.Core.HudButtonManager.Inst:Init()
     CS.Core.HurtTextManager.Inst:Init()
 
-    -- 从全局数据容器取出已创建好的战斗对象
+    -- 从全局数据容器取出已创建好的战斗对象（LoadingStage 负责创建，这里只取引用）
     self.battle      = globalData.battle       -- 表现层（ClientBattle）
     self.logicBattle = globalData.logicBattle  -- 逻辑层（Battle）
 
-    -- 将表现层的事件与 UI 系统绑定
+    -- 将表现层的事件与 UI 系统绑定，绑定后才可响应面板回调中的事件通知
     clientUILogic:BindBattleEvent(self.battle)
 
-    -- 根据参数决定是否跳过布阵阶段
-    if data.isSkipArray or self.battle.isSkipArray then
+    -- 根据参数决定进入哪个战斗子状态——共三条分支路径
+    if data.isSkipArray or self.battle.isSkipArray then   -- 跳过布阵：data 或 battle 对象均可标记
         if data.isPerform then
-            -- 回放模式：直接播放战斗录像
+            -- 回放模式：直接播放战斗录像，不创建逻辑层状态机
             panelMgr:OpenPanel("RoundPanel", function(rp)
-                rp:StartBattle(true)
+                rp:StartBattle(true)           -- 参数 true 表示回放模式（跳过布阵+跳过输入）
                 -- 加载并播放战斗 Perform 数据
             end)
         else
-            -- 跳过布阵，直接进入战斗状态
+            -- 跳过布阵分支：直接进入上场战斗状态（如竞技场、PVP 等无需布阵的场景）
             panelMgr:OpenPanel("BattlePanel", function(pp)
-                globalData.logicBattle.mainStateMgr:SetCurState("FieldState")
+                globalData.logicBattle.mainStateMgr:SetCurState("FieldState")  -- 直接切换到上场状态
             end)
         end
     else
-        -- 正常流程：先进入布阵状态
+        -- 正常流程：先打开布阵面板，再进入 ArrangeState（布阵状态）
         panelMgr:OpenPanel("ArrayPanel", function(p)
-            globalData.logicBattle.mainStateMgr:SetCurState("ArrangeState")
+            globalData.logicBattle.mainStateMgr:SetCurState("ArrangeState")  -- 进入布阵状态
         end)
     end
 end
@@ -244,29 +260,30 @@ end
 销毁顺序严格要求：**先关闭 UI 面板（解绑事件），再销毁战斗对象**。
 
 ```lua
+-- 销毁顺序严格遵循"面板 → 表现 → 逻辑 → 全局引用 → 资源池"的依赖链，逆序于构造过程
 function BattleStage:Exit(nextStage, targetStage)
-    -- 1. 先关闭所有依赖 battle 的面板（面板关闭时会解绑事件监听）
+    -- 1. 先关闭所有依赖 battle 的面板（面板关闭时会解绑事件监听，防止后续 destroy 触发面板回调）
     panelMgr:ClosePanel("ArrayPanel")
     panelMgr:ClosePanel("BattlePanel")
     -- … 其余面板
 
-    -- 2. 停止战斗表现（防止动画访问已销毁数据）
+    -- 2. 停止战斗表现（强制终止所有动画/特效播放，防止访问已销毁数据）
     self.battle:StopFightForce()
 
-    -- 3. 销毁逻辑层（先于表现层）
+    -- 3. 先销毁逻辑层——逻辑层依赖较少，表现层 destructor 可能仍查询逻辑层状态
     self.logicBattle:destroy()
-    self.logicBattle = nil
+    self.logicBattle = nil                       -- 显式置 nil 防止悬空引用被误用
 
-    -- 4. 解绑表现层事件，再销毁表现层
+    -- 4. 解绑表现层事件后再销毁——事件回调可能引用 battle 自身字段
     clientUILogic:UnBindBattleEvent(self.battle)
     self.battle:destroy()
     self.battle = nil
 
-    -- 5. 清理全局引用
+    -- 5. 清理全局引用，确保非 BattleStage 期间访问 globalData.battle 返回 nil
     globalData.battle      = nil
     globalData.logicBattle = nil
 
-    -- 6. 清理各资源池和 C# 侧管理器
+    -- 6. 清理各资源池和 C# 侧管理器——释放特效对象池、快照数据、网格系统
     fxMgr:Clear()
     SnapDataPool.GetInstance():Clear()
     CS.Core.GridManager.Inst:Close()
@@ -274,17 +291,19 @@ function BattleStage:Exit(nextStage, targetStage)
 end
 ```
 
+
 ### Update() 的驱动顺序
 
 ```lua
+-- 每帧驱动顺序：世界 → 引导 → 逻辑 → 表现 → C# 飘字，前层可能影响后层行为
 function BattleStage:Update(dt)
-    if globalData.battlePause then return end  -- 暂停时全部跳过
+    if globalData.battlePause then return end  -- 暂停时全部跳过，包括逻辑和表现
 
-    world:Update(dt)              -- 世界（地图场景中的动态元素）
-    GuideManager:Update(dt)       -- 引导系统
-    self.logicBattle:Update(dt)   -- 逻辑层：推进状态机、回合计算
-    self.battle:Update(dt)        -- 表现层：驱动动画、特效、镜头
-    CS.Core.HurtTextManager.Inst:Update(dt)  -- C# 伤害飘字
+    world:Update(dt)              -- 世界（地图场景中的动态元素），先于战斗逻辑更新
+    GuideManager:Update(dt)       -- 引导系统。引导可能拦截输入，需在逻辑层之前判断
+    self.logicBattle:Update(dt)   -- 逻辑层：推进状态机、回合计算，产出本帧逻辑状态
+    self.battle:Update(dt)        -- 表现层：驱动动画、特效、镜头，消费逻辑层产出的状态
+    CS.Core.HurtTextManager.Inst:Update(dt)  -- C# 伤害飘字，依赖本帧逻辑层的伤害结果
 end
 ```
 
@@ -336,20 +355,22 @@ SC 服务器
 ---
 
 ## 5. 代码示例：BattleStage 关键代码摘录与注释
-
 ### 5.1 类声明与字段
 
 ```lua
 -- BattleStage.lua
+-- 加载项目的 OOP 基础设施：Class 提供类创建，StageBase 提供 Stage 生命周期接口
 local class     = require("Common.Class")
 local StageBase = require("Stage.StageBase")
 
+-- EmmyLua 类型注解：声明 BattleStage 继承 StageBase，IDE 可获得基类的字段/方法提示
 ---@class BattleStage:StageBase
 ---@field public battle      ClientBattle   -- 表现层对象（BattleGlobalData.battle）
 ---@field public logicBattle Battle         -- 逻辑层对象（BattleGlobalData.logicBattle）
 local BattleStage = class.Class("BattleStage", StageBase, false)
---                                           ↑继承 StageBase  ↑false=非单例
+--                    类名用于调试 ↑         ↑基类    ↑false=非单例，允许多个实例并存
 
+-- GLDeclare 注册的全局变量，通过全局名称直接访问，无需 require
 local globalData = BattleGlobalData  -- 使用 LuaGame.lua 注册的全局变量
 ```
 
@@ -357,8 +378,9 @@ local globalData = BattleGlobalData  -- 使用 LuaGame.lua 注册的全局变量
 
 ```lua
 -- BattleStage.lua – Enter()（跳过布阵的分支）
+-- 打开 BattlePanel 后在其回调中切换状态——保证面板初始化完毕后状态机才推进
 panelMgr:OpenPanel("BattlePanel", function(pp)
-    -- 直接将逻辑层主状态机设为 FieldState（上场状态）
+    -- 直接将逻辑层主状态机设为 FieldState（上场状态），跳过 ArrangeState
     globalData.logicBattle.mainStateMgr:SetCurState("FieldState")
 end)
 ```
@@ -367,8 +389,9 @@ end)
 
 ```lua
 -- BattleStage.lua – Enter()（正常布阵分支）
+-- 先打开 ArrayPanel（布阵 UI），面板就绪后回调中才切换逻辑层状态
 panelMgr:OpenPanel("ArrayPanel", function(p)
-    -- 打开布阵面板后，逻辑层进入 ArrangeState（布阵状态）
+    -- 打开布阵面板后，逻辑层进入 ArrangeState（布阵状态），等待玩家操作
     globalData.logicBattle.mainStateMgr:SetCurState("ArrangeState")
 end)
 ```
@@ -377,18 +400,20 @@ end)
 
 ```lua
 -- BattleStage.lua – Update()
+-- 双重守卫：暂停开关 + nil 检查，保证在各种边界条件下都不会崩溃
 function BattleStage:Update(dt)
     if globalData.battlePause then
         return  -- 暂停期间所有战斗逻辑和表现均停止更新
     end
 
+    -- nil ~= 是防御性检查：连续战斗的 EmptyStage 清场期间这两个字段为 nil
     if nil ~= self.logicBattle then
         self.logicBattle:Update(dt)   -- 逻辑层先更新（状态机推进、伤害结算）
     end
 
     if nil ~= self.battle then
         self.battle:Update(dt)        -- 表现层后更新（读取逻辑结果驱动动画）
-        CS.Core.HurtTextManager.Inst:Update(dt)
+        CS.Core.HurtTextManager.Inst:Update(dt)  -- 飘字依赖 battle 的动画状态，故放在其后
     end
 end
 ```
@@ -397,20 +422,22 @@ end
 
 ```lua
 -- BattleStage.lua – Update() 内的连续战斗跳转逻辑
+-- isJumpToBattleStage 由外部模块（如结算面板）置 true，触发"当前战斗结束 → 下一场战斗"
 if self.isJumpToBattleStage then
-    self.isJumpToBattleStage = false
+    self.isJumpToBattleStage = false       -- 立即复位标志，防止本帧重复触发跳转
+    -- 在调用 GotoStage 之前提取所有数据——GotoStage 会触发 Exit() 将 self.battle 置 nil
     local id           = self.battle.mainBattleID
     local levelID      = self.battle.logicBattle.levelId
     local gameFuncType = self.battle.logicBattle.gameFuncType
-    ---@type BattleStageData
+    ---@type BattleStageData                -- EmmyLua 类型注解，标注此 table 的结构
     local bsData = {
         battleId     = id,
         levelid      = levelID,
         gameFuncType = gameFuncType,
         isSkipArray  = isSkipArray,
-        nextStage    = "BattleStage",  -- 告知 EmptyStage 目标是 BattleStage
+        nextStage    = "BattleStage",  -- 告知 EmptyStage 清场后目标为 BattleStage
     }
-    GotoStage("EmptyStage", bsData)   -- 经 EmptyStage 清场再重新进入 BattleStage
+    GotoStage("EmptyStage", bsData)   -- 经 EmptyStage 清场再重新进入 BattleStage，避免资源累积
 end
 ```
 
@@ -438,15 +465,17 @@ end
 
 ```lua
 -- ❌ 错误示例（Logic/Battle/ 内的某个文件）
+-- 逻辑层跑在服务器上用于反作弊验证，任何非确定性调用都会导致客户端/服务器结果分歧
 function SomeLogicComp:OnHit(target)
-    CS.UnityEngine.ParticleSystem.Play()  -- 逻辑层不能触发渲染
-    local t = os.time()                   -- 非确定性，服务器与客户端结果不同
+    CS.UnityEngine.ParticleSystem.Play()  -- 逻辑层不能触发渲染——服务器没有 Unity 引擎
+    local t = os.time()                   -- 非确定性，服务器与客户端结果不同，会导致验证失败
 end
 
 -- ✅ 正确做法：逻辑层只修改状态，表现层监听事件后触发特效
+-- 事件驱动解耦：逻辑层不知道也不关心谁会响应 ON_HIT 事件
 function SomeLogicComp:OnHit(target)
-    target:SetHp(target.hp - damage)
-    eventMgr:Send(EventID.ON_HIT, target)  -- 抛事件，表现层自己处理
+    target:SetHp(target.hp - damage)          -- 仅修改纯数据状态，客户端和服务器得到相同结果
+    eventMgr:Send(EventID.ON_HIT, target)  -- 抛事件，表现层自己处理（播特效、飘字等）
 end
 ```
 
@@ -456,12 +485,13 @@ end
 
 ```lua
 -- ❌ 错误示例（在某个 Panel 的回调里）
+-- 链式访问不作 nil 检查：battle 为 nil 时访问 .hero 直接抛异常
 local hp = BattleGlobalData.battle.hero:GetHp()  -- battle 可能已被 Exit() 置 nil
 
--- ✅ 正确做法
-local battle = BattleGlobalData.battle
+-- ✅ 正确做法：先缓存引用再判 nil——避免 TOCTOU 问题（两次读取间 battle 被置 nil）
+local battle = BattleGlobalData.battle            -- 先缓存到局部变量，保证判 nil 和使用的引用一致
 if battle then
-    local hp = battle.hero:GetHp()
+    local hp = battle.hero:GetHp()               -- 只在确认非 nil 后才访问
 end
 ```
 
@@ -469,12 +499,12 @@ end
 
 ```lua
 -- ❌ 错误示例（Logic/Battle/ 内）
+-- math.random 使用全局 Lua 随机状态，客户端和服务器序列不同，导致伤害/命中结果不一致
 local roll = math.random(1, 100)  -- 全局随机状态，客户端与服务器种子不同步
 
--- ✅ 正确做法
+-- ✅ 正确做法：使用战斗专用隔离随机对象——种子由服务器下发，保证双端一致
 local roll = battleRandom:NextInt(1, 100)  -- 使用战斗专用随机对象
 ```
-
 ---
 
 ## 8. 扩展阅读

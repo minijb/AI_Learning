@@ -36,6 +36,7 @@ BuffBase 调度执行。
 ### 关键字段（摘自源码注解）
 
 ```lua
+-- 技能基类状态字段分组：运行时上下文 → 配置标识 → 当次表现 → 冷却追踪 → 事件回调
 ---@class SkillBase
 ---@field public battle         Battle              -- 所属战斗实例
 ---@field public owner          BattleHero|Soldier  -- 技能施放者
@@ -61,9 +62,11 @@ BuffBase 调度执行。
 每次施放技能需要一个全战斗唯一的实例 ID，由 `SkillIdCreator` 生成：
 
 ```lua
+-- 自增索引生成唯一实例 ID，确保单场战斗内每次施放可独立追踪
 -- Logic/Battle/Skill/SkillIdCreator.lua
 function SkillIdCreator:GetNextSkillId()
     self.skillIdIndex = self.skillIdIndex + 1
+-- 防御性回绕：正常单场战斗不会触及 2^32 上限，仅防止极端情况下的整数溢出
     if self.skillIdIndex > 2^32 then
         self.skillIdIndex = 1   -- 回绕，避免整数溢出
     end
@@ -76,6 +79,7 @@ end
 ### 生命周期接口
 
 ```lua
+-- 技能生命周期分阶段管理：init→Play→Update(循环)→Stop/ForceStop→destroy，中间可 Pause/Resume 暂停恢复
 skill:init()                       -- 初始化（注册状态机状态）
 skill:Play(target, isMultiTarget)  -- 启动技能播放
 skill:Update(dt)                   -- 逐帧驱动（客户端 30fps / 服务器单循环走完）
@@ -99,6 +103,7 @@ skill:destroy()                    -- 销毁，释放 EventHandler
 
 ```lua
 -- CombatSkill.lua:29-38
+-- 状态枚举值决定了状态机 Update() 的驱动顺序：Invalid→Init→Wait→Sing→Move→Attack→Return→Invalid
 local SkillState = {
     Invalid = 0,  -- 初始/结束
     Init    = 1,  -- 初始化准备
@@ -115,6 +120,7 @@ local SkillState = {
 
 ```lua
 -- CombatSkill.lua:80-88
+-- 每个状态注册 Enter/Running/Leave 三个回调，分别处理该状态的进入逻辑、逐帧持续逻辑、离开清理逻辑
 self.stateMgr:AddState("InitState",
     CallbackHandler(self, "onInitStateEnter"),
     CallbackHandler(self, "onInitStateRunning"),
@@ -150,6 +156,7 @@ CombatField:AddDamage()  ← 记录伤害结果
 
 ```lua
 -- CombatSkill.lua:44-74（节选）
+-- 构造时初始化对冲专用字段：多段攻击计数、防重复命中标记、前置施法延迟
 function CombatSkill:ctor()
     self.damageFlagMaps      = {}   -- 防重复命中标记
     self.hitIndex            = 1    -- 当前第几次伤害
@@ -171,6 +178,7 @@ end
 `CombatField` 是一次主动技施放时临时搭建的虚拟战场，管理攻方队列、守方队列、伤害记录和飞行物。
 
 ```lua
+-- 虚拟战场核心数据结构：攻/守双队列 + 伤害记录表(按 attacker.id 索引) + 先攻标记 + 飞行物映射
 ---@class CombatField
 ---@field public attackActors           CombatActor[]                          -- 攻方 Actor 列表
 ---@field public defendActors           CombatActor[]                          -- 守方 Actor 列表
@@ -186,15 +194,18 @@ end
 
 ```lua
 -- CombatField.lua:195-218（节选）
+-- isAttacker 决定 Actor 进入攻方还是守方队列，影响后续伤害计算方向(谁打谁)
 function CombatField:CreateCombatActor(battle, attacker, defender,
                                         skillData, fieldDis, isAttacker)
     local actor = self:getFromPool()   -- 对象池复用
+-- 从对象池获取 Actor 而非 new，配合 Clear() 批量回收，避免频繁 GC
     actor.attacker    = attacker
     actor.defender    = defender
     actor.skillData   = skillData
     actor.fieldDis    = fieldDis
     actor.combatField = self
     if isAttacker then
+-- 按 isAttacker 路由到攻方或守方队列，支持 AOE 和反击场景下的多 Actor 并存
         self.attackActors[#self.attackActors + 1] = actor
     else
         self.defendActors[#self.defendActors + 1] = actor
@@ -210,6 +221,7 @@ end
 
 ```lua
 -- CombatField.lua:224-261
+-- frameCount 用于伤害时间线排序，attackIndex + hitIndex 联合作为去重键防止同一伤害重复记录
 function CombatField:AddDamage(frameCount, attacker, target, skillData,
                                 attackIndex, hitIndex, damageVal, isCrit)
     -- 去重：同 attackIndex+hitIndex 的记录已存在且 damageVal<=0 时覆盖，否则追加
@@ -220,6 +232,7 @@ end
 **查询**：结算阶段或表现层读取：
 
 ```lua
+-- 按攻击者 ID + 攻击序号 + 命中序号精确查询伤害记录，三方联合索引
 local record = combatField:GetDamageByIndex(attacker.id, attackIndex, hitIndex)
 ```
 
@@ -243,6 +256,7 @@ local record = combatField:GetDamageByIndex(attacker.id, attackIndex, hitIndex)
 
 ```lua
 -- BFSkill.lua:42-49（节选）
+-- BFSkill 状态集比 CombatSkill 少 MoveState/ReturnState，因为战场技在格子地图上原地释放无需冲阵移动
 self.stateMgr:AddState("InvalidState",  ...)
 self.stateMgr:AddState("InitState",     ...)
 self.stateMgr:AddState("WaitState",     ...)
@@ -257,17 +271,21 @@ self.stateMgr:AddState("StopState",     ...)
 
 ```lua
 -- BFSkill.lua:62-80（节选）
+-- 先调用父类 Play 完成通用初始化(owner/ori/target 设置)，再补充 BFSkill 特有逻辑
 function BFSkill:Play(target, isMultiTarget)
     BFSkill.super.Play(self, target, isMultiTarget)
     self.battle = self.owner.battle
     self.preCastDelay = self.battle.dataMgr:GetConstConfig(
+-- 从策划常量表读取前摇延迟，统一由策划调控所有战场技的播放节奏
         CDataEnum.ConfigableConst.Battle_SkillPreCastDelay)
     -- 通知客户端开始播放战场技特效
     if self.isClient then
+-- 客户端专属路径：通知客户端实体开始播放战场技表现特效
         local clientObj = self.owner.clientEntity
         if clientObj then clientObj:OnStartBFSkill() end
     end
     self.stateMgr:SetCurState("InitState")
+-- 父子类初始化全部完成后，统一切换到 InitState 启动状态机驱动流程
 end
 ```
 
@@ -300,6 +318,7 @@ end
 ### 设计特征
 
 ```lua
+-- Damage 模块作为无状态工具表存放所有伤害计算静态函数，无需实例化直接调用
 -- Damage.lua:13-15
 local Damage = {
     debug = true   -- QA 验收阶段开启，记录伤害计算细节日志
@@ -322,9 +341,11 @@ local Damage = {
 
 ```lua
 -- Damage.lua:91-97
+-- rd 是战斗统一随机数生成器，CRI 是攻击方暴击率(万分比整数)，用 [1,10000] 均匀分布判定
 function Damage.IsCriDamage(rd, CRI)
     local IsCrit = false
     local rands = rd:GetRandom(1, 10000)
+-- GetRandom(1, 10000) 产生的随机数与万分比 CRI 直接比较：rand ≤ CRI 即为暴击
     if rands <= CRI then
         IsCrit = true
     end
@@ -336,11 +357,14 @@ end
 
 ```lua
 -- Damage.lua:102-148（节选）
+-- 元素伤害采用"攻击加成 + 防御减免"直接相加的万分比模型：atkVal + defVal，正值增伤负值减伤
 function Damage.GetDamageElem(damageElemType, atk, def)
     local atkVal = 0
     local defVal = 0
+-- 初始化攻防系数为 0，若 entityType 或元素类型不匹配则保持 0，表示无元素影响
     -- 攻击方加成：区分将领(HERO) / 士兵(SOLDIER) × 元素类型
     if atk.entityType == Enum.EntityType.HERO then
+-- 攻击方仅按将领(HERO)类型查找元素伤害加成，士兵(SOLDIER)不参与元素系统
         if damageElemType == EDET_Fire then
             atkVal = atk:GetStatusModify(General2_FireDamageMul)
         -- elseif Thunder / Ice / Poison ...
@@ -348,6 +372,7 @@ function Damage.GetDamageElem(damageElemType, atk, def)
     end
     -- 防御方减免：同样区分将领/士兵
     if def.entityType == Enum.EntityType.HERO then
+-- 防御方仅按将领(HERO)类型查找元素伤害减免，与攻击方对称但系数独立
         if damageElemType == EDET_Fire then
             defVal = def:GetStatusModify(General2_FireDamageRecvMul)
         end
@@ -369,6 +394,7 @@ end
 
 ```lua
 -- BattleSkillUtil.lua:35-56
+-- 战斗初始化时一次性读取所有常量配置并缓存为静态字段，后续技能施放直接读取避免每帧查表开销
 function BattleSkillUtil.Init(dataMgr)
     -- 从常量配置表读取关键参数
     BattleSkillUtil.CombatSoldierMoveDelay    = dataMgr:GetConstConfig(...)
@@ -376,6 +402,7 @@ function BattleSkillUtil.Init(dataMgr)
     BattleSkillUtil.BattleMeleeATKPunishMult  = dataMgr:GetConstConfig(...)
     BattleSkillUtil.SplitScreenDistance       = dataMgr:GetConstConfig(...)
     -- 初始化杀/闪/桃/酒 Buff ID 和数量
+-- 杀/闪/桃/酒 Buff ID 预加载，用于 Buff 系统快速查找；格局配置数据(阵型/行走)也在 Init 时缓存
     -- 加载格局配置（CommonDefault / GeneralDefault / ShuXingZhen / Walk01）
 end
 ```
@@ -418,6 +445,7 @@ end
 以下代码展示从技能选择到伤害结算的完整调用链（简化）：
 
 ```lua
+-- 完整调用链示例：选技 → 创建Actor → Play启动状态机 → 逐帧Update驱动 → AttackState写伤害 → 结算读伤害
 -- 1. AI 选技，HeroSkillComp 检查 CD
 local skillData = hero.heroSkillComp:GetUsableSkill()
 
@@ -431,6 +459,7 @@ battle.combatField:CreateCombatActor(
 -- 3. 启动技能
 local skill = hero.heroSkillComp:GetSkill(skillData.ID)
 skill:Play(targetHero, false)
+-- Play 的第二个参数 false 表示非多目标模式，单目标时直接传入目标对象
 
 -- 4. 每帧驱动（由 Battle:Update 统一调用）
 -- skill:Update(dt)
@@ -441,6 +470,7 @@ skill:Play(targetHero, false)
 
 -- 6. 结算阶段读取并应用
 local record = battle.combatField:GetDamageByIndex(hero.id, 1, 1)
+-- GetDamageByIndex 需要精确匹配攻击者 ID + 攻击序号 + 命中序号，1,1 表示第一次攻击的第一次命中
 if record then
     targetHero:ApplyDamage(record.damageVal, record.isCrit)
 end
@@ -449,6 +479,7 @@ end
 **暴击判定片段**（Damage.lua 实际调用）：
 
 ```lua
+-- 实际战斗中每次伤害计算需分别判定暴击和元素加成，两部分系数独立计算后叠加到基础伤害上
 local isCrit = Damage.IsCriDamage(battle.random, hero:GetCRI())
 local elemBonus = Damage.GetDamageElem(
     CDataEnum.DamageElementType.Fire, hero, targetHero)

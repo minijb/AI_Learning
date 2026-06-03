@@ -1,7 +1,7 @@
 # 04 — init.lua 结构与基本选项配置
 
-> 所属计划: Neovim + Lua 配置实战
-> 预计耗时: 45 分钟
+> 所属计划: Neovim + Lua 配置实战 (现代版)
+> 预计耗时: 40 分钟
 > 前置知识: 03-lua-functions-modules（模块系统）
 
 ---
@@ -12,74 +12,66 @@
 
 Neovim 启动时按以下顺序查找配置文件：
 
-1. `~/.config/nvim/init.lua`（推荐，Lua 配置）
+1. `~/.config/nvim/init.lua`（Lua 配置，推荐）
 2. `~/.config/nvim/init.vim`（Vimscript 配置，兼容旧配置）
 
 两者都存在时，Neovim **只加载 `init.lua`**，忽略 `init.vim`。
 
-### 推荐的目录结构
+### 两种配置组织风格
+
+**风格 A: kickstart 单文件风格（本计划推荐）**
 
 ```
 ~/.config/nvim/
-├── init.lua              ← 入口：只负责 require 各模块
+├── init.lua              ← 单一入口，~1000 行，9 个 do 块
+├── nvim-pack-lock.json   ← vim.pack 锁文件（自动生成）
 ├── lua/
-│   ├── config/
-│   │   ├── options.lua   ← 编辑器选项
-│   │   ├── keymaps.lua   ← 按键映射
-│   │   ├── autocmds.lua  ← 自动命令
-│   │   └── lazy.lua      ← lazy.nvim 初始化
-│   └── plugins/
-│       ├── lsp.lua       ← LSP 相关插件配置
-│       ├── cmp.lua       ← 补全配置
-│       └── telescope.lua ← Telescope 配置
-└── lazy-lock.json        ← lazy.nvim 锁定文件（自动生成）
+│   ├── kickstart/        ← kickstart 自带的扩展模块
+│   │   └── plugins/      ←   可选插件（debug, lint, ...）
+│   └── custom/           ← 你的自定义插件
+│       └── plugins/
+└── after/                ← 覆盖/补充配置（最后加载）
 ```
 
-### init.lua 最小骨架
+**风格 B: 模块化风格（从 kickstart 演进而来）**
+
+```
+~/.config/nvim/
+├── init.lua              ← 入口：设置 leader + require 各模块
+├── nvim-pack-lock.json
+├── lua/
+│   └── config/
+│       ├── options.lua   ← 编辑器选项
+│       ├── keymaps.lua   ← 按键映射
+│       ├── autocmds.lua  ← 自动命令
+│       ├── plugins.lua   ← vim.pack.add() 集中管理
+│       ├── lsp.lua       ← LSP 配置
+│       └── completion.lua← blink.cmp 配置
+└── after/
+```
+
+两种风格可以根据个人偏好选择。kickstart 单文件适合学习和快速上手；模块化适合长期维护较大配置。
+
+### Neovim 0.12: vim.loader.enable()
 
 ```lua
--- ~/.config/nvim/init.lua
-
--- 1. 设置 leader 键（必须在其他映射之前）
-vim.g.mapleader = " "
-vim.g.maplocalleader = " "
-
--- 2. 加载基础配置
-require("config.options")
-require("config.keymaps")
-require("config.autocmds")
-
--- 3. 初始化插件管理器
-require("config.lazy")
+-- 放在 init.lua 第一行，缓存编译后的 Lua 模块，显著加速启动
+vim.loader.enable()
 ```
 
 ### vim.o / vim.opt / vim.g / vim.bo / vim.wo
 
-Neovim 提供了多层级的选项访问 API：
-
 | API | 作用域 | 示例 |
 |-----|--------|------|
-| `vim.o` | 全局选项（字符串形式） | `vim.o.number = true` |
-| `vim.opt` | 全局选项（推荐，类 Vimscript `:set`） | `vim.opt.number = true` |
+| `vim.o` | 全局选项（简单值） | `vim.o.number = true` |
+| `vim.opt` | 全局选项（支持类 Vimscript `:set`） | `vim.opt.listchars = { tab = '» ' }` |
 | `vim.bo` | 缓冲区局部选项 | `vim.bo[0].filetype = "lua"` |
 | `vim.wo` | 窗口局部选项 | `vim.wo[0].cursorline = true` |
 | `vim.g` | 全局变量 | `vim.g.mapleader = " "` |
 | `vim.b` | 缓冲区局部变量 | `vim.b.my_var = 1` |
 
-**`vim.opt` 的优势：**
-
+`vim.opt` 支持 append/prepend/remove：
 ```lua
--- vim.o 方式：只能逐个设置
-vim.o.tabstop = 4
-vim.o.shiftwidth = 4
-vim.o.expandtab = true
-
--- vim.opt 方式：支持类 Vimscript 语法
-vim.opt.tabstop = 4
-vim.opt.shiftwidth = 4
-vim.opt.expandtab = true
-
--- vim.opt 支持 append/prepend/remove
 vim.opt.wildignore:append({ "*/node_modules/*", "*/target/*" })
 ```
 
@@ -87,136 +79,115 @@ vim.opt.wildignore:append({ "*/node_modules/*", "*/target/*" })
 
 ```lua
 -- 行号
-vim.opt.number = true           -- 绝对行号
-vim.opt.relativenumber = true   -- 相对行号
+vim.o.number = true
+-- vim.o.relativenumber = true  -- 可选：相对行号
 
 -- 缩进
-vim.opt.tabstop = 4             -- Tab 显示宽度
-vim.opt.softtabstop = 4         -- 编辑时 Tab 的实际列数
-vim.opt.shiftwidth = 4          -- 自动缩进的宽度
-vim.opt.expandtab = true        -- Tab 转换为空格
+vim.o.tabstop = 4
+vim.o.shiftwidth = 4
+vim.o.expandtab = true
 
 -- 搜索
-vim.opt.ignorecase = true       -- 忽略大小写
-vim.opt.smartcase = true        -- 有大写字母时不忽略
-vim.opt.hlsearch = false        -- 不高亮搜索结果
+vim.o.ignorecase = true
+vim.o.smartcase = true
 
 -- 界面
-vim.opt.termguicolors = true    -- 24 位真彩色
-vim.opt.signcolumn = "yes"      -- 始终显示标记列（避免 LSP 诊断闪烁）
-vim.opt.scrolloff = 8           -- 光标距上下边界的最小行数
-vim.opt.cursorline = true       -- 高亮当前行
+vim.o.signcolumn = "yes"       -- LSP 诊断标记列
+vim.o.scrolloff = 10           -- 光标距边界的最小行数
+vim.o.cursorline = true        -- 高亮当前行
+vim.o.termguicolors = true     -- 24 位真彩色（自动启用）
 
 -- 剪贴板
-vim.opt.clipboard = "unnamedplus"  -- 与系统剪贴板同步
+vim.schedule(function()
+  vim.o.clipboard = "unnamedplus"  -- 延迟设置，减少启动时间
+end)
 
 -- 分割窗口
-vim.opt.splitright = true       -- 垂直分割在右
-vim.opt.splitbelow = true       -- 水平分割在下
+vim.o.splitright = true
+vim.o.splitbelow = true
+
+-- undo
+vim.o.undofile = true
+
+-- 预览替换
+vim.o.inccommand = "split"
+
+-- 确认退出（避免误关闭未保存文件）
+vim.o.confirm = true
 ```
 
 ---
 
 ## 2. 代码示例
 
-完整的 `lua/config/options.lua`：
-
-```lua
--- lua/config/options.lua
-local M = {}
-
-function M.setup()
-    -- ====== 行号 ======
-    vim.opt.number = true
-    vim.opt.relativenumber = true
-
-    -- ====== 缩进 ======
-    vim.opt.tabstop = 4
-    vim.opt.softtabstop = 4
-    vim.opt.shiftwidth = 4
-    vim.opt.expandtab = true
-    vim.opt.smartindent = true
-
-    -- ====== 搜索 ======
-    vim.opt.ignorecase = true
-    vim.opt.smartcase = true
-    vim.opt.hlsearch = false
-    vim.opt.incsearch = true
-
-    -- ====== 界面 ======
-    vim.opt.termguicolors = true
-    vim.opt.signcolumn = "yes"
-    vim.opt.scrolloff = 8
-    vim.opt.cursorline = true
-    vim.opt.colorcolumn = "80"
-
-    -- ====== 剪贴板 ======
-    vim.opt.clipboard = "unnamedplus"
-
-    -- ====== 分割窗口 ======
-    vim.opt.splitright = true
-    vim.opt.splitbelow = true
-
-    -- ====== 备份与交换文件 ======
-    vim.opt.swapfile = false
-    vim.opt.backup = false
-    -- 将所有 undo 历史集中到一个目录
-    vim.opt.undodir = vim.fn.stdpath("data") .. "/undodir"
-    vim.opt.undofile = true
-
-    -- ====== 性能 ======
-    vim.opt.updatetime = 50     -- 更快触发 CursorHold 事件
-    vim.opt.timeoutlen = 300    -- 按键序列超时（ms）
-end
-
-return M
-```
-
-入口 `init.lua`：
+### 最小 init.lua（kickstart 风格 foundation block）
 
 ```lua
 -- ~/.config/nvim/init.lua
+vim.loader.enable()
 
--- leader 键
 vim.g.mapleader = " "
 vim.g.maplocalleader = " "
 
--- 加载基础配置
-require("config.options").setup()
+-- 选项
+vim.o.number = true
+vim.o.mouse = "a"
+vim.o.showmode = false
+vim.schedule(function() vim.o.clipboard = "unnamedplus" end)
+vim.o.breakindent = true
+vim.o.undofile = true
+vim.o.ignorecase = true
+vim.o.smartcase = true
+vim.o.signcolumn = "yes"
+vim.o.updatetime = 250
+vim.o.timeoutlen = 300
+vim.o.splitright = true
+vim.o.splitbelow = true
+vim.o.list = true
+vim.opt.listchars = { tab = "» ", trail = "·", nbsp = "␣" }
+vim.o.inccommand = "split"
+vim.o.cursorline = true
+vim.o.scrolloff = 10
+vim.o.confirm = true
 ```
 
 **运行方式:**
-1. 将上述文件放在 Neovim 配置目录
-2. 启动 Neovim: `nvim`
-3. 检查选项是否生效: `:set number?` 应显示 `number`
+1. 创建 `~/.config/nvim/init.lua`（Windows: `%LOCALAPPDATA%/nvim/init.lua`）
+2. 写入上述代码
+3. 启动 Neovim，`:set number?` 验证行号已开启
+4. 依次检查 `:set scrolloff?`、`:set signcolumn?` 等确认选项生效
 
 ---
 
 ## 3. 练习
 
 ### 练习 1: 迁移现有配置
-如果你已有 `init.vim`，请将其中的 `set` 命令翻译成 Lua 的 `vim.opt` 形式，创建 `lua/config/options.lua`。
 
-从 Vimscript 到 Lua 的对照：
+如果你已有 `init.vim`，将其中的 `set` 命令翻译成 Lua：
+
 ```vim
 " Vimscript                    →  Lua
-set number                     →  vim.opt.number = true
-set tabstop=4                  →  vim.opt.tabstop = 4
-set mouse=a                    →  vim.opt.mouse = "a"
+set number                     →  vim.o.number = true
+set tabstop=4                  →  vim.o.tabstop = 4
+set mouse=a                    →  vim.o.mouse = "a"
 set listchars=tab:▸\ ,trail:·  →  vim.opt.listchars = { tab = "▸ ", trail = "·" }
 ```
 
-### 练习 2: 查看当前选项值
-在 Neovim 中运行 `:lua print(vim.inspect(vim.opt.tabstop))` 查看 `vim.opt` 返回的结构。用同样方式检查 `vim.opt.listchars` —— 理解 table 形式的选项。
+### 练习 2: 理解 vim.opt 的 table 语义
 
-### 练习 3: 创建你自己的模块化配置（可选）
-创建以下完整结构，每个模块只导出一个 `setup()` 函数：
-
+```lua
+:lua print(vim.inspect(vim.opt.listchars))
+:lua vim.opt.listchars:append({ extends = ">" })
+:lua print(vim.inspect(vim.opt.listchars))
 ```
-lua/config/
-├── options.lua
-├── keymaps.lua   ← 先创建空 setup
-├── autocmds.lua  ← 先创建空 setup
+
+### 练习 3: 对比 vim.o 和 vim.opt
+
+```lua
+-- 这两个等价吗？
+vim.o.listchars = "tab:» ,trail:·"
+vim.opt.listchars = { tab = "» ", trail = "·" }
+-- 在 Neovim 中测试，观察差异
 ```
 
 ---
@@ -225,14 +196,15 @@ lua/config/
 
 - [Neovim 官方 Lua Guide — Options](https://neovim.io/doc/user/lua-guide.html#lua-guide-options)
 - [`:help vim.opt`](https://neovim.io/doc/user/lua.html#vim.opt)
+- [`:help vim.loader`](https://neovim.io/doc/user/helptag.html?tag=vim.loader) — 0.12 新增的缓存加速
 - [`:help options`](https://neovim.io/doc/user/options.html) — 所有可用选项的完整列表
 
 ---
 
 ## 常见陷阱
 
-- **在 Windows 上路径分隔符**：Lua 字符串中的 `\` 需要转义。用 `[[]]` 或 `/` 代替 `\`。
-- **`vim.opt.listchars` 的特殊格式**：它是 table 而非字符串。`vim.opt.listchars = { tab = "▸ ", trail = "·" }`，不是 `vim.opt.listchars = "tab:▸ ,trail:·"`。
-- **`vim.g.mapleader` 必须在所有按键映射之前设置**：因为 keymap 在定义时就会使用 leader 的值。
-- **忘记调用 `setup()`**：如果模块有 `setup()` 函数但没有调用，选项不会被设置。
-- **相对行号在当前行显示 0**：这是正常行为，`0` 表示这是当前行。
+- **在 Windows 上路径分隔符**：Lua 字符串中的 `\` 需要转义。用 `[[]]` 或 `/` 代替。
+- **`vim.opt.listchars` 是 table 不是字符串**：`vim.opt.listchars = { tab = "▸ " }`，不是 `vim.opt.listchars = "tab:▸ "`。
+- **`vim.g.mapleader` 必须在所有 keymap 之前设置**：因为 keymap 在定义时就会解析 leader 的值。
+- **`clipboard = "unnamedplus"` 放在 `vim.schedule` 中**：kickstart 的做法是延迟设置以加速启动。如果你有频繁用系统剪贴板的需求，可以直接设置。
+- **`vim.loader.enable()` 可能跳过代码变更**：修改了 `lua/` 下的模块后，需要重启 Neovim 才能看到效果。开发自己的配置时可以暂时注释掉这行。

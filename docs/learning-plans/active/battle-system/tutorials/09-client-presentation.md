@@ -19,9 +19,13 @@
 -- ClientBattle.lua
 ---@param lcBattle Battle
 function ClientBattle:SetLogicBattle(lcBattle)
+    -- 持有逻辑层引用，表现层通过此引用读取逻辑状态（只读，禁止写入）
     self.logicBattle = lcBattle
+    -- 将客户端剧情管理器注入逻辑层，使逻辑层能通过 performMgr 驱动客户端表现序列
     self.logicBattle.performMgr.clientPerformMgr = self.clientPerformMgr
+    -- 注入 C# GridManager 单例，逻辑层与表现层共享同一格子状态
     self.logicBattle.gridMgr = CS.Core.GridManager.Inst
+    -- 绑定完成，广播全局事件通知 UI / 音频等外部系统
     eventMgr:Send(EventID.Logic_BATTLE_CREATE, lcBattle)
 end
 ```
@@ -40,6 +44,7 @@ end
 
 ```lua
 class.AddComponents(ClientBattle, {
+    -- 通过 class.AddComponents 混入六个表现层组件，各自负责独立子系统
     BattleMapComp,        -- ClientBattleMapComp
     BattleFightComp,      -- ClientBattleFightComp
     BattleBFComp,         -- ClientBattleBFComp
@@ -66,10 +71,14 @@ class.AddComponents(ClientBattle, {
 处理**战场技（BF Skill）相关表现**，主要职责是全屏压黑遮罩：
 
 ```lua
--- 战场技，压黑
+-- 战场技，压黑：控制全屏黑色遮罩的显隐与淡入淡出
 function ClientBattleBFComp:BFSetFullScreenBlackMask(
-    visible, attarckerId, isMultiTarget, target,
-    eraseInOutTime, callback)
+    visible,        -- true=显示遮罩 / false=隐藏
+    attarckerId,    -- 释放者 ID，用于遮罩层级归属
+    isMultiTarget,  -- 是否为多目标技能（影响遮罩范围）
+    target,         -- 目标对象引用
+    eraseInOutTime, -- 淡入/淡出过渡时长（秒）
+    callback)       -- 过渡完成回调
 ```
 
 持有 `skillFullBlackMaskTrans`（GameObject 引用），仅在需要时懒加载，通过 `GameObject.Find("BattleFight")` 找到根节点后向下查找遮罩。
@@ -90,6 +99,7 @@ function ClientBattleBFComp:BFSetFullScreenBlackMask(
 - `self.visEntity`（`VisActor`，由 `GraphicComp` 管理）：渲染层实体，承载 Spine 动画和特效。
 
 ```lua
+-- ClientBattleHero 是每个战场将领的客户端代理，通过 logicObject 读取逻辑数据，通过 visEntity 驱动渲染
 ---@class (partial) ClientBattleHero:ClientEntity
 ---@field public logicObject BattleHero   -- 对应的逻辑层对象
 ---@field public battle      ClientBattle
@@ -100,7 +110,7 @@ function ClientBattleBFComp:BFSetFullScreenBlackMask(
 逻辑层通过 `OnStartAction` / `OnStopAction` 通知表现层行动节奏：
 
 ```lua
--- logic 层通知将领可以行动
+-- 逻辑层通知本将领进入可行动状态，驱动移动动画并广播回合行动事件
 function ClientBattleHero:OnStartAction()
     self.isStartAction = true
     self:OnStartAction_Move()
@@ -112,6 +122,7 @@ end
 
 ```lua
 class.AddComponents(ClientBattleHero, {
+    -- 13 个组件通过组合模式扩展 ClientBattleHero 的表现能力
     GraphicComp,          -- 管理 visEntity/visBloodBar/特效
     HudComp,              -- 血条、Buff 图标、手牌特效
     HeroDamageComp,       -- 伤害数字跳字
@@ -168,10 +179,11 @@ class.AddComponents(ClientBattleHero, {
 `VisEntityPool`（单例）是所有 `VisEntity` 的统一管理器，避免频繁创建/销毁 GameObject：
 
 ```lua
+-- VisEntityPool 是所有 VisEntity 的统一对象池单例，按 assetPath 分桶管理空闲对象，避免频繁创建/销毁 GameObject
 ---@class VisEntityPool
 ---@field public poolMaps  Queue<VisEntity>  -- 按 assetPath 分桶的空闲队列
 ---@field public poolRoot  UnityEngine.Transform  -- 池根节点（隐藏于场景中）
-local VisEntityPool = class.Class("VisEntityPool", nil, true)  -- 单例
+local VisEntityPool = class.Class("VisEntityPool", nil, true)  -- 第三个参数 true 表示单例模式
 ```
 
 **获取对象**：`VisEntityPool:Get(assetPath, modelType)`  
@@ -188,6 +200,7 @@ local VisEntityPool = class.Class("VisEntityPool", nil, true)  -- 单例
 `VisActor` 继承 `VisEntity`，是战斗单位（将领/士兵）的渲染载体：
 
 ```lua
+-- VisActor 是战斗单位的渲染载体，继承 VisEntity 并扩展 Spine 动画控制能力
 ---@class VisActor:VisEntity
 ---@field public animationStateMachine AnimationStateMachine
 ---@field public spineController       SpineController  -- C# Spine 控制器
@@ -197,25 +210,26 @@ local VisEntityPool = class.Class("VisEntityPool", nil, true)  -- 单例
 动画接口：
 
 ```lua
--- 播放动画，isLoop 控制是否循环，onCompletedCb 单次播放完毕回调
+-- 播放指定动画，loop 控制循环，onCompletedCb 为非循环动画的结束回调，id 用于区分动画实例
 function VisActor:Play(anim, loop, onCompletedCb, id)
 
--- 设置整体动画速度（影响 spineController）
+-- 设置整体动画播放速率，影响 spineController 的 timeScale
 function VisActor:SetAnimationSpeed(speed)
 
--- 渐隐消失（用于死亡、退场）
+-- 渐隐消失：在 duration 秒内将 alpha 降至 0，用于死亡/退场表现
 function VisActor:FadeOut(duration, callback)
 
--- 爆白闪烁（受击反馈）
+-- 爆白闪烁：time 秒内将角色材质设为白色高亮，用于受击反馈
 function VisActor:SetWhiteOut(time)
 
--- 把 GameObject 挂载到指定骨骼
+-- 把任意 GameObject 挂载到 Spine 骨架的指定骨骼节点上，用于装备/特效绑定
 function VisActor:AttachToBone(gameObject, boneName)
 ```
 
 动画状态机（`AnimationStateMachine`）封装了 Spine 的状态切换逻辑，每帧在 `VisActor:Update()` 中驱动：
 
 ```lua
+-- 每帧驱动动画状态机更新；nil 检查防止 AnimationStateMachine 尚未创建时调用报错
 function VisActor:Update()
     if nil ~= self.animationStateMachine then
         self.animationStateMachine:Update()
@@ -228,9 +242,10 @@ end
 `VisFx` 管理粒子/序列帧特效，关键字段：
 
 ```lua
+-- VisFx 关键生命周期字段：duration=-1 表示永久特效，需业务方手动回收；isLoop 标记循环播放
 self.duration = -1   -- 持续时间，-1 表示永久（需手动回收）
 self.isLoop   = false
-self.recycleTime = 0 -- 延迟回收时间戳
+self.recycleTime = 0 -- 延迟回收时间戳，用于非循环特效播完后自动归还对象池
 self.onPlayCompleted = nil  -- 非循环特效播完回调
 ```
 
@@ -242,10 +257,11 @@ self.onPlayCompleted = nil  -- 非循环特效播完回调
 
 ```lua
 -- Logic/Battle/Battle.lua
+-- 逻辑层固定 30Hz 更新：累加 dt（受 timeRate 倍速影响），用 while 循环消费累积时间
 local FIXED_TIME_STEP = 0.03   -- 30Hz
 function Battle:Update(dt)
     self.accumulatedTime = self.accumulatedTime + self.timeRate*dt
-    -- 固定 30 帧的速度计算
+    -- while 循环确保帧率波动时追赶逻辑步数，保证逻辑确定性
     while (self.accumulatedTime >= FIXED_TIME_STEP) do
         self:FixedUpdate30Hz(FIXED_TIME_STEP)
         self.accumulatedTime = self.accumulatedTime - FIXED_TIME_STEP
@@ -253,10 +269,10 @@ function Battle:Update(dt)
 end
 
 -- ClientBattle/ClientBattle.lua
+-- 表现层固定 60Hz 更新：dt 不经 timeRate 处理，由 FixedUpdate60Hz 内部自行应用倍速
 local FIXED_TIME_STEP = 0.016666   -- 60Hz
 function ClientBattle:Update(dt)
     self.accumulatedTime = self.accumulatedTime + dt
-    -- 固定 60 帧的速度计算
     while (self.accumulatedTime >= FIXED_TIME_STEP) do
         self:FixedUpdate60Hz(FIXED_TIME_STEP)
         self.accumulatedTime = self.accumulatedTime - FIXED_TIME_STEP
@@ -285,6 +301,7 @@ end
 `ClientBattleEventID`（`ClientBattle/ClientBattleEventID.lua`）定义表现层内部通信的全部事件 ID，声明为全局枚举：
 
 ```lua
+-- 声明为全局枚举，通过 GLDeclare 注册到 Lua 全局命名空间，供所有战斗组件直接引用
 ---@enum ClientBattleEventID
 local ClientBattleEventID = {
     -- 状态变化
@@ -317,16 +334,18 @@ local ClientBattleEventID = {
     FullScreenBlackMask    = 133,
     BuffDamageNotice       = 211,
 }
+-- 将枚举注册为全局变量，跨文件可通过 ClientBattleEventID.xxx 直接访问
 GLDeclare("ClientBattleEventID", ClientBattleEventID)
 ```
 
 `ClientBattle` 继承自 `EventCenter`（而非全局 `eventMgr`），事件在**战斗实例内部**传播，生命周期随战斗销毁而清空：
 
 ```lua
--- 发送
+-- 战斗实例内部事件通信：通过 self.battle:Send/On 在组件间传递，随战斗实例生命周期自动管理
+-- 发送事件
 self.battle:Send(ClientBattleEventID.StartBattle)
 
--- 订阅（在某组件的 init 中）
+-- 订阅事件（在某组件的 init 中注册）
 self.battle:On(ClientBattleEventID.HeroHp, function(heroId, hp, maxHp)
     -- 刷新对应将领血条显示
 end)
@@ -339,10 +358,10 @@ end)
 每个 `ClientBattleHero` 通过 `HudComp` 管理其游戏内 HUD，HUD 对象同样从 `VisEntityPool` 获取：
 
 ```lua
--- HudComp 持有的字段
+-- HudComp 持有的字段：所有 HUD 元素通过 VisEntityPool 获取，生命周期由组件管理
 self.visBloodBar = nil   -- VisBloodBar，头顶血条
 self.visFIBBar   = nil   -- VisEntity，强攻进度条（ForceIntoBattle）
-self.buffSlots   = { 0, 0, 0 }  -- Buff 插槽状态
+self.buffSlots   = { 0, 0, 0 }  -- Buff 插槽状态，0=空闲，非0=对应 Buff ID
 self.baseCardFx  = {}    -- 杀/闪/桃 手牌特效
 ```
 
@@ -351,7 +370,7 @@ self.baseCardFx  = {}    -- 杀/闪/桃 手牌特效
 `VisBloodBar` 封装了 C# `BloodBar` 和 `BuffBar` 组件，提供 Lua 侧接口：
 
 ```lua
--- 设置血条填充比例（0~1）
+-- 设置血条填充比例（0~1）；nil 检查确保 C# BloodBar 组件已正确绑定
 function VisBloodBar:SetHpValue(v)
     if nil ~= self.bloodBar then
         self.bloodBar:SetBarRate(v)
@@ -361,10 +380,10 @@ end
 -- 设置头像
 function VisBloodBar:SetHeadImage(imgName)
 
--- 设置 Buff 图标（按插槽索引）
+-- 设置 Buff 图标（按插槽索引），支持堆叠层数和剩余回合数显示
 function VisBloodBar:SetBuffIcon(slotIdx, assetPath, isStack, buffCount, roundCount)
 
--- 显示百分比文字
+-- 显示/隐藏百分比文字
 function VisBloodBar:SetShowPercentage(isShow)
 ```
 
@@ -375,9 +394,10 @@ function VisBloodBar:SetShowPercentage(isShow)
 伤害/治疗数字由 C# 侧 `HurtTextManager` 统一管理，Lua 通过全局引用调用：
 
 ```lua
+-- 获取 C# HurtTextManager 单例引用，Lua 侧不直接管理跳字对象
 local hurtTextMgr = CS.Core.HurtTextManager.Inst
 
--- 战斗速率变化时同步跳字速率
+-- 战斗速率变化时同步跳字速率：倍速播放时跳字飘动速度也需等比调整
 function ClientBattle:SetTimeRate(index)
     local s = AnimSpeed.GetRateByIndex(index)
     -- ...
@@ -392,6 +412,7 @@ end
 `HudComp` 将逻辑 Buff ID 映射到血条上的插槽：
 
 ```lua
+-- Buff ID 到血条插槽的映射：通过配置表 ID 确定显示位置，避免硬编码索引
 local BuffSlotMap = {
     [100] = 1,  -- 杀 buff
     [200] = 2,  -- 闪 buff
@@ -410,18 +431,19 @@ local BuffSlotMap = {
 
 ```lua
 function ClientBattle:ctor()
+    -- 调用父类 ctor 完成 EventCenter 等基础初始化
     ClientBattle.super.ctor(self)
     self.id = 0
     self.isClient = true
-    self.logicBattle = nil       -- 绑定前为 nil
+    self.logicBattle = nil       -- 绑定前为 nil，init 时不依赖逻辑层
     self.timerMgr = nil
     self.teams = nil
     self.battleInfo = nil
     self.trueBattleID = 0
-    self.timeRate = 1
+    self.timeRate = 1            -- 默认 1x 速率，受 GameSetting.timeRate 控制
     self.isSkipArray = false     -- 是否跳过布阵
     self.isPvp = false           -- 是否为竞技场
-    self.accumulatedTime = 0
+    self.accumulatedTime = 0     -- 固定步长累加器，用于 FixedUpdate 调度
     self.battleState = Enum.BattleState.None
     self.skillActionPool = nil
     self.buffActionPool = nil
@@ -434,12 +456,15 @@ end
 
 ```lua
 function ClientBattle:init()
-    require("ClientBattle.ClientBattleEventID")  -- 注册全局枚举
+    -- 加载事件 ID 枚举定义，触发 GLDeclare 注册为全局变量
+    require("ClientBattle.ClientBattleEventID")
     self.debug = true
     self.detailDebug = true
 
+    -- 创建表现层专用计时器管理器，用于动画延迟、特效时序等
     self.timerMgr = TimeManager("ClientBattle")
 
+    -- 创建技能/Buff 表现动作对象池，避免频繁 GC 分配
     self.skillActionPool = SkillActionPool()
     self.buffActionPool  = BuffActionPool()
     self.clientPerformMgr = ClientPerformManager.GetInstance()
@@ -448,10 +473,11 @@ function ClientBattle:init()
     self.buffActionPool:init()
     self.clientPerformMgr:init(self)
 
+    -- 初始化 C# GridManager，设置默认格子大小
     CS.Core.GridManager.Inst:Init()
     CS.Core.GridManager.Inst:SetGridSize(GridDefaultSize, GridDefaultSize)
 
-    -- 建立五个阵营容器
+    -- 建立五个阵营容器：本阵/友方/敌方/隐藏 各有独立 ClientBattleTeam
     self.teams = OrderedMap.new()
     self.teams:set(Enum.Team.None,   ClientBattleTeam(Enum.Team.None,   self))
     self.teams:set(Enum.Team.Self,   ClientBattleTeam(Enum.Team.Self,   self))
@@ -459,9 +485,11 @@ function ClientBattle:init()
     self.teams:set(Enum.Team.Enemy,  ClientBattleTeam(Enum.Team.Enemy,  self))
     self.teams:set(Enum.Team.Hide,   ClientBattleTeam(Enum.Team.Hide,   self))
 
+    -- 默认开启输入，后续由 StartBattle 根据状态控制
     CS.CSharpCall.SetInputEnable(true)
 
-    eventMgr:Send(EventID.BATTLE_CREATE, self)  -- 通知外部系统
+    -- 发出全局事件通知外部系统（UI、音频等）战斗实例已就绪
+    eventMgr:Send(EventID.BATTLE_CREATE, self)
     return true
 end
 ```
@@ -471,11 +499,13 @@ end
 ```lua
 ---@param lcBattle Battle
 function ClientBattle:SetLogicBattle(lcBattle)
+    -- 建立逻辑层引用；此时逻辑层所有组件已初始化完毕
     self.logicBattle = lcBattle
-    -- 将剧情管理器注入逻辑层，逻辑层通过它驱动剧情序列
+    -- 将客户端剧情管理器注入逻辑层，逻辑层通过 performMgr 驱动客户端表现序列
     self.logicBattle.performMgr.clientPerformMgr = self.clientPerformMgr
-    -- 逻辑层与表现层共享同一 GridManager 实例
+    -- 逻辑层与表现层共享同一 C# GridManager 实例，避免格子状态不同步
     self.logicBattle.gridMgr = CS.Core.GridManager.Inst
+    -- 绑定完成后广播全局事件，依赖逻辑层数据的组件应监听此事件再初始化
     eventMgr:Send(EventID.Logic_BATTLE_CREATE, lcBattle)
 end
 ```
@@ -484,25 +514,26 @@ end
 
 ```lua
 function ClientBattle:StartBattle(isPerform)
-    -- 调试用：支持在 BattleGlobalData 中设置超速
+    -- 调试用：支持在 BattleGlobalData 中设置全局 Unity 时间缩放
     if BattleGlobalData.timeScale > 1 then
         CS.UnityEngine.Time.timeScale = BattleGlobalData.timeScale
     end
 
-    -- 播放战斗音乐
+    -- 根据配置表播放战斗背景音乐
     local musicName = self.logicBattle.battleInfo.MusicBattle
     if nil ~= musicName and '' ~= musicName then
         SoundMgr.PlayMusic(musicName)
     end
 
-    -- 通知所有队伍开始战斗
+    -- 遍历所有阵营，通知每个 ClientBattleTeam 开始战斗表现
     for _, team in (self.teams:pairs()) do
         team:OnStartBattle()
     end
 
+    -- 应用玩家设置的战斗速率（1x/2x/3x）
     self:SetTimeRate(GameSetting.timeRate)
 
-    -- 剧情模式下隐藏血条 Buff 图标
+    -- 剧情模式下隐藏所有将领的血条和 Buff 图标，避免 HUD 干扰演出
     if isPerform then
         for _, team in (self.teams:pairs()) do
             for id, ent in (team.entities:pairs()) do
@@ -511,9 +542,10 @@ function ClientBattle:StartBattle(isPerform)
         end
     end
 
+    -- 广播战斗开始事件，各组件监听后启动对应表现
     self:Send(ClientBattleEventID.StartBattle)
 
-    -- 禁用输入，等战斗条件和开场动画结束后再开启
+    -- 禁用玩家输入，待开场动画/战斗条件就绪后再由对应逻辑开启
     CS.CSharpCall.SetInputEnable(false)
 end
 ```
@@ -533,10 +565,10 @@ end
 `ClientBattleHero.logicObject` 是逻辑层 `BattleHero` 的**直接引用**，表现层代码可以读取其数值，但**绝不能写入**。逻辑层数据的修改必须通过逻辑层自身的方法完成，否则会导致逻辑-表现状态不一致，在回放/存档场景下产生无法复现的 bug。
 
 ```lua
--- 错误：在表现层直接修改逻辑数据
+-- 错误：在表现层直接修改逻辑数据，破坏逻辑确定性，回放结果将不一致
 hero.logicObject.hp = hero.logicObject.hp - 10   -- 禁止
 
--- 正确：通过逻辑层方法触发，表现层订阅 HeroHp 事件刷新血条
+-- 正确：通过逻辑层方法触发伤害，表现层订阅 HeroHp 事件刷新血条显示
 -- logicBattle 侧调用 hero:TakeDamage(10)，再由 ClientBattleEventID.HeroHp 同步
 ```
 

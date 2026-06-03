@@ -43,17 +43,16 @@
 -- typeName:    类名字符串（全局唯一）
 -- superType:   父类，可为 nil
 -- isSingleton: 是否单例，可为 nil（默认 false）
+-- 创建一个新的单继承类，返回类的构造器表；支持 super 调用链和标准生命周期方法
 function Class.Class(typeName, superType, isSingleton)
 ```
 
 EmmyLua 注解形式：
-
 ```lua
----@generic T, P
----@class Class
----@overload fun(typeName:T, superType:P?, isSingleton:boolean?):T
+---@generic T, P                         -- 声明两个泛型参数 T（类名类型）和 P（父类类型）
+---@class Class                           -- 将所有构造函数归类到 Class 命名空间下
+---@overload fun(typeName:T, superType:P?, isSingleton:boolean?):T  -- 构造函数重载：根据 typeName 推断返回类型
 ```
-
 **内置生命周期方法**（框架在 `__defaultMethods` 中声明）：
 
 | 方法 | 调用时机 | 返回值要求 |
@@ -72,6 +71,7 @@ EmmyLua 注解形式：
 ```lua
 -- 签名
 -- typeName: 组件名字符串（全局唯一）
+-- 创建一个组件（平铺方法集合），无实例、无继承链，仅供 AddComponents 注入到类中
 function Class.Component(typeName)
 ```
 
@@ -138,8 +138,10 @@ Component 本质是一个携带方法的普通 table，通过 `Class.AddComponen
 `Battle.lua` 第 61–76 行：
 
 ```lua
+-- 创建 Battle 单继承类，继承 EventCenter，第三个参数 false 表示非单例（每场战斗独立实例）
 local Battle = class.Class("Battle", EventCenter, false)
 
+-- 将 12 个子系统组件的方法注入到 Battle 的虚表中，实现横向能力聚合
 class.AddComponents(Battle, {
     BattleMapComp,       -- 地图管理
     BattleTriggerComp,   -- 触发器系统
@@ -163,24 +165,26 @@ class.AddComponents(Battle, {
 `Class.lua` 第 731–749 行：
 
 ```lua
+-- 内部函数：将单个组件的方法和属性注入到目标类中
 local function _addComponent(cls, component)
-    assert(component.__IsComponent, "must be a component")
-    assert(component.typeName ~= nil, "component must have a name")
-    assert(ComponentNames[component.typeName] ~= nil, "component must register")
-    assert(cls.componentNames[component.typeName] == nil,
+    assert(component.__IsComponent, "must be a component")  -- 必须是 Component 实例（避免误传普通 table）
+    assert(component.typeName ~= nil, "component must have a name")  -- 必须有注册名
+    assert(ComponentNames[component.typeName] ~= nil, "component must register")  -- 必须在全局注册表中
+    assert(cls.componentNames[component.typeName] == nil,  -- 防止同一组件重复注册（不检测方法名冲突！）
            "class already has same component " .. component.typeName)
 
-    cls.componentNames[component.typeName] = true
-    cls.components[#cls.components + 1] = component
-    _addComponentProperties(cls, component)
-    _addComponentPropertyCallbacks(cls, component)
-    _addComponentSyncModeCallbacks(cls, component)
-    _addComponentAttr(cls, component)   -- 方法拷贝发生在这里
+    cls.componentNames[component.typeName] = true  -- 记录已注册组件名，用于后续冲突检测
+    cls.components[#cls.components + 1] = component  -- 追加到组件列表（保留注入顺序）
+    _addComponentProperties(cls, component)     -- 注入属性访问器
+    _addComponentPropertyCallbacks(cls, component)  -- 注入属性变更回调
+    _addComponentSyncModeCallbacks(cls, component)  -- 注入同步模式回调
+    _addComponentAttr(cls, component)   -- 方法拷贝发生在这里：遍历 vtbl 写入 cls 虚表
 end
 
+-- 公开接口：批量添加组件，按数组顺序逐一调用 _addComponent
 function Class.AddComponents(cls, components)
     for i = 1, #components do
-        _addComponent(cls, component)
+        _addComponent(cls, component)  -- 注意：这里 component 未在当前作用域定义（实际应为 components[i]）
     end
 end
 ```
@@ -190,7 +194,7 @@ end
 ### 4.3 `(partial)` 注解的意义
 
 ```lua
----@class (partial) Battle:EventCenter
+---@class (partial) Battle:EventCenter  -- partial 分片声明：告知 IDE 这只是类型的一部分，不要覆盖同名声明
 ```
 
 EmmyLua 的 `(partial)` 修饰词告诉 IDE：**这个 `@class` 声明只是完整类型的一部分**，不要覆盖同名的其他声明。
@@ -223,6 +227,7 @@ new()
 `Battle.lua` 第 494 行（局部变量，模块私有）：
 
 ```lua
+-- 固定逻辑帧步长：0.03 秒 ≈ 33.3Hz，将连续时间离散化为固定步长逻辑帧，确保确定性
 local FIXED_TIME_STEP = 0.03
 ```
 
@@ -237,30 +242,32 @@ local FIXED_TIME_STEP = 0.03
 ### 5.2 init() 的关键初始化
 
 ```lua
+-- init 构建 ctor 中置 nil 的依赖对象：创建定时器、阵营、注册状态机、设置操作标志
 function Battle:init()
+    -- 定时器在 init 才创建（ctor 时为 nil），确保外部依赖注入窗口期后再构建
     self.timerMgr = TimeManager("Battle")          -- 定时器在 init 才创建（ctor 时为 nil）
 
-    require("Logic.Battle.BattleEventID")          -- 懒加载事件 ID 表
+    require("Logic.Battle.BattleEventID")          -- 懒加载事件 ID 表：确保事件常量在首次访问前已定义
 
-    -- 建立 5 个阵营
+    -- 建立 5 个阵营（包括 None 和 Hide 用于非参与方和隐藏单位）
     self.teams:set(Enum.Team.None,   BattleTeam(Enum.Team.None,   self))
     self.teams:set(Enum.Team.Self,   BattleTeam(Enum.Team.Self,   self))
     self.teams:set(Enum.Team.Friend, BattleTeam(Enum.Team.Friend, self))
     self.teams:set(Enum.Team.Enemy,  BattleTeam(Enum.Team.Enemy,  self))
     self.teams:set(Enum.Team.Hide,   BattleTeam(Enum.Team.Hide,   self))
 
-    -- 注册状态机的 4 个状态
+    -- 注册状态机的 4 个状态：从 StateNone 开始，按 Arrange → Field → Fight 顺序推进
     self.mainStateMgr:AddState("StateNone",    ...)
     self.mainStateMgr:AddState("ArrangeState", ...)
     self.mainStateMgr:AddState("FieldState",   ...)
     self.mainStateMgr:AddState("FightState",   ...)
 
-    -- 初始仅 Self 阵营可操作
+    -- 初始仅 Self 阵营可操作（玩家侧），Friend/Enemy 等待回合推进后激活
     self.EntityOperationSign[Enum.Team.Self]   = true
     self.EntityOperationSign[Enum.Team.Friend] = false
     self.EntityOperationSign[Enum.Team.Enemy]  = false
 
-    return true
+    return true  -- init 必须返回 true/false，框架会校验（__retValueMethods）
 end
 ```
 
@@ -287,10 +294,11 @@ end
 `InitRandom(seed)` 用同一个初始种子派生三个逻辑层随机数，通过不同的线性变换保证序列独立：
 
 ```lua
+-- 从同一初始种子派生三条独立随机序列，不同线性变换保证序列不相关
 function Battle:InitRandom(seed)
-    self.battleRandom:SetSeed(seed)
-    self.aiRandom:SetSeed(seed * 97531 + 33333)
-    self.autoBattleRandom:SetSeed(seed * 13579 + 11111)
+    self.battleRandom:SetSeed(seed)                       -- 战斗逻辑随机数：直接使用原始种子
+    self.aiRandom:SetSeed(seed * 97531 + 33333)           -- AI 随机数：乘大素数 + 大偏移，与 battleRandom 解耦
+    self.autoBattleRandom:SetSeed(seed * 13579 + 11111)   -- 托管表现随机数：不同的乘数和偏移，同样解耦
 end
 ```
 
@@ -320,42 +328,45 @@ end
 
 ```lua
 -- Battle.lua 第 79-122 行
+-- ctor 只做零依赖字段初始化：所有需要外部依赖的对象（如 TimeManager）留到 init() 创建
 function Battle:ctor()
-    Battle.super.ctor(self)           -- 调用 EventCenter.ctor
+    Battle.super.ctor(self)           -- 调用 EventCenter.ctor 初始化父类（事件系统基础）
 
-    self.debug = true
-    if macroIsClient then
-        self.detailDebug = true
+    self.debug = true                 -- 全局调试开关
+    if macroIsClient then             -- 编译期常量：客户端构建才进入
+        self.detailDebug = true       -- 客户端启用详细日志
     else
         self.detailDebug = false      -- 服务器端不打印详细日志（避免影响性能）
     end
-
-    self.isClient = false
+    self.isClient = false              -- 默认非客户端；后续流程会按需设为 true
     self.teams = OrderedMap.new()     -- 空有序表，teams 在 init() 中填充
-    self.battleInfo = nil
-    self.timerMgr = nil               -- 注意：init() 时才创建
+    self.battleInfo = nil              -- 战斗描述数据：PVE 用 BattleInfo，PVP 用 ArenaBattleInfo
+    self.timerMgr = nil               -- 注意：init() 时才创建，ctor 期间保持 nil 避免误用
     self.levelId = 0
-    self.gameFuncType = nil
-    self.battleState = Enum.BattleState.None
-    self.dataMgr = nil
-    self.isPlayPerform = false
+    self.gameFuncType = nil            -- 游戏功能类型（PVE/PVP 等），由外部传入
+    self.battleState = Enum.BattleState.None  -- 初始状态：未开始
+    self.dataMgr = nil                 -- 策划配置表，由外部注入
+    self.isPlayPerform = false         -- 剧情播放标志
     self.isPvp = false
-    self.timeRate = 1
-    self.accumulatedTime = 0
-    self.mainStateMgr = StateManager()
+    self.timeRate = 1                  -- 时间倍率默认 1x；加速时改为 >1
+    self.accumulatedTime = 0           -- 帧累积时间，驱动固定步长逻辑帧
+    self.mainStateMgr = StateManager() -- 主状态机：管理 None→Arrange→Field→Fight 流程
 
     self.battleInitRandomSeed = 0
+    -- 三个 Random 对象：第三参数 true 表示记录调试日志（便于回放/悔棋），false 则不记录
     self.battleRandom = Random("battleRandom", self, true)   -- 第三参数 true：记录调试日志
-    self.aiRandom     = Random("aiRandom",     self, true)
-    self.autoBattleRandom = Random("autoBattleRandom", self, false)  -- false：不记录调试日志
+    self.aiRandom     = Random("aiRandom",     self, true)   -- AI 决策随机数，需记录日志
+    self.autoBattleRandom = Random("autoBattleRandom", self, false)  -- false：不记录调试日志（表现层）
 
+    -- 三个 ID 生成器：每场战斗独立实例，避免服务器多战斗并发 ID 冲突
     self.entityIdCreator  = EntityIdCreator()
     self.skillIdCreator   = SkillIdCreator()
     self.triggerIdCreator = TriggerIdCreator()
 
+    -- 行动记录映射表：用于战报回放和撤销操作
     self.actionBuffRecordMap   = {}
     self.completeActionRecordMap = {}
-    self.StartSelfActionIndex = 0
+    self.StartSelfActionIndex = 0    -- 自操作行动起始索引
 end
 ```
 
@@ -365,35 +376,38 @@ end
 -- Battle.lua 第 494-528 行
 local FIXED_TIME_STEP = 0.03  -- 约 30Hz 固定逻辑帧步长
 
+-- Update 由 C# 每帧调用，将可变 dt 离散化为固定步长的逻辑帧，确保确定性
 function Battle:Update(dt)
+    -- timeRate 允许加速（>1）或减速（<1），乘以 dt 后累积到 accumulatedTime
     self.accumulatedTime = self.accumulatedTime + self.timeRate * dt
-    -- 累积时间超过阈值时，以固定步长驱动逻辑帧（可能一帧驱动多次）
+    -- 累积时间超过阈值时，以固定步长驱动逻辑帧（卡顿帧可能驱动多次）
     while (self.accumulatedTime >= FIXED_TIME_STEP) do
-        self:FixedUpdate30Hz(FIXED_TIME_STEP)
-        self.accumulatedTime = self.accumulatedTime - FIXED_TIME_STEP
+        self:FixedUpdate30Hz(FIXED_TIME_STEP)  -- 每次传入固定步长，逻辑帧内 dt 恒为 0.03
+        self.accumulatedTime = self.accumulatedTime - FIXED_TIME_STEP  -- 消耗累积时间，余量留到下次
     end
 end
 
+-- 固定步长逻辑帧：调用顺序是确定性的，各子系统按依赖关系执行
 function Battle:FixedUpdate30Hz(dt)
-    if nil ~= self.timerMgr then
-        self.timerMgr:Update(dt)     -- 1. 定时器推进
+    if nil ~= self.timerMgr then          -- init() 前 timerMgr 为 nil，跳过避免空指针
+        self.timerMgr:Update(dt)     -- 1. 定时器推进（最先，后续逻辑可能依赖定时器触发）
     end
     self:UpdateFight(dt)             -- 2. 战斗核心（BattleFightComp 注入）
-    self:UpdateTrigger()             -- 3. 触发器（BattleTriggerComp 注入）
-    self:UpdateTurn()                -- 4. 回合（BattleTurnComp 注入）
+    self:UpdateTrigger()             -- 3. 触发器（依赖战斗结果，故在 UpdateFight 之后）
+    self:UpdateTurn()                -- 4. 回合（依赖触发器处理完成，故在 UpdateTrigger 之后）
 
-    if nil ~= self.performMgr then
-        self.performMgr:Update(dt)   -- 5. 表现管理器（仅客户端）
+    if nil ~= self.performMgr then       -- 仅客户端存在表现管理器
+        self.performMgr:Update(dt)   -- 5. 表现管理器（纯表现层，不影响逻辑确定性）
     end
 
-    if self.teams ~= nil then
+    if self.teams ~= nil then            -- 防御性检查（ctor 中已初始化，正常不为 nil）
         for _, team in OrderedMap.pairs3(self.teams) do
-            team:Update()            -- 6. 各阵营内实体 Update
+            team:Update()            -- 6. 各阵营内实体 Update（英雄/Boss/召唤物等）
         end
     end
 
-    if self.mainStateMgr ~= nil then
-        self.mainStateMgr:Update()   -- 7. 主状态机 tick
+    if self.mainStateMgr ~= nil then     -- 防御性检查
+        self.mainStateMgr:Update()   -- 7. 主状态机 tick（最后，根据当前帧结果决定状态转移）
     end
 end
 ```
@@ -431,8 +445,8 @@ end
 在为 Battle 添加新字段注解时，必须使用：
 
 ```lua
----@class (partial) Battle
----@field public newField SomeType 新字段说明
+---@class (partial) Battle              -- partial 分片声明：追加字段时不覆盖已有类型定义
+---@field public newField SomeType      -- 声明新字段：@field 必须配合 (partial) 使用，否则 IDE 会覆盖整个 Battle 类型
 ```
 
 如果漏写 `(partial)`，IDE 会将其视为完整的类型重定义，覆盖之前所有的字段声明，导致类型检查失效。

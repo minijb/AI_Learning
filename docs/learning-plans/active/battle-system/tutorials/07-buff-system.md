@@ -78,6 +78,7 @@ BuffBase（基类，公共骨架）
 ### 3.1 BuffState 枚举
 
 ```lua
+-- Buff 状态机枚举：控制 Buff 从创建到销毁的完整生命周期，各状态按序流转不可逆
 -- Enum.lua 第 296 行
 BuffState = {
     None     = 0,  -- 初始，ctor 后尚未 init
@@ -134,6 +135,8 @@ BuffCreator.Create()
 ### 4.1 CheckCombatSkillCond
 
 ```lua
+-- 对冲技能（主动技）阶段钩子：判断 Buff 是否在本次技能结算中生效
+-- 返回 true 执行 Buff 效果，false 则跳过；分为技能前/后两轮调用
 ---@field public CheckCombatSkillCond
 ---   (fun(self, attacker, defender, isAttacker, skillData, effPhase):boolean)?
 ```
@@ -152,6 +155,8 @@ BuffCreator.Create()
 ### 4.2 CheckBFSkillCond
 
 ```lua
+-- 战场技（BFSkill）阶段钩子：与 CheckCombatSkillCond 类似，但用于 BF 技能结算
+-- target 可能为单个英雄、英雄数组或 nil（群体技能/无目标场景）
 ---@field public CheckBFSkillCond
 ---   (fun(self, attacker, target, isMultiTarget, skill, effPhase):boolean)?
 ```
@@ -163,6 +168,8 @@ BuffCreator.Create()
 ### 4.3 CheckTurnCond
 
 ```lua
+-- 回合开始阶段钩子：每个新回合开始时判断 Buff 是否触发
+-- 主要用于回合型 Buff，如属性刷新、新回合施加 Buff 等
 ---@field public CheckTurnCond
 ---   (fun(self, turnID, effPhase):boolean)?
 ```
@@ -176,6 +183,8 @@ BuffCreator.Create()
 ### 4.4 CheckTurnActionCond
 
 ```lua
+-- 行动结束阶段钩子：每次英雄完成行动后判断 Buff 是否触发
+-- 覆盖 HealOverTime、DamageOverTime、DoubleMove 等持续效果类型
 ---@field public CheckTurnActionCond
 ---   (fun(self, turnID, actionIndex, effPhase):boolean)?
 ```
@@ -188,6 +197,8 @@ BuffCreator.Create()
 ### 4.5 CheckNeverDie
 
 ```lua
+-- 不屈钩子：伤害结算后 owner HP≤0 时调用，返回 true 拦截此次致命伤害
+-- 典型实现：将 HP 设为 1 并触发复活特效
 ---@field public CheckNeverDie
 ---   (fun(self, turnId, isAttacker, deathCause):boolean)?
 ```
@@ -199,6 +210,8 @@ BuffCreator.Create()
 ### 4.6 DoOtherDiedBuff
 
 ```lua
+-- 响应"他人死亡"事件的钩子：战场上任意其他英雄确认死亡后，遍历全场 Buff 调用
+-- 用于 Harvester（收割者）等类型，在他人阵亡时获得增益
 ---@field public DoOtherDiedBuff function|nil
 ```
 
@@ -215,6 +228,8 @@ BuffCreator.Create()
 
 ```lua
 -- 格式：{ buffType, 触发者身份(1=攻方, 2=守方, 3=特殊) }
+-- 对冲技能触发顺序表：数组元素 {buffType, 触发方身份(1=攻方,2=守方,3=特殊)}，严格按序遍历
+-- 顺序错误会导致属性计算时序 Bug，注释中标注了「下面的 buff 要放在最后执行」
 StartCombatSkillBuff = {
     {CombatAttachBuff, 1},  -- 攻方附着 Buff 最先
     {CombatHeal, 1},
@@ -230,6 +245,8 @@ StartCombatSkillBuff = {
 ### 5.2 StaticBuff（静态 Buff）
 
 ```lua
+-- 静态 Buff 分类表：add 时即刻生效，无固定触发时机，不配置 CD（配置了属于 Bug）
+-- 每次使用前需做有效性检查，典型如 PropertiesModify 在存活期间持续生效
 StaticBuff = {
     [AddSkillLevel] = true,
     [BanSkill]      = true,
@@ -244,6 +261,8 @@ StaticBuff = {
 ### 5.3 PropertiesModifyBuff（属性变更类）
 
 ```lua
+-- 属性修改类 Buff 分类：HeroBuffAttrComp 扫描此表汇总最终属性值
+-- 触发式属性 Buff 有严格时序——技能前末尾生效、技能后开头失效
 PropertiesModifyBuff = {
     [PropertiesModify]        = true, -- 静态
     [SoldierAttributeModify]  = true, -- 静态
@@ -258,6 +277,8 @@ PropertiesModifyBuff = {
 ### 5.4 CanBackBuff（可回退类）
 
 ```lua
+-- 可回退 Buff 分类：失活后需要回退副作用的 Buff 类型
+-- 如 ClassChange 销毁时需还原原始阵型，框架调用子类回退逻辑
 CanBackBuff = {
     [SkillChange]     = true,
     [AddSkillLevel]   = true,
@@ -272,6 +293,7 @@ CanBackBuff = {
 ### 5.5 SelfDiedBuff / OtherDiedBuff
 
 ```lua
+-- 死亡相关 Buff 分类：伤害后收集死亡英雄，按 不屈→自身死亡→他人死亡 顺序触发，不可颠倒
 SelfDiedBuff  = { DieAttachBuff }             -- 自身死亡时触发
 OtherDiedBuff = { Harvester }                 -- 他人死亡时触发
 ```
@@ -286,6 +308,8 @@ OtherDiedBuff = { Harvester }                 -- 他人死亡时触发
 
 ```lua
 -- BuffCreator.lua 第 5-89 行：类型注册表
+-- 类型注册表：模块加载时一次性 require 所有子类，避免运行时动态加载延迟
+-- 用 BuffType 枚举值作为 key 映射到对应子类，无匹配时降级为 BuffDefault
 local BuffClasses = {
     [CDataEnum.BuffType.PropertiesModify]  = require("Logic.Battle.Buff.BuffPropertiesModify"),
     [CDataEnum.BuffType.HealOverTime]      = require("Logic.Battle.Buff.BuffHealOverTime"),
@@ -295,6 +319,7 @@ local BuffClasses = {
 }
 
 -- BuffCreator.lua 第 98-124 行：工厂函数
+-- 工厂函数 Create：唯一外部入口，根据 buffId 查配置表 → 确定子类 → 实例化 → 赋值 → init → 返回
 local function Create(addCase, buffId, owner, battle, caster)
     local data = battle.dataMgr:GetData("BuffInfo", buffId) or {}
     local buffType = data.BuffType
@@ -332,6 +357,7 @@ end
 
 ```lua
 -- 调度伪代码（实际分散在 HeroTurnComp / Battle 的回合流程中）
+-- 遍历全场所有队伍、所有存活英雄，按 BuffConfig.StartTurnBuff 优先级顺序调用 Buff 钩子
 for each team:
     for each hero (alive):
         -- 按 BuffConfig.StartTurnBuff 中的优先级顺序
@@ -342,6 +368,7 @@ for each team:
 `BuffConfig.StartTurnBuff` 以哈希表形式存储优先级：
 
 ```lua
+-- StartTurnBuff 优先级哈希表：数值越小越先执行，属性刷新(10200)先于新回合施加 Buff(10300)
 StartTurnBuff = {
     [PropertiesModify]     = 10200,
     [NewRoundAddBuff]      = 10300,
@@ -356,6 +383,8 @@ StartTurnBuff = {
 
 ```lua
 -- BuffConfig.SopTurnActionBuff 为数组，顺序即执行顺序
+-- SopTurnActionBuff 执行顺序数组：每次英雄行动结束后按序调用，再动类优先于持续效果
+-- 顺序直接决定游戏行为——DoubleMove 必须在 HealOverTime 之前执行
 SopTurnActionBuff = {
     DoubleMove,   -- 再动类（获得额外行动）
     HealOverTime, -- 持续回血
@@ -394,12 +423,15 @@ SopTurnActionBuff = {
 新建 `Client/Assets/Script/Lua/Logic/Battle/Buff/BuffMyCustom.lua`：
 
 ```lua
+-- 引入 class 工具模块和 BuffBase 基类，class.Class 提供面向对象继承机制
 local class = require("Common.Class")
 local BuffBase = require("Logic.Battle.Buff.BuffBase")
 
 ---@class BuffMyCustom:BuffBase
+-- 通过 class.Class 创建子类：第一个参数是类名（调试用），第二个参数是父类
 local BuffMyCustom = class.Class("BuffMyCustom", BuffBase)
 
+-- ctor：先调用父类 BuffBase.ctor 初始化公共字段（id/buffId/state 等），再初始化子类特有字段
 function BuffMyCustom:ctor()
     BuffBase.ctor(self)
     -- 子类特有字段初始化（如有）
@@ -410,6 +442,7 @@ end
 ---@param actionIndex integer
 ---@param effPhase Enum.BuffEffectivePhase
 ---@return boolean
+-- 覆盖 CheckTurnActionCond 钩子：每次 owner 行动结束后框架调用此方法判断 Buff 是否触发
 function BuffMyCustom:CheckTurnActionCond(turnID, actionIndex, effPhase)
     -- 仅在行动结束后阶段生效
     if effPhase ~= Enum.BuffEffectivePhase.Stop then
@@ -422,10 +455,12 @@ function BuffMyCustom:CheckTurnActionCond(turnID, actionIndex, effPhase)
 
     -- 执行效果：给 owner 治疗
     local healVal = self.P1  -- 从配置表参数读取
+-- 效果执行：从配置表参数 P1 读取治疗量，调用 owner:AddHp 增加生命值
     self.owner:AddHp(healVal, self)
     return true
 end
 
+-- 返回类定义供 require 调用方使用，完成模块导出
 return BuffMyCustom
 ```
 
@@ -434,6 +469,7 @@ return BuffMyCustom
 在 `BuffCreator.lua` 的 `BuffClasses` 表中添加一行：
 
 ```lua
+-- 注册新子类：BuffType 枚举值 → require 子类模块路径，BuffCreator 根据此表创建实例
 [CDataEnum.BuffType.MyCustomBuff] = require("Logic.Battle.Buff.BuffMyCustom"),
 ```
 
@@ -442,6 +478,7 @@ return BuffMyCustom
 如果新 Buff 需要在某个特定阶段被遍历，将其加入 `BuffConfig.lua` 对应的数组中：
 
 ```lua
+-- 将新 Buff 类型加入 SopTurnActionBuff 执行顺序数组，位置决定与其他 Buff 的执行先后
 SopTurnActionBuff = {
     ...
     MyCustomBuff,  -- 加在适当位置
@@ -451,6 +488,7 @@ SopTurnActionBuff = {
 若属于 StaticBuff（add 时即生效，无固定触发时机），加入 `StaticBuff` 哈希表即可：
 
 ```lua
+-- 静态 Buff 只需加入 StaticBuff 哈希表，不需要加入调度顺序数组
 StaticBuff = {
     ...
     [MyCustomBuff] = true,
@@ -463,6 +501,7 @@ StaticBuff = {
 
 ```lua
 -- BuffBase.lua 第 13-59 行（EmmyLua 注解，精简部分条目）
+-- 类声明注解：标记 BuffBase 继承自 Class 基类
 ---@class BuffBase:Class
 ---@field public id integer                   -- 实例ID(在owner身上的唯一标识)
 ---@field public buffId integer               -- Buff配置ID
@@ -498,16 +537,20 @@ StaticBuff = {
 ---@field public CheckTurnActionCond (fun(self:BuffBase, ...):boolean)?
 ---@field public CheckNeverDie (fun(self:BuffBase, ...):boolean)?
 ---@field public DoOtherDiedBuff function|nil
+-- 通过 class.Class 创建 BuffBase 基类实例
 local BuffBase = class.Class("BuffBase")
 
 -- ctor：字段零值初始化（第 61-99 行）
+-- ctor 构造函数：将所有字段初始化为安全的零值/空值，防止未初始化字段导致 nil 异常
 function BuffBase:ctor()
+-- 实例标识与上下文引用：id 唯一标识、buffId 配置 ID、owner 持有者、caster 施放者、battle 全局上下文
     self.id = 0
     self.buffId = 0
     self.owner = nil
     self.battle = nil
     self.caster = nil
 
+-- 状态控制字段：state/initActive/isActive 控制激活态，isDestroy 防重入销毁，isEnabel 开关，isOnce 一次性标记
     self.state = Enum.BuffState.None
     self.initActive = false
     self.isActive = false   -- 遗留，计划删除
@@ -516,6 +559,7 @@ function BuffBase:ctor()
     self.isEnabel = true
     self.isOnce = false
 
+-- 配置驱动字段：从 BuffInfo 配置表读取的运行时数据，包括属性修改映射和战斗标签集合
     self.color = nil
     self.info = nil
     self.remainLifetime = 0
@@ -528,6 +572,8 @@ function BuffBase:ctor()
     self.addCase = 0
     self.remCase = 0
 
+-- 通用参数 P1~P6：从配置表 BuffTypeParam1~6 读取，子类按自身语义解读（治疗量、伤害系数、格子数等）
+-- P4/P6 在 ctor 中置 nil，init() 中才赋值为 info.BuffTypeParam4 or constEmptyT，共享空表减少 GC 压力
     self.P1 = 0
     self.P2 = 0
     self.P3 = 0
@@ -535,6 +581,7 @@ function BuffBase:ctor()
     self.P5 = 0
     self.P6 = nil   -- 同 P4
 
+-- 事件系统：onDestroy 事件处理器，destroy 时触发所有注册的观察者回调
     self.onDestroy = EventHandler()
     self.debug = true
 end
@@ -576,12 +623,14 @@ end
 
 ```lua
 -- 错误示例
+-- 错误写法：回调闭包直接引用 buff.info，但 destroy() 已将 info 置 nil，访问报错
 buff.onDestroy:AddObserver(nil, function()
     log(buff.info.ID)  -- buff.info 已经是 nil！
 end)
 
 -- 正确做法
 local infoId = buff.buffId  -- 提前缓存
+-- 正确写法：注册回调前将 buffId 缓存到局部变量，闭包捕获的是安全的局部值副本
 buff.onDestroy:AddObserver(nil, function()
     log(infoId)  -- 安全
 end)

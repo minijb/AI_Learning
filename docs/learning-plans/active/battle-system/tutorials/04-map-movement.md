@@ -34,32 +34,41 @@
 ```lua
 ---@class MapGridElement
 ---@field id      integer            当前占据该格的英雄实体 ID（0 = 空格）
+-- 阵营信息：战斗逻辑通过 camp 判断敌对/友方占格，决定通行或攻击目标
 ---@field camp    Enum.Team|nil      占据者的阵营
+-- rangeFlag 标记该格是否在本次移动力可达范围内（Dijkstra 搜索后置位）
 ---@field rangeFlag  integer|nil     1 = 在本次行动的可达范围内
+-- clickFlag 由 UI 交互层写入，控制格子高亮颜色（绿=可行走，红=可攻击）
 ---@field clickFlag  integer|nil     0=不可点击  1=可行走点击  2=可攻击点击
 ---@field terrain    integer         地形 ID（对应 BattleTerrainInfo 配置表）
+-- 四种移动类型的消耗值：0 表示该类型无法通过此地形的网格
 ---@field foot    integer            步行移动力消耗
 ---@field ride    integer            骑行移动力消耗
 ---@field water   integer            水行移动力消耗
 ---@field fly     integer            飞行移动力消耗
+-- 叠加地形效果（如技能产生的火焰/沼泽），为 nil 时使用原地形消耗
 ---@field terrainEff MapTerrainEffect|nil  叠加在该格上的地形效果
 ```
 
 `mapGrids` 是一个**二维数组**，以 `mapGrids[x][y]` 访问（x、y 均从 1 开始）：
 
 ```lua
+-- mapGrids 是整个地图逻辑层数据的核心容器，外部访问必须将 0 起始坐标 +1
 ---@field mapGrids MapGridElement[][]  逻辑层格子，坐标从 1 开始
 ```
 
 构建过程（`LoadMap`，第 247–275 行）：
 
 ```lua
+-- 按列优先遍历地图，构建二维格子数组
 for x = 1, self.logicSizeX do
     local col = {}
     for y = 1, self.logicSizeY do
+        -- 将二维坐标 (x,y) 映射到一维配置数组中的索引
         -- 线性索引：index = x + (y-1)*logicSizeX
         index = x + (y-1)*self.logicSizeX
         terrainId = data.Terrains[index]
+        -- 初始化每个格子的默认状态：无人占据、无阵营
         local grid = {x = x, y = y, id = 0, camp = nil,
             terrain = terrainId,
             foot = foot, ride = ride, water = water, fly = fly}
@@ -73,18 +82,19 @@ end
 
 ```lua
 ---@class MapTerrainEffect
+-- 格子逻辑坐标（外部 0 起始），标记效果影响的具体位置
 ---@field X           integer   格子逻辑坐标 X（从 0 开始）
 ---@field Y           integer   格子逻辑坐标 Y（从 0 开始）
 ---@field ID          integer   效果实例 ID
+-- Replace 决定效果是替换原地形（如水面变冰地）还是仅叠加额外修正
 ---@field Replace     integer   是否替换原地形
+-- 限时效果：startTurnID 标记生效回合，配合回合系统实现到期自动移除
 ---@field startTurnID integer   效果生效回合
 ---@field BuffID      integer   附加 Buff ID
 ---@field buffEndTurn integer   Buff 结束回合
 ---@field buffOwnerId integer   Buff 归属者 ID
 ---@field configData  TerrainsEf  配置表数据
 ```
-
-地形效果存储在 `grid.terrainEff` 字段，由外部战斗逻辑写入，寻路时会被 `mapTileWeightCommon` 参考。
 
 ---
 
@@ -93,6 +103,7 @@ end
 ### 2.1 MoveIfElement：四种移动类型
 
 ```lua
+-- MoveIfElement 定义单格对四种移动类型的消耗——0 表示不可通行
 ---@class MoveIfElement
 ---@field foot  integer  步行移动力消耗（0 = 不可通过）
 ---@field ride  integer  骑行移动力消耗
@@ -103,7 +114,9 @@ end
 `moveIfDicts` 是地形 ID 到 `MoveIfElement` 的字典，在 `LoadMap` 阶段从配置表 `BattleTerrainInfo` 预构建：
 
 ```lua
+-- 从配置表 BattleTerrainInfo 预构建地形→移动消耗字典，避免运行时反复查表
 for _, d in pairs(terrainInfodata) do
+    -- 以地形 ID 为键，存储四种移动类型的消耗值
     self.moveIfDicts[d.ID] = {
         foot  = d.FootMoveIf,
         ride  = d.RideMoveIf,
@@ -120,6 +133,7 @@ end
 部队通过一格的消耗取**将领与士兵的最大值**（`mapTileWeightCommon`，第 525–552 行）：
 
 ```lua
+-- 部队移动消耗取将领与士兵的较大值——部队整体被最慢单位拖累
 -- v1 = 将领在该地形的消耗，v2 = 士兵在该地形的消耗
 if v1 > v2 then
     v = v1
@@ -131,17 +145,20 @@ end
 地形效果（`mapTerrainMovePointModify`）作为修正量叠加在 v 之上，最终消耗不得低于 `MinWalkCost = 1`：
 
 ```lua
+-- 先检查是否有地形效果修正表（可能为 nil）
 if nil ~= mapTerrainMovePointModify then
+    -- 应用特定地形的修正量（如山地 +1，沼泽 +2）
     if nil ~= mapTerrainMovePointModify[grid.terrain] then
         v = v + mapTerrainMovePointModify[grid.terrain]
     end
+    -- key=0 为全地形修正，作用于所有格子（如全局"泥泞"效果）
     if nil ~= mapTerrainMovePointModify[0] then
         v = v + mapTerrainMovePointModify[0]
     end
 end
+-- 兜底：移动消耗不得低于最小行走消耗，保证即使"免费通行"也有基线代价
 if v < MinWalkCost then v = MinWalkCost end
 ```
-
 `mapTerrainMovePointModify[0]` 是**全地形修正**键（key=0 对所有地形生效）。
 
 ---
@@ -154,13 +171,15 @@ Dijkstra 不直接传递 `(x, y)` 对，而是将坐标压缩为单个整数：
 
 ```lua
 -- Dijkstra.lua 第 707–714 行
+-- 将 (x,y) 打包为单个整数：x 高 16 位，y 低 16 位，可直接作 table key
 function Dijkstra:GetNodeId(x, y)
     return (x << 16) | y      -- x 占高 16 位，y 占低 16 位
 end
 
+-- 从整数节点 ID 拆解回 (x,y)，反向解包操作
 function Dijkstra:GetNodeXY(id)
-    local x = id >> 16
-    local y = id & 0xFFFF
+    local x = id >> 16        -- 右移 16 位取出 x
+    local y = id & 0xFFFF     -- 按位与掩码取出低 16 位 y
     return x, y
 end
 ```
@@ -173,6 +192,8 @@ Dijkstra 算法要求回调为**纯函数签名**（无 `self` 参数），而 `
 
 ```lua
 -- BattleMapComp.lua 第 15–19 行
+-- 适配器：将依赖 self 的实例方法包装为 Dijkstra 要求的纯函数回调
+-- 闭包捕获 self + method，在调用时自动补上 self 参数
 local function DJFuncBind(self, method)
     return function(...)
         return method(self, ...)
@@ -180,10 +201,9 @@ local function DJFuncBind(self, method)
 end
 ```
 
-在 `ctor` 中预先绑定，**复用闭包**，避免每次寻路时重新分配：
-
 ```lua
 -- BattleMapComp.lua 第 116–118 行
+-- 在构造时预绑定三个核心回调，避免每次寻路分配新闭包（减少 GC 压力）
 self.isCanPassCommonFunc    = DJFuncBind(self, self.isCanPassCommon)
 self.isCanPassWithFlagFunc  = DJFuncBind(self, self.isCanPassWithFlag)
 self.mapTileWeightCommonFunc = DJFuncBind(self, self.mapTileWeightCommon)
@@ -197,7 +217,9 @@ self.mapTileWeightCommonFunc = DJFuncBind(self, self.mapTileWeightCommon)
 这两个表是**中间运算缓存**，存储当前选中英雄的可达格和可攻击格：
 
 ```lua
+-- canWalkGridMap：以节点 ID 为键缓存当前英雄的可达格，支持 O(1) 查询
 ---@field canWalkGridMap   table<integer, PosXY>  格子 key → 坐标（下标从 1 开始）
+-- canAttackGridMap：在可达格基础上进一步计算可攻击格（含 AOE 范围）
 ---@field canAttackGridMap table<integer, PosXY>  格子 key → 坐标（下标从 1 开始）
 ```
 
@@ -215,10 +237,12 @@ self.mapTileWeightCommonFunc = DJFuncBind(self, self.mapTileWeightCommon)
 
 ```lua
 -- 加载地图配置，构建 mapGrids 和 moveIfDicts
+-- 调用时机：战斗初始化阶段，一次性完成地形数据加载
 function BattleMapComp:LoadMap(mapId)
 
 -- 计算指定英雄位置的可行走格集合（下标从 1 开始内部用）
 -- 返回值: count（填充的格子数量）
+-- 注意：结果写入 outCanWalkGrids 而非返回新表，复用表避免 GC
 function BattleMapComp:CalcuteCanWalkGridsByGridIndex(
     outCanWalkGrids,          -- 输出表 table<nodeId, PosXY>
     ix, iy,                   -- 起点（从 1 开始）
@@ -229,6 +253,7 @@ function BattleMapComp:CalcuteCanWalkGridsByGridIndex(
 ) -> integer
 
 -- 计算可攻击格（依赖 walkGridMap 已填充）
+-- 必须先调用 CalcuteCanWalkGridsByGridIndex 再调用此方法
 function BattleMapComp:CalcuteCanAttackGridsByGridIndex(
     outCanAttackGrids, walkGridMap,
     ix, iy,
@@ -237,6 +262,7 @@ function BattleMapComp:CalcuteCanAttackGridsByGridIndex(
 
 -- 寻路（对外接口，坐标从 0 开始）
 -- 返回: found, pathNodes(从0开始的PosXY列表), cost
+-- withFlag=true 时路径必须全部在 canWalkGridMap 范围内，用于限制行动范围
 function BattleMapComp:GetActorMapPath(
     withFlag,     -- true=限制在 canWalkGridMap 范围内
     actor,        -- BattleHero
@@ -246,11 +272,13 @@ function BattleMapComp:GetActorMapPath(
 ) -> boolean, PosXY[]|nil, integer
 
 -- AI 专用寻路：目标点有人时忽略占格，路径不含目标点
+-- 用于 AI 计算移动后攻击目标可达性，与玩家点击寻路逻辑略有不同
 function BattleMapComp:GetActorMapPathIgnoreTargetBlock(
     actor, sX, sY, eX, eY
 ) -> boolean, PosXY[]|nil
 
 -- 移动英雄到目标格（触发客户端表现）
+-- onCompletedCallback 在移动动画播放完毕后回调，驱动后续技能释放等流程
 function BattleMapComp:HeroMoveTo(
     withFlag, hero, x, y,
     onCompletedCallback,
@@ -259,9 +287,11 @@ function BattleMapComp:HeroMoveTo(
 )
 
 -- 获取指定格上的实体 ID（坐标从 0 开始）
+-- 返回 0 表示空格，非 0 表示该格有英雄占据
 function BattleMapComp:GetHeroAtGridXY(x, y) -> integer
 
 -- 更新英雄在 mapGrids 上的位置记录
+-- 同时清空旧位置占用、填写新位置，并同步客户端渲染层
 function BattleMapComp:RefreshEntityGridXY(id, teamType, oldX, oldY, newX, newY)
 
 -- 获取地形 ID（坐标从 0 开始）
@@ -276,6 +306,7 @@ function BattleMapComp:IsValidGridXY(x, y) -> boolean
 系统中格子 key 统一为：
 
 ```lua
+-- 系统中统一的格子 key 编码：x 左移 16 位 | y，x、y 均从 1 开始的内部坐标
 local key = (x << 16) | y    -- x、y 均从 1 开始
 ```
 
@@ -284,10 +315,12 @@ local key = (x << 16) | y    -- x、y 均从 1 开始
 外部代码传入从 0 开始的坐标时，`IsCanClickWalk` 会自动加 1 再算 key：
 
 ```lua
+-- 外部传入最小 0 起始坐标，内部自动转为 1 起始再编码 key
 function BattleMapComp:IsCanClickWalk(x, y)  -- x, y 从 0 开始
-    local rx = x + 1
+    local rx = x + 1         -- 转换为内部 1 起始坐标
     local ry = y + 1
-    local key = (rx << 16) | ry
+    local key = (rx << 16) | ry  -- 编码为整数 key
+    -- O(1) 查表：canWalkGridMap 中不存在则说明该格不可达
     return self.canWalkGridMap[key] ~= nil
 end
 ```
@@ -309,21 +342,23 @@ end
 `RefreshEntityGridXY` 是两层同步的典型示例：
 
 ```lua
+-- 两层同步的核心方法：同时更新逻辑层 mapGrids 和客户端渲染层
 function BattleMapComp:RefreshEntityGridXY(id, teamType, oldX, oldY, newX, newY)
-    -- 通知客户端 C# 层更新渲染
+    -- 通知客户端 C# 层更新渲染；服务器侧 self.isClient 为 false，跳过此分支
     if self.isClient and self.clientBattle then
-        self.clientBattle:SetGridActorID(oldX, oldY, 0, 0)
-        self.clientBattle:SetGridActorID(newX, newY, id, teamType)
+        self.clientBattle:SetGridActorID(oldX, oldY, 0, 0)   -- 清空旧位置
+        self.clientBattle:SetGridActorID(newX, newY, id, teamType)  -- 设置新位置
     end
     -- 更新逻辑层 mapGrids（服务器和客户端都执行）
+    -- 边界检查：oldX/oldY 可能为 -1（英雄初始未放置），需跳过
     if oldX >= 0 and oldX < Xmax and oldY >= 0 and oldY < Ymax then
-        local g = self.mapGrids[oldX+1][oldY+1]
-        g.id = 0
+        local g = self.mapGrids[oldX+1][oldY+1]  -- 外部 0 起始转内部 1 起始
+        g.id = 0       -- 清空旧格子的占据记录
         g.camp = nil
     end
     if newX >= 0 and newX < Xmax and newY >= 0 and newY < Ymax then
         local g = self.mapGrids[newX+1][newY+1]
-        g.id = id
+        g.id = id      -- 在新格子上记录占据者信息
         g.camp = teamType
     end
 end
@@ -338,6 +373,7 @@ end
 ```lua
 -- BattleMapComp.lua 第 21–50 行
 
+-- 地形叠加效果：Buff/技能产生的临时地形变更（如火焰地形、毒沼）
 ---@class MapTerrainEffect
 ---@field X integer
 ---@field Y integer
@@ -349,6 +385,7 @@ end
 ---@field buffOwnerId integer
 ---@field configData TerrainsEf
 
+-- 地图格子的完整运行时状态，是寻路、战斗、AI 的核心数据结构
 ---@class MapGridElement
 ---@field id integer
 ---@field camp Enum.Team|nil 被哪个Team占领
@@ -361,7 +398,7 @@ end
 ---@field fly integer   飞行移动力消耗
 ---@field terrainEff MapTerrainEffect|nil
 
--- 移动消耗数据
+-- 移动消耗数据：每种移动类型通过一格所需的移动力，0 表示该类型不可通行
 ---@class MoveIfElement
 ---@field foot integer 步行移动力消耗
 ---@field ride integer 骑行移动力消耗
@@ -378,13 +415,14 @@ end
 -- "给路径算法传回调"时，需要把面向对象的方法（依赖 self）包装成无 self 的函数签名。
 -- Dijkstra 的接口期望的是纯函数回调，例如 (x, y, moveType, ...) -> bool/number，
 -- 而类方法是 (self, x, y, ...)。
+-- 闭包捕获 self + method，每次调用时自动插入 self 为第一参数
 local function DJFuncBind(self, method)
     return function(...)
         return method(self, ...)
     end
 end
 
--- ctor 中预绑定，复用闭包，避免寻路时重复分配
+-- ctor 中预绑定，复用闭包，避免寻路时重复分配（每次 DJFuncBind 都会产生新的堆对象）
 self.isCanPassCommonFunc     = DJFuncBind(self, self.isCanPassCommon)
 self.isCanPassWithFlagFunc   = DJFuncBind(self, self.isCanPassWithFlag)
 self.mapTileWeightCommonFunc = DJFuncBind(self, self.mapTileWeightCommon)
@@ -396,14 +434,19 @@ self.mapTileWeightCommonFunc = DJFuncBind(self, self.mapTileWeightCommon)
 -- BattleMapComp.lua 第 584–603 行
 -- 外部传入坐标从 0 开始，内部转为从 1 开始后交给 Dijkstra
 function BattleMapComp:GetActorMapPath(withFlag, actor, sX, sY, eX, eY, isIgnoreBlock)
+    -- 入口统一 +1：将外部 0 起始坐标转为内部 1 起始节点 ID
     local startPos = self.dijkstra:GetNodeId(sX+1, sY+1)  -- 坐标+1 转内部
     local endPos   = self.dijkstra:GetNodeId(eX+1, eY+1)
 
+    -- 根据 withFlag 选择不同的通行判断函数：
+    -- isCanPassCommonFunc：基于 mapGrids 实际占据情况判断
+    -- isCanPassWithFlagFunc：额外限制必须在 canWalkGridMap 已标记的范围内
     local isCanPassFunc = self.isCanPassCommonFunc
     if withFlag == true then
         isCanPassFunc = self.isCanPassWithFlagFunc
     end
 
+    -- 调用 Dijkstra 核心寻路，costLimit=-1 表示不限制总消耗（寻求最优解）
     local path, cost = self.dijkstra:FindPathQuick(
         startPos, endPos,
         self.mapTileWeightCommonFunc,
@@ -415,9 +458,10 @@ function BattleMapComp:GetActorMapPath(withFlag, actor, sX, sY, eX, eY, isIgnore
     )
 
     if path == nil then
-        return false, nil, math_maxinteger
+        return false, nil, math_maxinteger   -- 无法到达，返回最大整数标记
     else
         local pathIndexFromZero = {}
+        -- 将路径节点从内部 1 起始坐标转换回外部 0 起始坐标
         self.dijkstra:PointResultAdapter(path, pathIndexFromZero)  -- 坐标-1 转外部
         return true, pathIndexFromZero, cost
     end
@@ -461,12 +505,13 @@ end
 
 **错误写法**：
 ```lua
--- 直接用 hero.X（从0开始）访问 mapGrids
+-- 直接用 hero.X（从0开始）访问 mapGrids——索引未 +1，越界或取错格子
 local grid = self.mapGrids[hero.X][hero.Y]   -- ❌ 索引偏移1，或越界
 ```
 
 **正确写法**：
 ```lua
+-- 外部 0 起始坐标 +1 转换为内部 1 起始索引，正确访问 mapGrids
 local grid = self.mapGrids[hero.X + 1][hero.Y + 1]  -- ✅
 ```
 
@@ -477,8 +522,8 @@ local grid = self.mapGrids[hero.X + 1][hero.Y + 1]  -- ✅
 ### 陷阱 2：移动消耗 0 ≠ 零消耗
 
 `BattleTerrainInfo` 中 `FootMoveIf = 0` 意为**步行不可通过**，而非零消耗。`isCanPassCommon` 中的判断：
-
 ```lua
+-- 判断通行：只有当移动消耗 > 0 时才可通行，0 意味着该移动类型无法通过此地形
 if moveType == Enum.MoveType.Walk then
     return grid.foot > 0   -- 0 → false，不可通行
 end
@@ -491,17 +536,15 @@ end
 ### 陷阱 3：在服务器侧访问 clientGridMgr
 
 `clientGridMgr` 在服务器侧为 `nil`。不做保护直接调用会触发 nil 引用错误：
-
 ```lua
--- ❌
+-- ❌ 直接调用 clientGridMgr，服务器侧为 nil 将导致运行时错误
 self.clientGridMgr:Clear()
 
--- ✅
+-- ✅ 先判断客户端环境和引用有效性，服务器侧自动跳过此分支
 if self.isClient and self.clientGridMgr then
     self.clientGridMgr:Clear()
 end
 ```
-
 ---
 
 ### 陷阱 4：canWalkGridMap 是英雄缓存，不是全局状态
@@ -509,6 +552,7 @@ end
 `BattleMapComp.canWalkGridMap` 在每次 `ClickByGridIndex` 时被**替换**为当前选中英雄的缓存引用：
 
 ```lua
+-- 直接引用赋值（非深拷贝）：每次 ClickByGridIndex 都会替换引用，之前英雄的数据被覆盖
 self.canWalkGridMap = hero.canWalkGridMap
 ```
 

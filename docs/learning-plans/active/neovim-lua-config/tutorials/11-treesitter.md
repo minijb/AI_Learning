@@ -1,201 +1,174 @@
 # 11 — Treesitter：语法高亮与结构化分析
 
-> 所属计划: Neovim + Lua 配置实战
-> 预计耗时: 50 分钟
-> 前置知识: 07-lazy-nvim（插件的安装与配置）
+> 所属计划: Neovim + Lua 配置实战 (现代版)
+> 预计耗时: 45 分钟
+> 前置知识: 07-vim-pack（插件管理）
 
 ---
 
 ## 1. 概念讲解
 
-### 什么是 Tree-sitter？
+### Tree-sitter 的价值
 
-Tree-sitter 是一个增量解析库，能将源代码解析成**具体语法树（CST）**。与传统的正则高亮不同：
+Tree-sitter 将源代码解析成**具体语法树（CST）**。与传统的正则高亮相比：
 
 | 特性 | 正则高亮 | Tree-sitter |
 |------|---------|------------|
-| 准确性 | 基于模式匹配，复杂嵌套易出错 | 基于语法解析，100% 准确 |
-| 速度 | O(n) 扫描 | 增量解析，O(log n) |
-| 支持功能 | 高亮 | 高亮、折叠、缩进、选区扩展、代码注入 |
+| 准确性 | 模式匹配，嵌套易出错 | 语法解析，100% 准确 |
+| 速度 | O(n) 扫描 | 增量解析 |
+| 功能 | 高亮 | 高亮、折叠、缩进、选区扩展、代码注入 |
 
-### nvim-treesitter 的功能模块
+### kickstart 的 Treesitter 策略
 
-```
-nvim-treesitter
-├── highlight     — 语法高亮（替代 regex 高亮）
-├── incremental_selection — 按语法结构扩展/缩小选区
-├── indent        — 基于语法的自动缩进
-├── fold          — 基于语法的代码折叠
-├── textobjects   — 按函数/类等结构跳转
-├── context       — 显示当前函数的上下文
-└── refactor      — 智能重命名等重构功能
-```
+kickstart.nvim 采用了**按需安装**的策略，区别于旧式的 `ensure_installed` 列表：
 
-### 语言解析器（Parser）
+1. **预装基础 parsers**: `bash, c, diff, html, lua, luadoc, markdown, markdown_inline, query, vim, vimdoc`
+2. **按需安装**: 首次打开某语言文件时，自动安装对应的 parser
+3. **构建钩子**: `PackChanged` autocmd 在安装/更新后自动运行 `:TSUpdate`
 
-Tree-sitter 的每种语言需要单独安装解析器：
+### nvim-treesitter 0.12+ API 变化
 
 ```lua
-ensure_installed = { "lua", "rust", "python", "javascript", "typescript", "go", "c", "markdown" }
+-- 旧 API (0.11-):
+require('nvim-treesitter.configs').setup({
+  ensure_installed = { "lua", "python", ... },
+  highlight = { enable = true },
+})
+
+-- 新 API (0.12+, kickstart 风格):
+require('nvim-treesitter').install { 'lua', 'bash', 'c', ... }
+
+-- 手动启用某语言的 treesitter
+vim.treesitter.start(buf, language)
 ```
 
-可以通过 `:TSInstall <lang>` 手动安装，或者通过 `ensure_installed` 自动安装。
+关键变化：
+- 不再用全局的 `configs.setup()` 开启所有功能
+- 改为用 `vim.treesitter.start()` 按 buffer 精确控制
+- `ensure_installed` → `require('nvim-treesitter').install()`
 
-### 代码注入（Injection）
+### 按需安装的自动命令
 
-Tree-sitter 能识别一种语言中嵌入的另一种语言——如 HTML 中的 CSS/JS、Lua 中 Vim 命令字符串：
+kickstart 用 `FileType` autocmd 实现无感安装：
 
-```html
-<!-- Vue SFC: HTML + CSS + JavaScript — 三种高亮自动共存 -->
-<template>
-    <div>{{ message }}</div>  <!-- JS 表达式高亮 -->
-</template>
-<style>
-    .title { color: red; }    <!-- CSS 高亮 -->
-</style>
+```lua
+vim.api.nvim_create_autocmd('FileType', {
+  callback = function(args)
+    local language = vim.treesitter.language.get_lang(args.match)
+    local installed = require('nvim-treesitter').get_installed 'parsers'
+    local available = require('nvim-treesitter').get_available()
+
+    if vim.tbl_contains(installed, language) then
+      -- 已安装 → 直接启用
+      treesitter_try_attach(args.buf, language)
+    elseif vim.tbl_contains(available, language) then
+      -- 有 parser → 自动安装后启用
+      require('nvim-treesitter').install(language):await(function()
+        treesitter_try_attach(args.buf, language)
+      end)
+    end
+  end,
+})
 ```
 
 ---
 
 ## 2. 代码示例
 
+### 完整的 kickstart 风格 Treesitter 配置
+
 ```lua
--- lua/plugins/treesitter.lua
-return {
-    {
-        "nvim-treesitter/nvim-treesitter",
-        build = ":TSUpdate",
-        event = { "BufReadPost", "BufNewFile" },
-        dependencies = {
-            "nvim-treesitter/nvim-treesitter-textobjects", -- 结构跳转
-        },
-        config = function()
-            require("nvim-treesitter.configs").setup({
-                -- 自动安装的语言解析器
-                ensure_installed = {
-                    "lua",
-                    "vim",
-                    "vimdoc",
-                    "python",
-                    "rust",
-                    "javascript",
-                    "typescript",
-                    "go",
-                    "c",
-                    "cpp",
-                    "json",
-                    "yaml",
-                    "markdown",
-                    "markdown_inline",
-                    "bash",
-                    "html",
-                    "css",
-                },
+-- init.lua Section: Treesitter
+do
+  -- 安装 nvim-treesitter（锁定 main 分支）
+  vim.pack.add { { src = gh 'nvim-treesitter/nvim-treesitter', version = 'main' } }
 
-                -- 模块配置
-                highlight = {
-                    enable = true,
-                    -- 禁用某些文件类型的 Tree-sitter 高亮（回退到正则）
-                    disable = function(lang, bufnr)
-                        local max_filesize = 100 * 1024  -- 100 KB
-                        local ok, stats = pcall(vim.loop.fs_stat,
-                            vim.api.nvim_buf_get_name(bufnr))
-                        if ok and stats and stats.size > max_filesize then
-                            return true
-                        end
-                    end,
-                    additional_vim_regex_highlighting = false,
-                },
+  -- 预装基础 parsers
+  local parsers = {
+    'bash', 'c', 'diff', 'html', 'lua', 'luadoc',
+    'markdown', 'markdown_inline', 'query', 'vim', 'vimdoc',
+  }
+  require('nvim-treesitter').install(parsers)
 
-                indent = {
-                    enable = true,
-                },
+  -- 启用 treesitter 功能的条件函数
+  ---@param buf integer
+  ---@param language string
+  local function treesitter_try_attach(buf, language)
+    if not vim.treesitter.language.add(language) then return end
+    vim.treesitter.start(buf, language)
 
-                -- 增量选择：按语法节点扩展选区
-                incremental_selection = {
-                    enable = true,
-                    keymaps = {
-                        init_selection = "gnn",   -- 开始选择当前节点
-                        node_incremental = "grn", -- 扩展到父节点
-                        scope_incremental = "grc", -- 扩展到作用域
-                        node_decremental = "grm", -- 收缩到子节点
-                    },
-                },
+    -- 基于 treesitter 的缩进（如果有 indent query）
+    local has_indent_query = vim.treesitter.query.get(language, 'indents') ~= nil
+    if has_indent_query then
+      vim.bo.indentexpr = "v:lua.require'nvim-treesitter'.indentexpr()"
+    end
+  end
 
-                -- 基于语法的代码折叠（可选，与 nvim-ufo 冲突时禁用）
-                -- fold = {
-                --     enable = true,
-                -- },
+  -- 按需安装：首次打开某语言文件时自动安装 parser
+  local available_parsers = require('nvim-treesitter').get_available()
+  vim.api.nvim_create_autocmd('FileType', {
+    callback = function(args)
+      local buf, filetype = args.buf, args.match
+      local language = vim.treesitter.language.get_lang(filetype)
+      if not language then return end
 
-                -- textobjects: 按函数/类等结构跳转和选择
-                textobjects = {
-                    select = {
-                        enable = true,
-                        lookahead = true,
-                        keymaps = {
-                            ["af"] = "@function.outer",   -- 选择整个函数
-                            ["if"] = "@function.inner",   -- 选择函数体
-                            ["ac"] = "@class.outer",
-                            ["ic"] = "@class.inner",
-                            ["aa"] = "@parameter.outer",  -- 选择参数
-                            ["ia"] = "@parameter.inner",
-                        },
-                    },
-                    move = {
-                        enable = true,
-                        set_jumps = true,
-                        goto_next_start = {
-                            ["]f"] = "@function.outer",
-                            ["]]"] = "@class.outer",
-                        },
-                        goto_previous_start = {
-                            ["[f"] = "@function.outer",
-                            ["[["] = "@class.outer",
-                        },
-                    },
-                },
-            })
-        end,
-    },
+      local installed_parsers = require('nvim-treesitter').get_installed 'parsers'
 
-    -- nvim-treesitter-context: 显示当前函数的签名上下文
-    {
-        "nvim-treesitter/nvim-treesitter-context",
-        event = "VeryLazy",
-        opts = {
-            max_lines = 3,
-            trim_scope = "outer",
-        },
-    },
-}
+      if vim.tbl_contains(installed_parsers, language) then
+        treesitter_try_attach(buf, language)
+      elseif vim.tbl_contains(available_parsers, language) then
+        require('nvim-treesitter').install(language):await(function()
+          treesitter_try_attach(buf, language)
+        end)
+      else
+        treesitter_try_attach(buf, language)
+      end
+    end,
+  })
+end
 ```
 
 **运行方式:**
-1. 保存为 `lua/plugins/treesitter.lua`
-2. 重启 Neovim，首次启动会自动下载安装所有 `ensure_installed` 中的解析器（需要网络和 C 编译器）
-3. 打开一个 Lua 文件，观察语法高亮是否比纯正则更丰富（如函数参数的区分色）
-4. 在函数定义上按 `gnn`，观察增量选择
+1. 将上述代码放入 `init.lua`
+2. 启动 Neovim，首次会自动安装 parsers 列表中的解析器
+3. 打开一个 `.py` 文件——如果之前没安装 Python parser，会自动下载安装
+4. 观察语法高亮的细粒度（如函数参数的不同颜色）
 
 ---
 
 ## 3. 练习
 
 ### 练习 1: 对比高亮效果
-在 Neovim 中临时禁用 Tree-sitter 高亮：
+
 ```vim
+" 临时禁用 treesitter 高亮
 :lua vim.treesitter.stop()
-```
-观察高亮变化，然后重新启用：
-```vim
+
+" 重新启用
 :lua vim.treesitter.start()
 ```
-对比两者差异（尤其在嵌套函数、模板字符串等复杂场景）。
 
-### 练习 2: 增量选择练习
-打开一个有函数定义的 Lua 文件，在函数体内部按 `gnn`（开始选择），然后按 `grn` 反复扩展选区，再按 `grm` 收缩。理解语法节点和选区的对应关系。
+对比禁用前后的高亮差异，尤其在嵌套函数、模板字符串等场景。
 
-### 练习 3: 添加你的语言（可选）
-如果你使用 Tree-sitter 尚未覆盖的语言（如 Elixir、Zig），运行 `:TSInstallInfo` 查看可用语言列表，手动 `:TSInstall <lang>`，然后添加到 `ensure_installed` 中。
+### 练习 2: 手动安装一个 parser
+
+```vim
+" 查看已安装的 parsers
+:lua print(vim.inspect(require('nvim-treesitter').get_installed('parsers')))
+
+" 手动安装一个 parser
+:lua require('nvim-treesitter').install('rust')
+
+" 检查安装状态
+:checkhealth treesitter
+```
+
+### 练习 3: 探索 treesitter 的增量选择
+
+Neovim 0.12 内置了 treesitter 增量选择（不需要 nvim-treesitter 插件）：
+- 在函数体内部按 `grn` → 开始选择当前节点
+- 反复按 `grn` → 扩展到父节点
+- `grm` → 收缩到子节点
 
 ---
 
@@ -203,15 +176,14 @@ return {
 
 - [nvim-treesitter 官方文档](https://github.com/nvim-treesitter/nvim-treesitter)
 - [Tree-sitter 官网](https://tree-sitter.github.io/tree-sitter/)
-- [nvim-treesitter-textobjects 文档](https://github.com/nvim-treesitter/nvim-treesitter-textobjects)
 - [`:help treesitter`](https://neovim.io/doc/user/treesitter.html)
+- [`:help treesitter-incremental-selection`](https://neovim.io/doc/user/helptag.html?tag=treesitter-incremental-selection) — 0.12 内置增量选择
 
 ---
 
 ## 常见陷阱
 
-- **Windows 上需要 C 编译器**：Tree-sitter 解析器需要编译。安装 MSVC 或 MinGW。如果 `:TSInstall` 失败，检查 `:checkhealth treesitter`。
-- **`ensure_installed` 列表中不存在的语言**：如果拼写错误或语言不受支持，安装会失败但不影响其他语言。
-- **大文件禁用高亮**：打开上 MB 的日志文件时，Tree-sitter 解析可能很慢。`highlight.disable` 函数中检查文件大小是个好习惯。
-- **与 `vim-regex` 高亮冲突**：设置 `additional_vim_regex_highlighting = false` 避免双重高亮导致颜色错乱。
-- **`@function.inner` 等 textobjects 需要 textobjects 模块**：如果 `af` 不生效，检查 `nvim-treesitter-textobjects` 是否在 dependencies 中。
+- **Windows 上需要 C 编译器**：treesitter parser 需要编译。安装 MSVC 或 MinGW。`:checkhealth treesitter` 提供详细的诊断信息。
+- **`require('nvim-treesitter').install()` 是异步的**：这也是为什么 kickstart 用 `:await()` 等待安装完成后再启用。
+- **parser 名 ≠ filetype 名**：`.ts` 文件对应 parser `typescript`，但 `.js` 也对应 `javascript`。`vim.treesitter.language.get_lang(filetype)` 负责这个映射。
+- **大文件性能**：treesitter 对超大文件（>1MB）可能变慢。kickstart 没有内置大文件保护——可以在 `treesitter_try_attach` 中添加文件大小检查。

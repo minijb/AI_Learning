@@ -39,15 +39,19 @@
 
 ```lua
 -- BattleLogicComp.lua
+-- 构造函数：初始化战斗校验数据管道所需的全部核心字段
+-- 客户端填充 → 战斗结束时随 endnowbattleReq 发送 → 服务器重放校验
 function BattleLogicComp:ctor()
     self.clientBattle   = nil   -- 逻辑消息接收器（表现层引用）
     self.performMgr     = nil
+    -- 表现播放管理器：控制技能动画与特效队列，纯客户端表现，不参与校验计算
     self.triggerActionMgr = nil
     self.heroNurtureData  = {}  -- 将领养成数据（校验时发服务器）
     self.battleBasicInfo  = nil -- 战斗基本信息（校验时发服务器）
     self.cmdList          = {}  -- 操作指令列表（校验时发服务器）
     self.cmdMaps          = {}  -- step -> BattleCommand 索引，快进时查找用
     self.gainHideTreasure = {}
+    -- 隐藏宝箱获取列表：校验阶段对比客户端与服务器重放结果是否一致
     self.opCmdPool        = {}  -- 操作命令对象池，减少 GC
     self.commandMgr       = nil -- CoreLib.CommandManager，持久化写入
 end
@@ -74,9 +78,12 @@ end
 
 ```lua
 -- BattleLogicComp.lua : DoUseSkill
+-- 技能结算完成后的回调：此时所有伤害/状态变更已确定，写入结果才可复现
 local function onSkillCompleted()
+-- 三重守卫条件：仅客户端或悔棋模式 → 且允许记录 → 且非剧情播放中
     if (self.isClient or self.isRegretMode) and isSaveCmd then
         if not self.isPlayPerform then
+-- 构造操作指令快照：记录本次技能的全部上下文，使服务器可精确重现
             local cmdData = {
                 cmd            = Enum.Command.UseSkill,
                 turnId         = self.turnId,
@@ -88,6 +95,7 @@ local function onSkillCompleted()
                 skillId        = skillId,
                 leftRegretCount = self.leftRegretCount,
             }
+-- 同时写入内存列表（网络发送用）和持久化存储（闪退恢复用）
             table.insert(self.cmdList, cmdData)      -- 追加到列表
             if self.commandMgr ~= nil then
                 local data = cmsgpack.pack(cmdData)
@@ -109,15 +117,19 @@ end
 
 ```lua
 -- BattleTurnComp.lua（胜利分支）
+-- 从连接池获取可复用请求表，构造战斗结束校验请求
 local req = socketManager:getReqTable()
 req.result            = 1
 req.roleid            = self.scWorldHeroManager.scPlayerData4Battle.roleid
+-- 代码版本三元组：服务器校验前先比对版本，不一致则跳过校验
 req.strSCVersion      = SCVersion         -- 代码版本号
 req.strSCMd5          = SCMd5             -- 公共代码 MD5
 req.strGAMEDATA_VERSION = GAMEDATA_VERSION
+-- 校验核心三要素：英雄初始状态 + 战斗环境 + 完整操作序列
 req.heroNurtureData   = self.heroNurtureData   -- 将领养成数据
 req.battleBasicInfo   = self.battleBasicInfo   -- 地图/关卡信息
 req.battleCommands    = self.cmdList           -- 完整操作序列
+-- 校验比对目标：剩余血量、星级、宝箱、得分
 req.remainEntityHp    = self:GetRemainEntityHp()
 req.finishstar        = self.battleCollectResultData.finishstar
 req.gainbox           = self.gainHideTreasure
@@ -147,6 +159,7 @@ req.score             = score
 -- 如果不一致，就没必要浪费时间看战斗校验异常的问题
 -- (3) 服务器上没有必要用 SCMd5ThisTime，也没有这个文件
 local SCMd5 = require("SCMd5")
+-- 客户端/服务器分支：客户端运行时使用重算的 MD5，服务器使用打包时的静态 MD5
 if macroIsClient then
     SCMd5 = require("SCMd5ThisTime")   -- 运行时重算的 MD5
 end
@@ -162,7 +175,9 @@ end
 -- BattleTurnComp.lua 第 31-38 行
 -- 用途：本地对同 1 份战报快进执行时，可能用了不同的 GameData 配置
 -- 此时，需要比对这个值（不是用来比对客户端和服务器配置的）
+-- 默认值全零：服务器端不需要此值；客户端启动时动态计算并覆盖
 local CMd5GameDataThisTime = "00000000000000000000000000000000"
+-- 仅在客户端运行时重新计算 GameData 的 MD5，用于本地战报回放时检测配置版本差异
 if macroIsClient then
     CMd5GameDataThisTime = require("CMd5GameDataThisTime")
 end
@@ -189,23 +204,29 @@ end
 ```lua
 -- BattleRegretComp.lua
 function BattleRegretComp:RebuildBattle(basicBattleInfo, cmdList, toStep, ...)
+-- 清空当前战场状态，准备从头重建
     self:clear()
     self.regretStep = toStep or 1
+-- 构建 step→命令 索引表：快进时 O(1) 查找，避免每帧线性扫描 cmdList
     self.cmdMaps, self.triggerActionCmdMaps,
     self.buffInterCmdMaps, self.dialogChoiceMaps = self:BuildCmdMap(cmdList)
 
     -- 用原始随机种子重启战斗
     self:StartBattleWithFast(basicBattleInfo.initRandomSeed)
 
+-- IntervalTime 从毫秒转秒：CombatConfig 定义常量，用除法避免浮点累积误差
     local intervalTime = CombatConfig.IntervalTime / 1000
+-- 主循环：逐帧推进逻辑直到到达目标步数或超时
     while true do
         self:Update(intervalTime)          -- 推进逻辑帧
+-- 到达目标步数后，等待当前剧情/动画播完再退出，保证状态完整
         if self.isStopRegret then
             if not (self.triggerActionMgr.isPlaying
                     or self.performMgr.isPlaying) then
                 break                      -- 到达目标步数且无剧情播放
             end
         end
+-- 30 秒超时保护：防止死循环（如 buff 相互触发）导致快进永久挂起
         if (os.clock()*1000 - t1) > 30*1000 then break end  -- 超时保护
     end
 end
@@ -219,17 +240,22 @@ end
 
 ```lua
 -- BattleRegretComp.lua : BuildCmdMap
+-- 线性遍历 cmdList 一次，按命令类型分派到不同的索引表
 for i = 1, #cmdList do
     local d = cmdList[i]
+-- 主操作命令（技能/等待）：step 为全局唯一主键，直接映射
     if d.cmd == UseSkill or d.cmd == UseBFSkill or d.cmd == Wait then
         tmpCmdMaps[d.step] = d            -- step -> 主操作
         -- 同时从 leftRegretCount 恢复剩余悔棋次数
+-- 从 Record 命令中恢复剩余悔棋次数：取历史最大值，确保次数不因回退而虚增
         if d.leftRegretCount > self.leftRegretCount then
             self.leftRegretCount = d.leftRegretCount
         end
     elseif d.cmd == RunTriggerAction then
         triggerActionCmdMaps[d.step] = d
+-- Buff 交互使用复合键 (ownerId, buffId)：同一回合同一英雄可有多个 buff 同时交互
     elseif d.cmd == BuffInteraction then
+-- 位运算合成 32 位键：高 16 位 ownerId，低 16 位 buffId，保证唯一性
         local key = (d.ownerId << 16) | d.buffId
         buffInterCmdMaps[d.turnId][key] = d
     elseif d.cmd == DialogChoice then
@@ -258,7 +284,9 @@ end
 
 ```lua
 -- BattleRegretComp.lua
+-- 悔棋核心入口：将战场回退到指定 step，然后玩家可从此步重新操作
 function BattleRegretComp:RegretToStep(toStep)
+-- 防重入守卫：isRebuilding 为 true 时说明上一次重建尚未完成，直接拒绝
     if self.isRebuilding then
         logError("RegretToStep blocked: preventing infinite loop")
         return
@@ -266,6 +294,7 @@ function BattleRegretComp:RegretToStep(toStep)
     self.isRebuilding = true
 
     -- 1. 快照当前 cmdList → backCmdList
+-- 浅拷贝 cmdList 引用：备份原列表以便重建，后续 cmdList 将被新的操作覆盖
     self.backCmdList = {}
     for i = 1, #self.cmdList do
         self.backCmdList[i] = self.cmdList[i]
@@ -277,6 +306,9 @@ function BattleRegretComp:RegretToStep(toStep)
         self.commandMgr:ClearCmds()
     end
 
+-- StartRegret 设 isRegretMode=true / isClient=false，屏蔽表现层通知
+-- RebuildBattle 用备份的 cmdList 快进到 toStep 之前
+-- StopRegret 恢复 isRegretMode=false / isClient=true
     -- 3. 快进重建到 toStep 之前的状态
     self.curRegretStep = toStep
     local battleBasicInfo = self.battleBasicInfo
@@ -285,6 +317,7 @@ function BattleRegretComp:RegretToStep(toStep)
     self:StopRegret()     -- isRegretMode=false, isClient=true
 
     -- 4. 刷新客户端表现层
+-- 清空客户端表现对象：快进期间表现被跳过，重建后需从当前状态重新渲染
     if self.isClient and nil ~= self.clientBattle then
         self.clientBattle:clear()
     end
@@ -300,11 +333,14 @@ end
 每次我方完成一个完整操作后调用，将当时的 `leftRegretCount` 写入 `cmdList`：
 
 ```lua
+-- 在 cmdList 中插入一个 Record 类型的存档点标记
+-- 此标记不参与战斗逻辑，仅供快进时恢复 leftRegretCount 使用
 function BattleRegretComp:SaveRecordCommand()
     local cmdData = {
         cmd             = Enum.Command.Record,
         turnId          = self.turnId,
         step            = self.operationStep,
+-- 记录此时的剩余悔棋次数：快进重建到此步时，从此值恢复，而非重新计数
         leftRegretCount = self.leftRegretCount,
     }
     table.insert(self.cmdList, cmdData)
@@ -324,21 +360,26 @@ end
 
 ```lua
 -- BattleTurnComp.lua ctor
+-- 客户端本地战斗校验开关：默认关闭，仅开发调试时手动打开
 self.isClientBattleVerify = false
 ```
 
 启用时（`true`），`StopBattle` 路径中：
 
 ```lua
+-- 校验模式下保持网络连接活跃，确保 MockBattleVerifyServer 可接收数据
 if self.isClient and self.isClientBattleVerify == true then
     socketManager.isCheckConnect = true
 end
 -- ...
+-- 三重条件：调试模式 + 客户端 + 校验开关；满足时才加载本地模拟服务器
 if self.debug and macroIsClient == true and self.isClientBattleVerify == true then
+-- 延迟加载 Server.GameServer：避免正常流程引入服务器依赖
     if MockBattleVerifyServer == nil then
         MockBattleVerifyServer = require("Server.GameServer")
     end
     -- 在客户端进程内模拟服务器校验逻辑
+-- 在客户端进程中调用服务器端的战斗重建入口，使用同一份 cmdList 重放并比对
     MockBattleVerifyServer.ClientBattleRebuildStart(
         nil,
         self.scWorldHeroManager.scPlayerData4Battle.roleid,
@@ -360,6 +401,7 @@ end
 
 ```lua
 -- BattleTurnComp.lua
+-- 编译期写入的版本常量：每次打包时由构建系统生成
 local SCVersion = require("SCVersion")
 local GAMEDATA_VERSION = require("GameData.GAMEDATA_VERSION")
 
@@ -369,6 +411,7 @@ local GAMEDATA_VERSION = require("GameData.GAMEDATA_VERSION")
 local SCMd5 = require("SCMd5")
 local MockBattleVerifyServer = nil
 local socketManager = nil
+-- 仅在客户端进程中重写这些全局变量：服务器端保持 require 的静态值不变
 if macroIsClient then
     SCMd5 = require("SCMd5ThisTime")
     socketManager = require("Net.LuaSocketManager").GetInstance()
@@ -386,16 +429,20 @@ end
 
 ```lua
 -- BattleLogicComp.lua
+-- 战斗逻辑组件构造：所有字段共同构成战斗校验的完整数据快照
 function BattleLogicComp:ctor()
     self.clientBattle     = nil   -- 表现层引用（逻辑通知接收器）
     self.performMgr       = nil
+    -- 表现管理器：驱动技能动画/特效序列，不影响逻辑运算
     self.triggerActionMgr = nil
     self.heroNurtureData  = {}    -- 上阵将领养成数据（发服务器）
     self.battleBasicInfo  = nil   -- 战斗基本信息（发服务器）
     self.cmdList          = {}    -- 操作指令序列（发服务器）
     self.cmdMaps          = {}    -- step -> BattleCommand（快进查找）
     self.gainHideTreasure = {}
+    -- 隐藏宝箱：战斗中获取的宝箱列表，校验时比对获取一致性
     self.opCmdPool        = {}    -- 命令对象池
+    -- 对象池复用 table：频繁创建 cmdData 时避免 Lua GC 尖峰
     self.commandMgr       = nil   -- 持久化写入管理器
 end
 ```
@@ -425,6 +472,7 @@ end
 **陷阱 3：RebuildBattle 超时保护触发**
 
 ```lua
+-- 超时保护：t1 为循环开始时间，30 秒后强制退出防止死循环挂起进程
 if (t2 - t1) > 30 * 1000 then break end
 ```
 
