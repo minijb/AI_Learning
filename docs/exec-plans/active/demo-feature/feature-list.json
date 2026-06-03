@@ -1,0 +1,43 @@
+{
+  "_schema": "1.0",
+  "_护栏规则": [
+    "智能体在执行过程中只能修改每个 feature 的 'passes' 字段（true/false）",
+    "如需修改 id、category、description、steps，必须由人类编辑此文件",
+    "plan-validate 会检查 JSON 结构、必填字段和占位符，但不会对比历史版本"
+  ],
+  "features": [
+    {
+      "id": "F1",
+      "category": "核心功能",
+      "description": "[功能描述 — 人类定义]",
+      "steps": [
+        "[子步骤 1]",
+        "[子步骤 2]",
+        "[子步骤 3]"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F2",
+      "category": "边界处理",
+      "description": "[功能描述 — 人类定义]",
+      "steps": [
+        "[子步骤 1]",
+        "[子步骤 2]"
+      ],
+      "passes": false
+    },
+    {
+      "id": "F3",
+      "category": "集成验证",
+      "description": "[功能描述 — 人类定义]",
+      "steps": [
+        "[子步骤 1]",
+        "[子步骤 2]",
+        "[子步骤 3]",
+        "[子步骤 4]"
+      ],
+      "passes": false
+    }
+  ]
+}

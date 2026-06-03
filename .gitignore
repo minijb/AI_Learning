@@ -6,3 +6,6 @@ CLAUDE_TEMP.md
 
 # Python cache
 __pycache__/
+
+# Obsidian workspace config
+.obsidian/

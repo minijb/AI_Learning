@@ -329,13 +329,13 @@ end
 
 ## 5. 逻辑层与客户端格子管理的分工
 
-| 职责 | 逻辑层（Lua Logic/） | 客户端表现层（ClientBattle/） |
-|------|---------------------|------------------------------|
-| 持有对象 | `battle.mapGrids`（`MapGridElement[][]`） | `CS.Core.GridManager.Inst`（C# GridManager） |
-| 数据内容 | 地形、移动消耗、占据信息、可行走标记 | 渲染用格子、高亮显示、点击事件 |
-| 更新时机 | 每次英雄移动、地形变化时实时更新 | `ClickByGridIndex` 结束后由 `clientGridMgr:SetWalkGrids()` 等接口驱动 |
-| 访问方式 | `self.mapGrids[x+1][y+1]`（从 1 的数组） | `clientGridMgr:Clear()` / `clientGridMgr:SetWalkGrids()` 等 C# 接口 |
-| SC 服务器 | 完整运行，维护 `mapGrids` | 不存在，`macroIsClient` 宏控制跳过 |
+| 职责     | 逻辑层（Lua Logic/）                         | 客户端表现层（ClientBattle/）                                            |
+| ------ | --------------------------------------- | ---------------------------------------------------------------- |
+| 持有对象   | `battle.mapGrids`（`MapGridElement[][]`） | `CS.Core.GridManager.Inst`（C# GridManager）                       |
+| 数据内容   | 地形、移动消耗、占据信息、可行走标记                      | 渲染用格子、高亮显示、点击事件                                                  |
+| 更新时机   | 每次英雄移动、地形变化时实时更新                        | `ClickByGridIndex` 结束后由 `clientGridMgr:SetWalkGrids()` 等接口驱动     |
+| 访问方式   | `self.mapGrids[x+1][y+1]`（从 1 的数组）      | `clientGridMgr:Clear()` / `clientGridMgr:SetWalkGrids()` 等 C# 接口 |
+| SC 服务器 | 完整运行，维护 `mapGrids`                      | 不存在，`macroIsClient` 宏控制跳过                                        |
 
 关键原则：**逻辑层不持有任何 Unity 对象引用**。`BattleMapComp.clientGridMgr` 字段仅在客户端赋值，服务器侧为 `nil`，所有涉及该字段的代码必须先判断 `self.isClient`。
 
