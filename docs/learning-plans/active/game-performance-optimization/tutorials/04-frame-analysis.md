@@ -1,3 +1,8 @@
+---
+title: "帧分析基础 — Frame Timing 与瓶颈识别"
+updated: 2026-06-05
+---
+
 # 帧分析基础 — Frame Timing 与瓶颈识别
 
 > 所属计划: 游戏性能优化全攻略

@@ -1,3 +1,8 @@
+---
+title: "03 — 阅读与浏览代码"
+updated: 2026-06-05
+---
+
 # 03 — 阅读与浏览代码
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -146,9 +151,9 @@ read memory://root
 
 ## 4. 扩展阅读
 
-- [`read` 工具完整文档](omp://tools/read.md) — 所有模式、限制、内部 URL 解析
-- [OMP 内部 URL 系统](omp://resolve-tool-runtime.md)
-- [SQLite 读取器](omp://tools/read.md) — 查询语法和限制
+- [[omp://tools/read|`read` 工具完整文档]] — 所有模式、限制、内部 URL 解析
+- [[omp://resolve-tool-runtime|OMP 内部 URL 系统]]
+- [[omp://tools/read|SQLite 读取器]] — 查询语法和限制
 
 ---
 

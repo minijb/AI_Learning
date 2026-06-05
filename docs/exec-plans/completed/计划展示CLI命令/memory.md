@@ -1,3 +1,8 @@
+---
+title: "Plan Memory: 计划展示CLI命令"
+updated: 2026-06-05
+---
+
 # Plan Memory: 计划展示CLI命令
 
 > 执行记忆 — 记录计划执行过程中产生的关键工件和决策。

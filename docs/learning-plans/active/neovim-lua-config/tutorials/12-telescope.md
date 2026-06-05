@@ -1,3 +1,8 @@
+---
+title: "12 — Telescope：模糊查找一切"
+updated: 2026-06-05
+---
+
 # 12 — Telescope：模糊查找一切
 
 > 所属计划: Neovim + Lua 配置实战

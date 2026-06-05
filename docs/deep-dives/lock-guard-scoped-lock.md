@@ -1,8 +1,13 @@
+---
+title: "lock_guard 与 scoped_lock 深度剖析"
+updated: 2026-06-05
+---
+
 # lock_guard 与 scoped_lock 深度剖析
 
 > 深度等级: 第 7 层
-> 关联学习计划: 游戏引擎开发工程师 — [C++ 引擎编程：语言特性精要](../learning-plans/active/game-engine-dev/tutorials/00-cpp-for-game-engines.md#2-raii引擎资源管理的基石)
-> 关联深度探索: [RAII 深度剖析](raii-complete-analysis.md)
+> 关联学习计划: 游戏引擎开发工程师 — [[../learning-plans/active/game-engine-dev/tutorials/00-cpp-for-game-engines#2-raii引擎资源管理的基石|C++ 引擎编程：语言特性精要]]
+> 关联深度探索: [[raii-complete-analysis|RAII 深度剖析]]
 > 分析日期: 2026-05-27
 
 ---

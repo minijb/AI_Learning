@@ -1,3 +1,8 @@
+---
+title: "05 BattleHero 实体与属性系统"
+updated: 2026-06-05
+---
+
 # 05 BattleHero 实体与属性系统
 
 ## 前置依赖

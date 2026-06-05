@@ -1,3 +1,8 @@
+---
+title: "多线程与并发：Job System"
+updated: 2026-06-05
+---
+
 # 多线程与并发：Job System
 
 > 所属计划: 游戏引擎开发工程师

@@ -1,3 +1,8 @@
+---
+title: "游戏 AI 性能优化实战"
+updated: 2026-06-05
+---
+
 # 游戏 AI 性能优化实战
 
 > 所属计划: State Machines & Behavior Trees for Game AI

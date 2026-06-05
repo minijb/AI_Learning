@@ -1,3 +1,8 @@
+---
+title: "Mass LOD 与网络复制"
+updated: 2026-06-05
+---
+
 # Mass LOD 与网络复制
 
 > 所属计划: ECS 系统 — 从原理到实践

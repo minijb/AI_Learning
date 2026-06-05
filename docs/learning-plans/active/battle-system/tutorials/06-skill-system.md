@@ -1,10 +1,15 @@
+---
+title: "06 技能系统"
+updated: 2026-06-05
+---
+
 # 06 技能系统
 
 ## 前置依赖
 
-- [02 战场单位与组件系统](02-battle-class-components.md) — BattleHero、HeroSkillComp、HeroBFSkillComp
-- [03 状态机与回合流程](03-state-machine-turn-flow.md) — HeroTurnComp、行动触发时机
-- [05 Buff 系统](05-buff-system.md) — BuffBase 生命周期，Buff 如何触发被动技
+- [[02-battle-class-components|02 战场单位与组件系统]] — BattleHero、HeroSkillComp、HeroBFSkillComp
+- [[03-state-machine-turn-flow|03 状态机与回合流程]] — HeroTurnComp、行动触发时机
+- [[05-buff-system|05 Buff 系统]] — BuffBase 生命周期，Buff 如何触发被动技
 
 ---
 

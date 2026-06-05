@@ -1,3 +1,8 @@
+---
+title: "Active Plans Index"
+updated: 2026-06-05
+---
+
 # Active Plans Index
 
 > 全局计划索引 — 记录所有活跃计划及其依赖关系。

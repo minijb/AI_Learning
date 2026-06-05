@@ -1,3 +1,8 @@
+---
+title: "UE 渲染优化 — Nanite/Lumen/VSM"
+updated: 2026-06-05
+---
+
 # UE 渲染优化 — Nanite/Lumen/VSM
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 50 分钟

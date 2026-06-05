@@ -1,3 +1,8 @@
+---
+title: "07 — vim.pack 插件管理（内置）"
+updated: 2026-06-05
+---
+
 # 07 — vim.pack 插件管理（内置）
 
 > 所属计划: Neovim + Lua 配置实战 (现代版)

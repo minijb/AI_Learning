@@ -1,3 +1,8 @@
+---
+title: "FSM vs BT 技术选型"
+updated: 2026-06-05
+---
+
 # FSM vs BT 技术选型
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -784,4 +789,4 @@ Status AttackAction::Tick(Blackboard& bb) {
 
 ---
 
-> **下一篇**: [Tutorial 15: 混合架构与 AI 系统设计](../15-hybrid-architectures.md) — 详细讨论如何在单个项目中组合 FSM、BT、Utility AI 等不同范式。
+> **下一篇**: [[../15-hybrid-architectures|Tutorial 15: 混合架构与 AI 系统设计]] — 详细讨论如何在单个项目中组合 FSM、BT、Utility AI 等不同范式。

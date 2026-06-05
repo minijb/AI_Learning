@@ -1,3 +1,8 @@
+---
+title: "Funnel Algorithm：NavMesh 路径拉绳平滑"
+updated: 2026-06-05
+---
+
 # Funnel Algorithm：NavMesh 路径拉绳平滑
 
 > 所属计划: 高阶寻路系统

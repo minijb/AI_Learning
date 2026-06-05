@@ -1,8 +1,13 @@
+---
+title: "状态同步客户端（Unreal Replication / GAS / Iris）"
+updated: 2026-06-05
+---
+
 # 状态同步客户端（Unreal Replication / GAS / Iris）
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 75min
-> 前置知识: [17-延迟补偿](17-lag-compensation.md)
+> 前置知识: [[17-lag-compensation|17-延迟补偿]]
 
 ---
 

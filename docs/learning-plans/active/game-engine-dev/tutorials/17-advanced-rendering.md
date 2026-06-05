@@ -1,8 +1,13 @@
+---
+title: "高级渲染技术：PBR、光线追踪与 GPU Driven Rendering"
+updated: 2026-06-05
+---
+
 # 高级渲染技术：PBR、光线追踪与 GPU Driven Rendering
 
-> **所属计划**: [游戏引擎开发工程师](../plan.md)
+> **所属计划**: [[../plan|游戏引擎开发工程师]]
 > **预计耗时**: 10 小时
-> **前置知识**: [06-渲染管线基础](06-rendering-pipeline.md), [07-着色器编程](07-shader-programming.md), [09-光照与材质系统](09-lighting-and-materials.md)
+> **前置知识**: [[06-rendering-pipeline|06-渲染管线基础]], [[07-shader-programming|07-着色器编程]], [[09-lighting-and-materials|09-光照与材质系统]]
 
 ---
 

@@ -1,8 +1,13 @@
+---
+title: "弱网环境深度优化"
+updated: 2026-06-05
+---
+
 # 弱网环境深度优化
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [02-UDP vs TCP 与可靠传输层](02-udp-vs-tcp-reliable-layer.md), [07-帧同步协议设计](07-lockstep-protocol-design.md), [11-帧同步服务端设计](11-lockstep-server-design.md), [17-延迟补偿](17-lag-compensation.md), [21-状态同步服务端](21-state-sync-server.md)
+> 前置知识: [[02-udp-vs-tcp-reliable-layer|02-UDP vs TCP 与可靠传输层]], [[07-lockstep-protocol-design|07-帧同步协议设计]], [[11-lockstep-server-design|11-帧同步服务端设计]], [[17-lag-compensation|17-延迟补偿]], [[21-state-sync-server|21-状态同步服务端]]
 
 ---
 

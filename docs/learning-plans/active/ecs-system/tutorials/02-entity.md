@@ -1,3 +1,8 @@
+---
+title: "Entity 详解：一切只是 ID"
+updated: 2026-06-05
+---
+
 # Entity 详解：一切只是 ID
 
 > 所属计划: ECS 系统 — 从原理到实践

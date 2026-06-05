@@ -1,3 +1,8 @@
+---
+title: "多线程基础 — Job System 与 Task Graph"
+updated: 2026-06-05
+---
+
 # 多线程基础 — Job System 与 Task Graph
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 60min

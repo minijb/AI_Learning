@@ -1,3 +1,8 @@
+---
+title: "Unity ECS 寻路集成"
+updated: 2026-06-05
+---
+
 # Unity ECS 寻路集成
 
 > 所属计划: 高阶寻路系统

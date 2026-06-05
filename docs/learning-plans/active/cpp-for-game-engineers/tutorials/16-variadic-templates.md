@@ -1,8 +1,13 @@
+---
+title: "16. Variadic Templates 与折叠表达式"
+updated: 2026-06-05
+---
+
 # 16. Variadic Templates 与折叠表达式
 
 > **所属计划**: C++ 游戏工程师详细攻略 — 阶段 4：模板与编译期抽象
 > **预计耗时**: 3 小时
-> **前置知识**: [13-模板基础与实例化模型](13-template-instantiation.md)、C++11 模板基础语法
+> **前置知识**: [[13-template-instantiation|13-模板基础与实例化模型]]、C++11 模板基础语法
 > **C++ 标准**: C++11 (Variadic Templates), C++17 (Fold Expressions), C++14 (std::integer_sequence)
 
 ---

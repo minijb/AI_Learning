@@ -1,3 +1,8 @@
+---
+title: "学习计划: Oh My Pi Code Agent 使用指南"
+updated: 2026-06-05
+---
+
 # 学习计划: Oh My Pi Code Agent 使用指南
 
 > 创建日期: 2026-05-26

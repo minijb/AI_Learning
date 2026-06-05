@@ -1,3 +1,8 @@
+---
+title: "特殊成员函数全解：Rule of Five"
+updated: 2026-06-05
+---
+
 # 特殊成员函数全解：Rule of Five
 
 > 所属计划: C++ 游戏工程师详细攻略

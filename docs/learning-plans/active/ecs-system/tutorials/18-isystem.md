@@ -1,3 +1,8 @@
+---
+title: "System 编写详解"
+updated: 2026-06-05
+---
+
 # System 编写详解
 
 > 所属计划: ECS 系统 — 从原理到实践

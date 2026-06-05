@@ -1,8 +1,13 @@
+---
+title: "帧同步客户端实现（Unreal/C++）"
+updated: 2026-06-05
+---
+
 # 帧同步客户端实现（Unreal/C++）
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 75min
-> 前置知识: [07-帧同步协议设计](07-lockstep-protocol-design.md)
+> 前置知识: [[07-lockstep-protocol-design|07-帧同步协议设计]]
 
 ---
 
@@ -2057,7 +2062,7 @@ void SerializeUInt32(uint8* Buffer, uint32 Value)
 
 ## 7. 与 Unity/C# 版本的对应关系
 
-如果你同时学习 [08-帧同步客户端实现（Unity/C#）](08-lockstep-client-unity.md)，以下是关键对应：
+如果你同时学习 [[08-lockstep-client-unity|08-帧同步客户端实现（Unity/C#）]]，以下是关键对应：
 
 | Unity/C# | Unreal/C++ | 说明 |
 |----------|-----------|------|

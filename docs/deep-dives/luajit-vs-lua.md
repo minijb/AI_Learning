@@ -1,3 +1,8 @@
+---
+title: "LuaJIT vs Lua 深度对比剖析"
+updated: 2026-06-05
+---
+
 # LuaJIT vs Lua 深度对比剖析
 
 > 深度等级: 第 7 层

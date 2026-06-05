@@ -1,8 +1,13 @@
+---
+title: "17. constexpr 与编译期计算"
+updated: 2026-06-05
+---
+
 # 17. constexpr 与编译期计算
 
 > **所属计划**: C++ 游戏工程师详细攻略 — 阶段 4：模板与编译期抽象
 > **预计耗时**: 4 小时
-> **前置知识**: [13-模板基础与实例化模型](13-template-instantiation.md)、[16-Variadic Templates](16-variadic-templates.md)
+> **前置知识**: [[13-template-instantiation|13-模板基础与实例化模型]]、[[16-variadic-templates|16-Variadic Templates]]
 > **C++ 标准**: C++11/14/17/20 (持续演进)
 
 ---

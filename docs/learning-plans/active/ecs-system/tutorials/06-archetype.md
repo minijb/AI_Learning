@@ -1,3 +1,8 @@
+---
+title: "Archetype 原型存储详解：从 AoS 到 SoA"
+updated: 2026-06-05
+---
+
 # Archetype 原型存储详解：从 AoS 到 SoA
 
 > 所属计划: ECS 系统 — 从原理到实践

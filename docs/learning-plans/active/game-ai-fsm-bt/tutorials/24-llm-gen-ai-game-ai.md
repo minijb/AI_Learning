@@ -1,3 +1,8 @@
+---
+title: "LLM/生成式 AI 与现代游戏 AI 的融合"
+updated: 2026-06-05
+---
+
 # LLM/生成式 AI 与现代游戏 AI 的融合
 
 > 所属计划: State Machines & Behavior Trees for Game AI

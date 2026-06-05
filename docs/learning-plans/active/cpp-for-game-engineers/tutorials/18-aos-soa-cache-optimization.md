@@ -1,8 +1,13 @@
+---
+title: "18. AoS vs SoA 与缓存优化"
+updated: 2026-06-05
+---
+
 # 18. AoS vs SoA 与缓存优化
 
 > **所属计划**: C++ 游戏工程师详细攻略 — 阶段 5：数据导向设计
 > **预计耗时**: 4 小时
-> **前置知识**: [2-对象生命周期与内存布局](02-object-lifetime-memory-layout.md)
+> **前置知识**: [[02-object-lifetime-memory-layout|2-对象生命周期与内存布局]]
 > **C++ 标准**: 通用（C++11 alignas 关键），架构相关优化
 
 ---

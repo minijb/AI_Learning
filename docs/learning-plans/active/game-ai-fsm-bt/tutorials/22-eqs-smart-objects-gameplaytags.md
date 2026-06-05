@@ -1,3 +1,8 @@
+---
+title: "EQS、Smart Objects 与 GameplayTags 驱动 AI"
+updated: 2026-06-05
+---
+
 # EQS、Smart Objects 与 GameplayTags 驱动 AI
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -1231,4 +1236,4 @@ void AMyAIController::BeginPlay()
 
 ---
 
-> **下一步**: 完成本教程后，继续 Tutorial 23 [StateTree 与现代 UE5 AI 架构](23-statetree-modern-ai.md)，学习 UE5 引入的 StateTree 系统如何作为 FSM+BT 的混合方案，以及它如何与 SmartObject/EQS/GameplayTags 深度集成。
+> **下一步**: 完成本教程后，继续 Tutorial 23 [[23-statetree-modern-ai|StateTree 与现代 UE5 AI 架构]]，学习 UE5 引入的 StateTree 系统如何作为 FSM+BT 的混合方案，以及它如何与 SmartObject/EQS/GameplayTags 深度集成。

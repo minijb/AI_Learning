@@ -1,3 +1,8 @@
+---
+title: "Exec Plan: demo-feature"
+updated: 2026-06-05
+---
+
 # Exec Plan: demo-feature
 
 > 完整执行计划 — 跨模块改动、新功能开发。
@@ -77,7 +82,7 @@
 
 ## Task 2: [复杂组件名] → 拆分
 
-> 此 Task 较复杂，详细步骤见 [tasks/task-02-xxx.md](tasks/task-02-xxx.md)
+> 此 Task 较复杂，详细步骤见 [[tasks/task-02-xxx]]
 
 **Files (概要):**
 - Create: `path/to/file.py`

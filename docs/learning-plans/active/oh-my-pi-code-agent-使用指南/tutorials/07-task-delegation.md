@@ -1,3 +1,8 @@
+---
+title: "07 — 并行任务委托（子代理）"
+updated: 2026-06-05
+---
+
 # 07 — 并行任务委托（子代理）
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -134,9 +139,9 @@ OMP 会传递 output schema 给子代理，确保返回结构化数据。
 
 ## 4. 扩展阅读
 
-- [`task` 工具完整文档](omp://tools/task.md) — 所有模式、隔离、并发控制
-- [Agent 发现与选择](omp://task-agent-discovery.md) — 自定义代理的加载和优先级
-- [Handoff 生成管道](omp://handoff-generation-pipeline.md) — 子代理输出持久化
+- [[omp://tools/task|`task` 工具完整文档]] — 所有模式、隔离、并发控制
+- [[omp://task-agent-discovery|Agent 发现与选择]] — 自定义代理的加载和优先级
+- [[omp://handoff-generation-pipeline|Handoff 生成管道]] — 子代理输出持久化
 
 ---
 

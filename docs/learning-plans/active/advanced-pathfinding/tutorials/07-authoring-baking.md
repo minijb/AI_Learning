@@ -1,3 +1,8 @@
+---
+title: "Authoring 与 Baking 烘焙管线"
+updated: 2026-06-05
+---
+
 # Authoring 与 Baking 烘焙管线
 
 > 所属计划: 高阶寻路系统

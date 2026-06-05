@@ -1,3 +1,8 @@
+---
+title: "混合架构与 AI 系统设计"
+updated: 2026-06-05
+---
+
 # 混合架构与 AI 系统设计
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -1778,4 +1783,4 @@ t=5.0: Enqueue(Heal, Priority=10, Target=Self)        // 应抢占一切
 
 ---
 
-> **下一篇**: [Tutorial 16: Utility AI / GOAP / HTN 及其他范式](16-utility-ai-goap.md) — 将视野扩展到行为树和状态机之外，探索游戏 AI 的更多决策范式。
+> **下一篇**: [[16-utility-ai-goap|Tutorial 16: Utility AI / GOAP / HTN 及其他范式]] — 将视野扩展到行为树和状态机之外，探索游戏 AI 的更多决策范式。

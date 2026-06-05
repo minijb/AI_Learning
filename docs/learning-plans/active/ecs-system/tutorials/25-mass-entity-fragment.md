@@ -1,3 +1,8 @@
+---
+title: "Mass Entity 与 Fragment 详解"
+updated: 2026-06-05
+---
+
 # Mass Entity 与 Fragment 详解
 
 > 所属计划: ECS 系统 — 从原理到实践

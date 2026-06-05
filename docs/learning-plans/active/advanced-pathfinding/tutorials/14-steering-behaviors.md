@@ -1,3 +1,8 @@
+---
+title: "Steering Behaviors：Craig Reynolds 的局部导航模型"
+updated: 2026-06-05
+---
+
 # Steering Behaviors：Craig Reynolds 的局部导航模型
 
 > 所属计划: 高阶寻路系统

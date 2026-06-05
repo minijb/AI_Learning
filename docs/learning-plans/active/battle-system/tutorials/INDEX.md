@@ -1,19 +1,24 @@
+---
+title: "战斗系统教程导航"
+updated: 2026-06-05
+---
+
 # 战斗系统教程导航
 
 ## 教程总览
 
 | # | 文件 | 主题 | 关键源文件 |
 |---|------|------|-----------|
-| 01 | [01-architecture-entry.md](01-architecture-entry.md) | 项目整体架构与战斗入口 | `LuaGame.lua`<br>`Stage/StageManager.lua`<br>`Stage/BattleStage.lua`<br>`Stage/GoToStage.lua`<br>`ClientBattle/BattleGlobalData.lua` |
-| 02 | [02-battle-class-components.md](02-battle-class-components.md) | Battle 核心类与组件系统 | `Common/Class.lua`<br>`Logic/Battle/Battle.lua`<br>`Logic/Battle/Comp/BattleLoadComp.lua`<br>`Logic/Battle/Comp/BattleTurnComp.lua` |
-| 03 | [03-state-machine-turn-flow.md](03-state-machine-turn-flow.md) | 战斗状态机与回合流程 | `Logic/Battle/Battle.lua`<br>`Logic/Battle/Comp/BattleTurnComp.lua`<br>`Logic/Battle/Comp/BattleFightComp.lua`<br>`Common/StateManager.lua` |
-| 04 | [04-map-movement.md](04-map-movement.md) | 地图系统与移动寻路 | `Logic/Battle/Comp/BattleMapComp.lua`<br>`Logic/Entity/Battle/BattleHero.lua`（`HeroMapComp`）<br>`Logic/Battle/Comp/BattleTurnComp.lua`（移动指令段） |
-| 05 | [05-battle-hero-entity.md](05-battle-hero-entity.md) | BattleHero 实体与属性系统 | `Logic/Entity/Battle/BattleHero.lua`<br>`Logic/Entity/Entity.lua`<br>`Logic/Entity/Battle/Comp/HeroComAttrComp.lua`<br>`Logic/Entity/Battle/Comp/HeroDamageComp.lua`<br>`Logic/Entity/Battle/Comp/HeroTurnComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBuffAttrComp.lua` |
-| 06 | [06-skill-system.md](06-skill-system.md) | 技能系统（主动/战场技/对冲） | `Logic/Battle/Skill/CombatSkill.lua`<br>`Logic/Battle/Skill/BFSkill.lua`<br>`Logic/Battle/Skill/CombatField.lua`<br>`Logic/Battle/Skill/CombatActor.lua`<br>`Logic/Battle/Skill/BattleSkillUtil.lua`<br>`Logic/Entity/Battle/Comp/HeroSkillComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBFSkillComp.lua` |
-| 07 | [07-buff-system.md](07-buff-system.md) | Buff 系统（基类/生命周期/扩展） | `Logic/Battle/Buff/BuffBase.lua`<br>`Logic/Battle/Buff/BuffConfig.lua`<br>`Logic/Battle/Comp/BattleBuffComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBuffComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBuffAttrComp.lua` |
-| 08 | [08-ai-system.md](08-ai-system.md) | AI 决策系统（目标/技能选择） | `Logic/Battle/AI/AIBehaviorComp.lua`<br>`Logic/Battle/AI/AIUtil.lua`<br>`Logic/Battle/AI/AIPickTarget.lua`<br>`Logic/Battle/AI/AIPickSkill.lua`<br>`Logic/Battle/AI/AIPickSkillAtTarget.lua`<br>`Logic/Entity/Battle/Comp/AIAutoComp.lua` |
-| 09 | [09-client-presentation.md](09-client-presentation.md) | 客户端表现层（ClientBattle/VisEntity） | `ClientBattle/ClientBattle.lua`<br>`ClientBattle/Comp/ClientBattleMapComp.lua`<br>`ClientBattle/Comp/ClientBattleFightComp.lua`<br>`ClientBattle/Comp/ClientBattleSelectComp.lua`<br>`ClientBattle/Comp/ClientPerformManager.lua`<br>`Graphic/VisEntity/VisEntity.lua`<br>`ClientEntity/Battle/ClientBattleHero.lua` |
-| 10 | [10-battle-verify-regret.md](10-battle-verify-regret.md) | 战斗校验、快进与悔棋 | `Logic/Battle/Comp/BattleLogicComp.lua`<br>`Logic/Battle/Comp/BattleTurnComp.lua`<br>`Logic/Battle/Comp/BattleRegretComp.lua`<br>`Logic/Battle/Comp/BattleDebugComp.lua`<br>`Logic/Battle/BattleRebuild.lua` |
+| 01 | [[01-architecture-entry]] | 项目整体架构与战斗入口 | `LuaGame.lua`<br>`Stage/StageManager.lua`<br>`Stage/BattleStage.lua`<br>`Stage/GoToStage.lua`<br>`ClientBattle/BattleGlobalData.lua` |
+| 02 | [[02-battle-class-components]] | Battle 核心类与组件系统 | `Common/Class.lua`<br>`Logic/Battle/Battle.lua`<br>`Logic/Battle/Comp/BattleLoadComp.lua`<br>`Logic/Battle/Comp/BattleTurnComp.lua` |
+| 03 | [[03-state-machine-turn-flow]] | 战斗状态机与回合流程 | `Logic/Battle/Battle.lua`<br>`Logic/Battle/Comp/BattleTurnComp.lua`<br>`Logic/Battle/Comp/BattleFightComp.lua`<br>`Common/StateManager.lua` |
+| 04 | [[04-map-movement]] | 地图系统与移动寻路 | `Logic/Battle/Comp/BattleMapComp.lua`<br>`Logic/Entity/Battle/BattleHero.lua`（`HeroMapComp`）<br>`Logic/Battle/Comp/BattleTurnComp.lua`（移动指令段） |
+| 05 | [[05-battle-hero-entity]] | BattleHero 实体与属性系统 | `Logic/Entity/Battle/BattleHero.lua`<br>`Logic/Entity/Entity.lua`<br>`Logic/Entity/Battle/Comp/HeroComAttrComp.lua`<br>`Logic/Entity/Battle/Comp/HeroDamageComp.lua`<br>`Logic/Entity/Battle/Comp/HeroTurnComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBuffAttrComp.lua` |
+| 06 | [[06-skill-system]] | 技能系统（主动/战场技/对冲） | `Logic/Battle/Skill/CombatSkill.lua`<br>`Logic/Battle/Skill/BFSkill.lua`<br>`Logic/Battle/Skill/CombatField.lua`<br>`Logic/Battle/Skill/CombatActor.lua`<br>`Logic/Battle/Skill/BattleSkillUtil.lua`<br>`Logic/Entity/Battle/Comp/HeroSkillComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBFSkillComp.lua` |
+| 07 | [[07-buff-system]] | Buff 系统（基类/生命周期/扩展） | `Logic/Battle/Buff/BuffBase.lua`<br>`Logic/Battle/Buff/BuffConfig.lua`<br>`Logic/Battle/Comp/BattleBuffComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBuffComp.lua`<br>`Logic/Entity/Battle/Comp/HeroBuffAttrComp.lua` |
+| 08 | [[08-ai-system]] | AI 决策系统（目标/技能选择） | `Logic/Battle/AI/AIBehaviorComp.lua`<br>`Logic/Battle/AI/AIUtil.lua`<br>`Logic/Battle/AI/AIPickTarget.lua`<br>`Logic/Battle/AI/AIPickSkill.lua`<br>`Logic/Battle/AI/AIPickSkillAtTarget.lua`<br>`Logic/Entity/Battle/Comp/AIAutoComp.lua` |
+| 09 | [[09-client-presentation]] | 客户端表现层（ClientBattle/VisEntity） | `ClientBattle/ClientBattle.lua`<br>`ClientBattle/Comp/ClientBattleMapComp.lua`<br>`ClientBattle/Comp/ClientBattleFightComp.lua`<br>`ClientBattle/Comp/ClientBattleSelectComp.lua`<br>`ClientBattle/Comp/ClientPerformManager.lua`<br>`Graphic/VisEntity/VisEntity.lua`<br>`ClientEntity/Battle/ClientBattleHero.lua` |
+| 10 | [[10-battle-verify-regret]] | 战斗校验、快进与悔棋 | `Logic/Battle/Comp/BattleLogicComp.lua`<br>`Logic/Battle/Comp/BattleTurnComp.lua`<br>`Logic/Battle/Comp/BattleRegretComp.lua`<br>`Logic/Battle/Comp/BattleDebugComp.lua`<br>`Logic/Battle/BattleRebuild.lua` |
 
 ---
 

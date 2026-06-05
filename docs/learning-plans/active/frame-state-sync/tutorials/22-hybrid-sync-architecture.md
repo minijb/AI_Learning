@@ -1,8 +1,13 @@
+---
+title: "混合同步架构设计：策略选择与分流"
+updated: 2026-06-05
+---
+
 # 混合同步架构设计：策略选择与分流
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [12-帧同步进阶](12-lockstep-advanced.md), [21-状态同步服务端架构](21-state-sync-server.md)
+> 前置知识: [[12-lockstep-advanced|12-帧同步进阶]], [[21-state-sync-server|21-状态同步服务端架构]]
 
 ---
 
@@ -2044,9 +2049,9 @@ private:
 
 ### 8.3 本系列后续教程
 
-- [23-混合同步客户端实现：双通道架构](23-hybrid-sync-client.md) — 客户端双通道的完整实现
-- [24-混合同步服务端实现：DS + 逻辑帧 + Room 管理](24-hybrid-sync-server.md) — 服务端多局并行管理
-- [25-混合同步进阶：ECS、快照恢复、多局并行](25-hybrid-sync-advanced.md) — 进阶话题
+- [[23-hybrid-sync-client|23-混合同步客户端实现：双通道架构]] — 客户端双通道的完整实现
+- [[24-hybrid-sync-server|24-混合同步服务端实现：DS + 逻辑帧 + Room 管理]] — 服务端多局并行管理
+- [[25-hybrid-sync-advanced|25-混合同步进阶：ECS、快照恢复、多局并行]] — 进阶话题
 
 ---
 

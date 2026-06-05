@@ -1,3 +1,8 @@
+---
+title: "Plan Memory: exec-plan任务文件拆分"
+updated: 2026-06-05
+---
+
 # Plan Memory: exec-plan任务文件拆分
 
 > 执行记忆 — 记录计划执行过程中产生的关键工件和决策。

@@ -1,3 +1,8 @@
+---
+title: "UI 性能优化 — Canvas/UMG/UIToolkit"
+updated: 2026-06-05
+---
+
 # UI 性能优化 — Canvas/UMG/UIToolkit
 
 > 所属计划: 游戏性能优化全攻略

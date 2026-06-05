@@ -1,8 +1,13 @@
+---
+title: "行为树在 Unity 中的实现 (C#)"
+updated: 2026-06-05
+---
+
 # 行为树在 Unity 中的实现 (C#)
 
 > 所属计划: State Machines & Behavior Trees for Game AI
 > 预计耗时: 120min
-> 前置知识: [06-bt-fundamentals.md](06-bt-fundamentals.md), [07-bt-node-types.md](07-bt-node-types.md)
+> 前置知识: [[06-bt-fundamentals]], [[07-bt-node-types]]
 
 ---
 

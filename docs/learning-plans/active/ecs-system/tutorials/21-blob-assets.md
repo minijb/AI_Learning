@@ -1,3 +1,8 @@
+---
+title: "Blob Assets 与共享组件"
+updated: 2026-06-05
+---
+
 # Blob Assets 与共享组件
 
 > 所属计划: ECS 系统 — 从原理到实践

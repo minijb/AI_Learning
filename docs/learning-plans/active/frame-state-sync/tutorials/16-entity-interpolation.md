@@ -1,8 +1,13 @@
+---
+title: "实体插值 (Entity Interpolation)"
+updated: 2026-06-05
+---
+
 # 实体插值 (Entity Interpolation)
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 45min
-> 前置知识: [13-状态同步核心原理](13-state-sync-core.md)
+> 前置知识: [[13-state-sync-core|13-状态同步核心原理]]
 
 ---
 

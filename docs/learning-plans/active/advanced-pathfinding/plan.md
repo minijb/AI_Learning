@@ -1,3 +1,8 @@
+---
+title: "学习计划: 高阶寻路系统 (Advanced Pathfinding Systems)"
+updated: 2026-06-05
+---
+
 # 学习计划: 高阶寻路系统 (Advanced Pathfinding Systems)
 
 > 创建日期: 2026-05-31

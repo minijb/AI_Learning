@@ -1,3 +1,8 @@
+---
+title: "09 — 现代 LSP 配置：vim.lsp.config / enable"
+updated: 2026-06-05
+---
+
 # 09 — 现代 LSP 配置：vim.lsp.config / enable
 
 > 所属计划: Neovim + Lua 配置实战 (现代版)

@@ -1,3 +1,8 @@
+---
+title: "Exec Plan: exec-plan任务文件拆分"
+updated: 2026-06-05
+---
+
 # Exec Plan: exec-plan任务文件拆分
 
 > 完整执行计划 — 支持将复杂 Task 拆分为独立 markdown 文件。
@@ -88,7 +93,7 @@
 
   ## Task 2: [复杂组件名] → 拆分
 
-  > 此 Task 较复杂，详细步骤见 [tasks/task-02-xxx.md](tasks/task-02-xxx.md)
+  > 此 Task 较复杂，详细步骤见 [[tasks/task-02-xxx|tasks/task-02-xxx.md]]
 
   **Files (概要):**
   - Create: `path/to/file.py`

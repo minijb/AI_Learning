@@ -1,8 +1,13 @@
+---
+title: "FSM 在 Unity 中的实现 (C#)"
+updated: 2026-06-05
+---
+
 # FSM 在 Unity 中的实现 (C#)
 
 > 所属计划: State Machines & Behavior Trees for Game AI
 > 预计耗时: 120min
-> 前置知识: [01-fsm-core-concepts.md](01-fsm-core-concepts.md)
+> 前置知识: [[01-fsm-core-concepts]]
 
 ---
 

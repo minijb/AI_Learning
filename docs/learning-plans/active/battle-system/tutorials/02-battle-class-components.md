@@ -1,6 +1,11 @@
+---
+title: "02 — Battle 核心类与组件系统"
+updated: 2026-06-05
+---
+
 # 02 — Battle 核心类与组件系统
 
-**前置依赖**：[01 — 架构总览与入口](01-architecture-entry.md)
+**前置依赖**：[[01-architecture-entry|01 — 架构总览与入口]]
 
 ---
 

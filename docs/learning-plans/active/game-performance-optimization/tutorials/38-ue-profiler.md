@@ -1,3 +1,8 @@
+---
+title: "UE Profiler 工具链 — Insights, Stat, CSV"
+updated: 2026-06-05
+---
+
 # UE Profiler 工具链 — Insights, Stat, CSV
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 55 分钟

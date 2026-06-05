@@ -1,0 +1,6 @@
+{
+  "eval_id": 1,
+  "eval_name": "ecs-analysis",
+  "prompt": "深化 drafts/test-ecs.md 这份笔记，我需要深入理解 ECS 架构的设计原理和实际应用。",
+  "assertions": []
+}

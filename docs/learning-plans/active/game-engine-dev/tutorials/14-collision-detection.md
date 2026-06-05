@@ -1,3 +1,8 @@
+---
+title: "碰撞检测：从 AABB 到 GJK/EPA"
+updated: 2026-06-05
+---
+
 # 碰撞检测：从 AABB 到 GJK/EPA
 
 > 所属计划: 游戏引擎开发工程师

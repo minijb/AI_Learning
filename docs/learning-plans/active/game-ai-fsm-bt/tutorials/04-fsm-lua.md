@@ -1,8 +1,13 @@
+---
+title: "FSM 在 Lua 中的实现"
+updated: 2026-06-05
+---
+
 # FSM 在 Lua 中的实现
 
 > 所属计划: State Machines & Behavior Trees for Game AI
 > 预计耗时: 90min
-> 前置知识: [01-fsm-core-concepts](01-fsm-core-concepts.md)
+> 前置知识: [[01-fsm-core-concepts]]
 
 ---
 

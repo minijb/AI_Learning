@@ -1,3 +1,8 @@
+---
+title: "11 — MCP 服务器与外部集成"
+updated: 2026-06-05
+---
+
 # 11 — MCP 服务器与外部集成
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -139,10 +144,10 @@ OMP 的 MCP 配置支持环境变量引用:
 
 ## 4. 扩展阅读
 
-- [MCP 配置指南](omp://mcp-config.md) — 完整的配置格式、验证规则、排错
-- [MCP 协议传输](omp://mcp-protocol-transports.md)
-- [MCP 运行时生命周期](omp://mcp-runtime-lifecycle.md)
-- [MCP 服务器工具编写](omp://mcp-server-tool-authoring.md)
+- [[omp://mcp-config|MCP 配置指南]] — 完整的配置格式、验证规则、排错
+- [[omp://mcp-protocol-transports|MCP 协议传输]]
+- [[omp://mcp-runtime-lifecycle|MCP 运行时生命周期]]
+- [[omp://mcp-server-tool-authoring|MCP 服务器工具编写]]
 - [MCP 官方规范](https://modelcontextprotocol.io/)
 
 ---

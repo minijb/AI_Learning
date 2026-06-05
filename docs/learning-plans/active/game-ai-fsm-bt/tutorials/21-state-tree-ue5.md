@@ -1,3 +1,8 @@
+---
+title: "UE5 StateTree 深度剖析"
+updated: 2026-06-05
+---
+
 # UE5 StateTree 深度剖析
 
 > 所属计划: State Machines & Behavior Trees for Game AI

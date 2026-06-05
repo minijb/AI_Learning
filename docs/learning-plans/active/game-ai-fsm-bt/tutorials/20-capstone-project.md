@@ -1,3 +1,8 @@
+---
+title: "综合项目: 完整游戏 AI 系统"
+updated: 2026-06-05
+---
+
 # 综合项目: 完整游戏 AI 系统
 
 > 所属计划: State Machines & Behavior Trees for Game AI

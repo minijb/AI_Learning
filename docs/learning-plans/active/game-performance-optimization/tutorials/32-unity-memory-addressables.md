@@ -1,3 +1,8 @@
+---
+title: "Unity 内存管理与 Addressables"
+updated: 2026-06-05
+---
+
 # Unity 内存管理与 Addressables
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 50min

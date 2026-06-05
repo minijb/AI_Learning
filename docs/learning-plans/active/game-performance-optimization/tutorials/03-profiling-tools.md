@@ -1,3 +1,8 @@
+---
+title: "Profiling 工具概览"
+updated: 2026-06-05
+---
+
 # Profiling 工具概览
 
 > 所属计划: 游戏性能优化全攻略

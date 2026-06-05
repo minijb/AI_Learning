@@ -1,3 +1,8 @@
+---
+title: "Compute Shader 优化"
+updated: 2026-06-05
+---
+
 # Compute Shader 优化
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 60min

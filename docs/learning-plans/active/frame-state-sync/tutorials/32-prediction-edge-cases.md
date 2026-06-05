@@ -1,8 +1,13 @@
+---
+title: "预测系统的边缘情况与陷阱"
+updated: 2026-06-05
+---
+
 # 预测系统的边缘情况与陷阱
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [14-客户端预测](14-client-side-prediction.md), [15-服务端和解](15-server-reconciliation.md), [17-延迟补偿](17-lag-compensation.md)
+> 前置知识: [[14-client-side-prediction|14-客户端预测]], [[15-server-reconciliation|15-服务端和解]], [[17-lag-compensation|17-延迟补偿]]
 
 ---
 

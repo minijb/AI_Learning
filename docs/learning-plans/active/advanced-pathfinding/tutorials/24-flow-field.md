@@ -1,3 +1,8 @@
+---
+title: "Flow Field：Dijkstra 矢量场批量寻路"
+updated: 2026-06-05
+---
+
 # Flow Field：Dijkstra 矢量场批量寻路
 
 > 所属计划: 高阶寻路系统

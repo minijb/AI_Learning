@@ -1,3 +1,8 @@
+---
+title: "FSM 核心概念与理论"
+updated: 2026-06-05
+---
+
 # FSM 核心概念与理论
 
 > 所属计划: State Machines & Behavior Trees for Game AI

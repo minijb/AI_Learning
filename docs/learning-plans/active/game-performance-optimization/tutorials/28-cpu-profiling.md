@@ -1,3 +1,8 @@
+---
+title: "CPU Profiling 实战 — Tracy/Superluminal"
+updated: 2026-06-05
+---
+
 # CPU Profiling 实战 — Tracy/Superluminal
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 50 分钟

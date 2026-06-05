@@ -1,3 +1,8 @@
+---
+title: "Completed Plans Archive"
+updated: 2026-06-05
+---
+
 # Completed Plans Archive
 
 > 已完成计划归档索引 — 记录所有已完成和已放弃的计划。

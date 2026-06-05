@@ -1,3 +1,8 @@
+---
+title: "场景图与空间数据结构"
+updated: 2026-06-05
+---
+
 # 场景图与空间数据结构
 
 > 所属计划: 游戏引擎开发工程师
@@ -95,7 +100,7 @@ ECS 的核心优势是**数据局部性（Data Locality）**：相同类型的 C
 
 一个典型的 ECS 实现使用**稀疏集（Sparse Set）**或**Archetype（原型）**来组织 Component 存储。以 Bevy 引擎的 Archetype 模型为例，具有相同 Component 组合的实体被存储在一起（如所有同时有 Transform + Mesh 的实体存储在一个 Archetype 中），系统可以高效地遍历特定 Archetype 中的所有实体。
 
-> 关于 ECS 的完整实现和深入讲解，请参考本计划的 [04-ecs-architecture.md](04-ecs-architecture.md) 教程。
+> 关于 ECS 的完整实现和深入讲解，请参考本计划的 [[04-ecs-architecture]] 教程。
 
 ---
 

@@ -1,3 +1,8 @@
+---
+title: "Rust ECS 生态对比"
+updated: 2026-06-05
+---
+
 # Rust ECS 生态对比
 
 > 所属计划: ECS 系统 — 从原理到实践

@@ -1,3 +1,8 @@
+---
+title: "02 — 掌握会话模型"
+updated: 2026-06-05
+---
+
 # 02 — 掌握会话模型
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -156,10 +161,10 @@ ls ~/.omp/agent/sessions/
 
 ## 4. 扩展阅读
 
-- [OMP 会话存储与条目模型](omp://session.md) — 完整的 JSONL 格式、版本迁移、上下文重建
-- [会话操作: 导出/分享/分叉/恢复](omp://session-operations-export-share-fork-resume.md)
-- [会话切换与最近列表](omp://session-switching-and-recent-listing.md)
-- [Compaction（自动压缩）](omp://compaction.md)
+- [[omp://session|OMP 会话存储与条目模型]] — 完整的 JSONL 格式、版本迁移、上下文重建
+- [[omp://session-operations-export-share-fork-resume|会话操作: 导出/分享/分叉/恢复]]
+- [[omp://session-switching-and-recent-listing|会话切换与最近列表]]
+- [[omp://compaction|Compaction（自动压缩）]]
 
 ---
 

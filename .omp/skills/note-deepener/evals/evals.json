@@ -1,0 +1,33 @@
+{
+  "skill_name": "note-deepener",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "深化 drafts/test-ecs.md 这份笔记，我需要深入理解 ECS 架构的设计原理和实际应用。",
+      "expected_output": "在 docs/deeper_userNote/test-ecs/ 下生成结构化教程，包含 ECS 核心概念、与 OOP 对比、内存布局分析、System 依赖管理、EnTT vs Flecs 对比、与 Unity GameObject-Component 的区别等章节，每个章节一个 .md 文件，附带 README.md 索引。",
+      "files": ["drafts/test-ecs.md"],
+      "expectations": [
+        "在 docs/deeper_userNote/test-ecs/ 下创建了多个 .md 文件",
+        "README.md 包含章节导航表格",
+        "覆盖了笔记中提出的 3 个问题（System 依赖、EnTT vs Flecs、Unity 区别）",
+        "内容包含代码示例",
+        "内容包含联网搜索来源引用",
+        "章节数在 3-6 之间"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "帮我深入分析 drafts/test-lockfree-queue.md，尤其是多线程并发和内存序的部分我想搞明白",
+      "expected_output": "在 docs/deeper_userNote/test-lockfree-queue/ 下生成结构化教程，深入解释 lockfree queue 的原理、SPSC 实现、memory order 使用、MPMC 扩展、spin-wait 优化、与 Disruptor 对比等，每个章节一个 .md 文件，附带 README.md。",
+      "files": ["drafts/test-lockfree-queue.md"],
+      "expectations": [
+        "在 docs/deeper_userNote/test-lockfree-queue/ 下创建了多个 .md 文件",
+        "README.md 包含章节导航表格",
+        "覆盖了笔记中提出的 4 个问题（spin 优化、MPMC、memory order、Disruptor 对比）",
+        "包含 C++ 代码示例展示 memory_order_acquire/release",
+        "内容包含联网搜索来源引用",
+        "章节数在 3-6 之间"
+      ]
+    }
+  ]
+}

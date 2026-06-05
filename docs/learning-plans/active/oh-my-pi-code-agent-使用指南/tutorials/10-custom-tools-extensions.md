@@ -1,3 +1,8 @@
+---
+title: "10 — 自定义工具与扩展"
+updated: 2026-06-05
+---
+
 # 10 — 自定义工具与扩展
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -200,10 +205,10 @@ export default function redactSecrets(pi: HookAPI) {
 
 ## 4. 扩展阅读
 
-- [自定义工具文档](omp://custom-tools.md) — 完整的 API 和加载规则
-- [扩展文档](omp://extensions.md) — 事件、工具、命令注册
-- [钩子文档](omp://hooks.md) — pre/post 拦截
-- [Extensibility 加载](omp://extension-loading.md)
+- [[omp://custom-tools|自定义工具文档]] — 完整的 API 和加载规则
+- [[omp://extensions|扩展文档]] — 事件、工具、命令注册
+- [[omp://hooks|钩子文档]] — pre/post 拦截
+- [[omp://extension-loading|Extensibility 加载]]
 
 ---
 

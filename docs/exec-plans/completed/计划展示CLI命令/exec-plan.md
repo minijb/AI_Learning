@@ -1,3 +1,8 @@
+---
+title: "Exec Plan: 计划展示CLI命令"
+updated: 2026-06-05
+---
+
 # Exec Plan: 计划展示CLI命令
 
 > 完整执行计划 — 跨模块改动、新功能开发。

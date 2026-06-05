@@ -1,3 +1,8 @@
+---
+title: "Docs — AI 程序员自我提升工作区"
+updated: 2026-06-05
+---
+
 # Docs — AI 程序员自我提升工作区
 
 > docs 系统是工作区的记录系统（Record System）。所有学习产出存储在这里，
@@ -9,9 +14,9 @@
 
 | 目录 | 用途 | 入口 |
 |------|------|------|
-| `learning-plans/` | 结构化学习计划（一流工件） | [INDEX](learning-plans/INDEX.md) |
-| `knowledge-notes/` | 简略知识笔记，按领域分类 | [INDEX](knowledge-notes/INDEX.md) |
-| `deep-dives/` | 知识点深度探索记录 | [INDEX](deep-dives/INDEX.md) |
+| `learning-plans/` | 结构化学习计划（一流工件） | [[learning-plans/INDEX]] |
+| `knowledge-notes/` | 简略知识笔记，按领域分类 | [[knowledge-notes/INDEX]] |
+| `deep-dives/` | 知识点深度探索记录 | [[deep-dives/INDEX]] |
 
 ---
 

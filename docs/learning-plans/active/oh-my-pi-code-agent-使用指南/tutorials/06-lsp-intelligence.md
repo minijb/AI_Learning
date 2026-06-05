@@ -1,3 +1,8 @@
+---
+title: "06 — LSP 代码智能"
+updated: 2026-06-05
+---
+
 # 06 — LSP 代码智能
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -127,8 +132,8 @@ npm install -g typescript-language-server typescript
 
 ## 4. 扩展阅读
 
-- [`lsp` 工具完整文档](omp://tools/lsp.md)
-- [LSP 配置](omp://lsp-config.md)
+- [[omp://tools/lsp|`lsp` 工具完整文档]]
+- [[omp://lsp-config|LSP 配置]]
 - [LSP 协议规范](https://microsoft.github.io/language-server-protocol/)
 
 ---

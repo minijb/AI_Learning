@@ -1,3 +1,8 @@
+---
+title: "Rich 优化 Plan 相关 Python 脚本"
+updated: 2026-06-05
+---
+
 # Rich 优化 Plan 相关 Python 脚本
 
 **Goal:** 使用 Rich 库美化所有 plan 相关 CLI 脚本的输出，消除手动的 box-drawing、padding 计算、裸 print。

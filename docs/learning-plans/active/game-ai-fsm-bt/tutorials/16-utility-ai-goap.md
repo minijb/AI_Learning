@@ -1,3 +1,8 @@
+---
+title: "Utility AI / GOAP / HTN 及其他 AI 范式"
+updated: 2026-06-05
+---
+
 # Utility AI / GOAP / HTN 及其他 AI 范式
 
 > 所属计划: State Machines & Behavior Trees for Game AI

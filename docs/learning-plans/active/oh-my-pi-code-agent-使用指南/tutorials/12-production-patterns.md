@@ -1,3 +1,8 @@
+---
+title: "12 — 生产最佳实践"
+updated: 2026-06-05
+---
+
 # 12 — 生产最佳实践
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -207,11 +212,11 @@ memories:
 
 ## 4. 扩展阅读
 
-- [秘密混淆](omp://secrets.md) — 完整的 secrets 系统
-- [Auth Broker Gateway](omp://auth-broker-gateway.md) — 远程凭证保管
-- [自主记忆](omp://memory.md) — 跨会话知识积累
-- [会话操作](omp://session-operations-export-share-fork-resume.md)
-- [SDK 嵌入指南](omp://sdk.md) — 以编程方式使用 OMP
+- [[omp://secrets|秘密混淆]] — 完整的 secrets 系统
+- [[omp://auth-broker-gateway|Auth Broker Gateway]] — 远程凭证保管
+- [[omp://memory|自主记忆]] — 跨会话知识积累
+- [[omp://session-operations-export-share-fork-resume|会话操作]]
+- [[omp://sdk|SDK 嵌入指南]] — 以编程方式使用 OMP
 - [OMP 官方文档](omp://)
 
 ---

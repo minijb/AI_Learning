@@ -1,3 +1,8 @@
+---
+title: "Plan Memory: demo-feature"
+updated: 2026-06-05
+---
+
 # Plan Memory: demo-feature
 
 > 执行记忆 — 记录计划执行过程中产生的关键工件和决策。

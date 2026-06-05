@@ -1,3 +1,8 @@
+---
+title: "02 — Lua 核心：table — 唯一的数据结构"
+updated: 2026-06-05
+---
+
 # 02 — Lua 核心：table — 唯一的数据结构
 
 > 所属计划: Neovim + Lua 配置实战

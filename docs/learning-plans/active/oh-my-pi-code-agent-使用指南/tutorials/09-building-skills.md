@@ -1,3 +1,8 @@
+---
+title: "09 — 构建技能（Skills）"
+updated: 2026-06-05
+---
+
 # 09 — 构建技能（Skills）
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -163,9 +168,9 @@ alwaysApply: true
 
 ## 4. 扩展阅读
 
-- [Skills 系统文档](omp://skills.md) — 完整的发现、优先级、过滤、URL 解析
-- [Skill 编写: 扩展开发指南](omp://skills/authoring-extensions.md)
-- [Skill 示例: Hello Extension](omp://skills/examples/hello-extension/README.md)
+- [[omp://skills|Skills 系统文档]] — 完整的发现、优先级、过滤、URL 解析
+- [[omp://skills/authoring-extensions|Skill 编写: 扩展开发指南]]
+- [[omp://skills/examples/hello-extension/README|Skill 示例: Hello Extension]]
 
 ---
 

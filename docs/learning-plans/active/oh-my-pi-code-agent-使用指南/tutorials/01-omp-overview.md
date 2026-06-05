@@ -1,3 +1,8 @@
+---
+title: "01 — OMP 概述与首次会话"
+updated: 2026-06-05
+---
+
 # 01 — OMP 概述与首次会话
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -165,8 +170,8 @@ OMP 会在 TUI 中逐步展示其操作:
 ## 4. 扩展阅读
 
 - [OMP GitHub 仓库](https://github.com/can1357/oh-my-pi)
-- [OMP SDK 文档 — 嵌入 API](omp://sdk.md)
-- [OMP 会话模型文档](omp://session.md)
+- [[omp://sdk|OMP SDK 文档 — 嵌入 API]]
+- [[omp://session|OMP 会话模型文档]]
 - [OMP 博客: What I learned building a coding agent](https://mariozechner.at/posts/2025-11-30-pi-coding-agent/)
 
 ---

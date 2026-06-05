@@ -1,7 +1,12 @@
+---
+title: "Placement New 与对齐分配 深度剖析"
+updated: 2026-06-05
+---
+
 # Placement New 与对齐分配 深度剖析
 
 > 深度等级: 第 7 层
-> 关联深度探索: [Custom Allocators and Arena](custom-allocators-arena.md)、[C++ 特殊成员函数](cpp-special-member-functions.md)、[C++ PMR](cpp-pmr-polymorphic-memory-resources.md)
+> 关联深度探索: [[custom-allocators-arena|Custom Allocators and Arena]]、[[cpp-special-member-functions|C++ 特殊成员函数]]、[[cpp-pmr-polymorphic-memory-resources|C++ PMR]]
 > 分析日期: 2026-05-29
 
 ---

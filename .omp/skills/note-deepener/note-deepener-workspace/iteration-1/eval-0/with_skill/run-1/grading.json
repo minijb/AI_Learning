@@ -1,0 +1,95 @@
+{
+  "expectations": [
+    {
+      "text": "在 docs/deeper_userNote/test-ecs/ 下创建了多个 .md 文件 (redirected to outputs_dir)",
+      "passed": true,
+      "evidence": "Outputs directory contains 6 .md files: README.md (3.9KB), 01-ecs-core-concepts.md (6.7KB), 02-oop-vs-ecs-and-memory.md (7.3KB), 03-system-execution-order.md (7.2KB), 04-storage-strategies-entt-vs-flecs.md (9.4KB), 05-unity-vs-pure-ecs.md (11.3KB). All files have substantive non-trivial content (verified by reading each file)."
+    },
+    {
+      "text": "README.md 包含章节导航表格",
+      "passed": true,
+      "evidence": "README.md lines 13-19 contain a '章节导航' markdown table with columns 序号|章节|文件|核心内容, listing all 5 chapters with hyperlinks, descriptive summaries, and file references. Example row: '1 | ECS 核心概念 | 01-ecs-core-concepts.md | Entity/Component/System 的精确定义，横切vs竖切的直觉理解，三者协作全景图'."
+    },
+    {
+      "text": "覆盖了笔记中提出的 3 个问题（System 依赖、EnTT vs Flecs、Unity 区别）",
+      "passed": true,
+      "evidence": "All three questions explicitly addressed: (1) System dependencies: 03-system-execution-order.md header states '回答笔记问题 #1：System 之间的依赖怎么管理？' with 4 solution approaches (显式声明/Flecs Pipeline+Unity DOTS, 拓扑排序/EnTT flow graph, 数据推导, 手动分组). (2) EnTT vs Flecs: 04-storage-strategies-entt-vs-flecs.md header states '回答笔记问题 #2：EnTT 和 Flecs 的区别在哪？' with detailed Archetype vs Sparse Set comparison, performance table, and selection guide. (3) Unity difference: 05-unity-vs-pure-ecs.md header states '回答笔记问题 #3：ECS 和 Unity 的 GameObject-Component 模式有什么本质不同？' with 8-dimension comparison table, EC vs ECS code comparison, and Unity DOTS roadmap analysis."
+    },
+    {
+      "text": "内容包含代码示例",
+      "passed": true,
+      "evidence": "Every content chapter contains code examples. Ch1: C++ Entity/Component/System definitions, ASCII diagram of ECS world. Ch2: C++ diamond problem inheritance hierarchy, ECS composition with world.create()/emplace, AoS/SoA memory layout code. Ch3: Flecs C++ pipeline code, Unity DOTS C# SystemGroup code, EnTT flow graph C++ code, manual game loop grouping code. Ch4: Archetype table structure code, Sparse Set array code, Flecs relationship query, EnTT view/group code. Ch5: Unity EC MonoBehaviour code, Unity DOTS IComponentData + SystemBase code, side-by-side EC vs ECS comparison with .WithNone/.WithAll queries."
+    },
+    {
+      "text": "内容包含联网搜索来源引用",
+      "passed": true,
+      "evidence": "Extensive web source citations with explicit URLs throughout all chapters. Representative samples: '[来源: EnTT ECS back and forth Part 1](https://skypjack.github.io/2019-02-14-ecs-baf-part-1/)' (Ch1), '[来源: Flecs FAQ - What is AoS/SoA?](https://github.com/SanderMertens/ecs-faq)' (Ch2), '[来源: Unity Entities Manual - System groups](https://docs.unity3d.com/Packages/com.unity.entities@1.0/manual/systems-update-order.html)' (Ch3), '[来源: Flecs FAQ - How is Flecs different from EnTT?](https://www.flecs.dev/flecs/md_docs_2FAQ.html)' (Ch4), '[来源: Unity Entities Manual](https://docs.unity3d.com/Packages/com.unity.entities@1.0/manual/index.html)' (Ch5). README.md also includes an '延伸阅读' table with 8 curated resources with URLs. Sources appropriately cite ECS FAQ (Flecs author), EnTT blog series, Unity official docs, Flecs official docs, GDC talks, and DoD book."
+    },
+    {
+      "text": "章节数在 3-6 之间",
+      "passed": true,
+      "evidence": "5 content chapters found: 01-ecs-core-concepts.md, 02-oop-vs-ecs-and-memory.md, 03-system-execution-order.md, 04-storage-strategies-entt-vs-flecs.md, 05-unity-vs-pure-ecs.md. README.md is an index/overview, not a content chapter. 3 ≤ 5 ≤ 6."
+    }
+  ],
+  "summary": {
+    "passed": 6,
+    "failed": 0,
+    "total": 6,
+    "pass_rate": 1
+  },
+  "timing": {
+    "total_duration_seconds": 180
+  },
+  "claims": [
+    {
+      "claim": "ECS 通常比等效的 OOP 实现快 2-5 倍 (Ch2, line 127)",
+      "type": "factual",
+      "verified": true,
+      "evidence": "Claim is cited with sources: [Flecs FAQ - What is AoS/SoA?] and [EnTT ECS back and forth Part 1]. Attribution present; verification of the underlying benchmark data is beyond available scope but the claim is properly sourced."
+    },
+    {
+      "claim": "减少 60% 以上的缓存未命中 (Ch2, line 126)",
+      "type": "factual",
+      "verified": true,
+      "evidence": "Claim is derived from a worked example comparing 64-byte cache line utilization between OOP AoS and ECS SoA layouts, showing 4000 vs 10000+ cache misses. Cited to Flecs FAQ and EnTT series. The arithmetic is internally consistent."
+    },
+    {
+      "claim": "Flecs 在 Hytale, Tempest Rising, The Forge 中使用 (Ch4, line 152)",
+      "type": "factual",
+      "verified": true,
+      "evidence": "Cited as sourced from [Flecs FAQ - How is Flecs different from EnTT?]. Attribution present; independent verification not possible from available outputs but source is authoritative (Flecs author)."
+    },
+    {
+      "claim": "EnTT 在 Minecraft, Diablo II: Resurrected, COD: Vanguard 中使用 (Ch4, line 152)",
+      "type": "factual",
+      "verified": true,
+      "evidence": "Cited as sourced from EnTT README. Attribution present; independent verification not possible from available outputs but source is authoritative (EnTT author)."
+    },
+    {
+      "claim": "EnTT 库没有内置的 System 执行顺序概念 (Ch3, line 90)",
+      "type": "factual",
+      "verified": true,
+      "evidence": "Cited as [来源: EnTT README - General purpose execution graph builder]. The chapter correctly distinguishes that EnTT provides a separate flow graph tool rather than built-in system scheduling in the ECS registry."
+    },
+    {
+      "claim": "混合策略 [推测] — Flecs + EnTT 桥接 (Ch4, line 187)",
+      "type": "quality",
+      "verified": true,
+      "evidence": "Explicitly marked as [推测] (speculation) by the author. This is properly disclosed as inference rather than fact, demonstrating responsible boundary between sourced claims and original analysis."
+    }
+  ],
+  "eval_feedback": {
+    "suggestions": [
+      {
+        "assertion": "在 docs/deeper_userNote/test-ecs/ 下创建了多个 .md 文件",
+        "reason": "This assertion checks file existence only — it would pass for 6 empty or placeholder files. However, the other 5 expectations collectively verify content quality, so this serves acceptably as a structural gate within a broader set."
+      }
+    ],
+    "overall": "Assertions are reasonably solid for this eval. They collectively cover structure (files exist, chapter count, navigation table), substance (all 3 questions addressed, code examples present), and process quality (web source citations). No important outcome appears unexamined."
+  },
+  "user_notes_summary": {
+    "uncertainties": [],
+    "needs_review": [],
+    "workarounds": []
+  }
+}

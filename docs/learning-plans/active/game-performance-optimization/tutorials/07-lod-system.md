@@ -1,3 +1,8 @@
+---
+title: "LOD 系统 — Mesh/Shader/Texture 层级管理"
+updated: 2026-06-05
+---
+
 # LOD 系统 — Mesh/Shader/Texture 层级管理
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 45min

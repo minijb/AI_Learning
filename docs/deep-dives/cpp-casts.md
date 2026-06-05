@@ -1,7 +1,12 @@
+---
+title: "C++ 类型转换（Cast）深度剖析"
+updated: 2026-06-05
+---
+
 # C++ 类型转换（Cast）深度剖析
 
 > 深度等级: 第 7 层
-> 关联深度探索: [Placement New 与对齐分配](placement-new-aligned-allocation.md)、[C++ 完美转发](cpp-perfect-forwarding.md)
+> 关联深度探索: [[placement-new-aligned-allocation|Placement New 与对齐分配]]、[[cpp-perfect-forwarding|C++ 完美转发]]
 > 分析日期: 2026-05-29
 
 ---

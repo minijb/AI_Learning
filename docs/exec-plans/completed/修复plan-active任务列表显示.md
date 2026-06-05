@@ -1,3 +1,8 @@
+---
+title: "Quick Plan: 修复plan-active任务列表显示"
+updated: 2026-06-05
+---
+
 # Quick Plan: 修复plan-active任务列表显示
 
 > 轻量计划 — 适合 ≤5 步的单文件改动。

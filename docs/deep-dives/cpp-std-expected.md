@@ -1,3 +1,8 @@
+---
+title: "std::expected 深度剖析"
+updated: 2026-06-05
+---
+
 # std::expected 深度剖析
 
 > 深度等级: 第 7 层（对比与边界）

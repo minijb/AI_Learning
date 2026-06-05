@@ -1,8 +1,13 @@
+---
+title: "确定性游戏逻辑：定点数与跨平台一致性"
+updated: 2026-06-05
+---
+
 # 确定性游戏逻辑：定点数与跨平台一致性
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [05-帧同步核心原理：Lockstep 模型](05-lockstep-core-principles.md)
+> 前置知识: [[05-lockstep-core-principles|05-帧同步核心原理：Lockstep 模型]]
 
 ---
 

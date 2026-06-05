@@ -1,7 +1,12 @@
+---
+title: "C++ 特殊成员函数的全部 Rule"
+updated: 2026-06-05
+---
+
 # C++ 特殊成员函数的全部 Rule
 
 > 标签: C++, RAII, 惯用法, 编码规范
-> 关联: [特殊成员函数深度剖析](../deep-dives/cpp-special-member-functions.md) | [RAII 深度剖析](../deep-dives/raii-complete-analysis.md)
+> 关联: [[../deep-dives/cpp-special-member-functions|特殊成员函数深度剖析]] | [[../deep-dives/raii-complete-analysis|RAII 深度剖析]]
 > 日期: 2026-05-28
 
 ---

@@ -1,3 +1,8 @@
+---
+title: "Async Compute 与现代 GPU 并行"
+updated: 2026-06-05
+---
+
 # Async Compute 与现代 GPU 并行
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 45min

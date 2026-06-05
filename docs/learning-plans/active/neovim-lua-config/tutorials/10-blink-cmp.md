@@ -1,3 +1,8 @@
+---
+title: "10 — blink.cmp 补全系统"
+updated: 2026-06-05
+---
+
 # 10 — blink.cmp 补全系统
 
 > 所属计划: Neovim + Lua 配置实战 (现代版)

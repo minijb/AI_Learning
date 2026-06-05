@@ -1,8 +1,13 @@
+---
+title: "Custom Allocators and Arena 深度剖析"
+updated: 2026-06-05
+---
+
 # Custom Allocators and Arena 深度剖析
 
 > 深度等级: 第 7 层
-> 关联学习计划: 游戏引擎开发工程师 — [C++ 引擎编程：语言特性精要](../learning-plans/active/game-engine-dev/tutorials/00-cpp-for-game-engines.md)
-> 关联深度探索: [RAII 深度剖析](raii-complete-analysis.md)、[C++ 智能指针](cpp-smart-pointers.md)、[C++ 特殊成员函数](cpp-special-member-functions.md)
+> 关联学习计划: 游戏引擎开发工程师 — [[../learning-plans/active/game-engine-dev/tutorials/00-cpp-for-game-engines|C++ 引擎编程：语言特性精要]]
+> 关联深度探索: [[raii-complete-analysis|RAII 深度剖析]]、[[cpp-smart-pointers|C++ 智能指针]]、[[cpp-special-member-functions|C++ 特殊成员函数]]
 > 分析日期: 2026-05-28
 
 ---

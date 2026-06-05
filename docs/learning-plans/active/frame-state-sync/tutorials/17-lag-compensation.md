@@ -1,8 +1,13 @@
+---
+title: "延迟补偿 (Lag Compensation & Server-Side Rewind)"
+updated: 2026-06-05
+---
+
 # 延迟补偿 (Lag Compensation & Server-Side Rewind)
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [15-服务端和解 (Server Reconciliation)](15-server-reconciliation.md)
+> 前置知识: [[15-server-reconciliation|15-服务端和解 (Server Reconciliation)]]
 
 ---
 

@@ -1,8 +1,13 @@
+---
+title: "Blackboard 系统与数据流"
+updated: 2026-06-05
+---
+
 # Blackboard 系统与数据流
 
 > 所属计划: State Machines & Behavior Trees for Game AI
 > 预计耗时: 120min
-> 前置知识: [08-bt-unity-csharp.md](08-bt-unity-csharp.md), [09-bt-unreal-cpp.md](09-bt-unreal-cpp.md), [10-bt-lua.md](10-bt-lua.md)
+> 前置知识: [[08-bt-unity-csharp]], [[09-bt-unreal-cpp]], [[10-bt-lua]]
 
 ---
 

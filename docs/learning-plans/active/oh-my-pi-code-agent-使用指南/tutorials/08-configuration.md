@@ -1,3 +1,8 @@
+---
+title: "08 — 配置系统深度解析"
+updated: 2026-06-05
+---
+
 # 08 — 配置系统深度解析
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -162,10 +167,10 @@ cat ~/.omp/agent/config.yml
 
 ## 4. 扩展阅读
 
-- [配置发现与解析](omp://config-usage.md) — 完整的优先级、来源、迁移逻辑
-- [设置 Schema 定义](omp://config-usage.md)
-- [环境变量参考](omp://environment-variables.md) — 所有可用的环境变量
-- [Extension 加载](omp://extension-loading.md)
+- [[omp://config-usage|配置发现与解析]] — 完整的优先级、来源、迁移逻辑
+- [[omp://config-usage|设置 Schema 定义]]
+- [[omp://environment-variables|环境变量参考]] — 所有可用的环境变量
+- [[omp://extension-loading|Extension 加载]]
 
 ---
 

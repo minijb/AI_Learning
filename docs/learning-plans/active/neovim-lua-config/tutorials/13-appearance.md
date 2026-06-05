@@ -1,3 +1,8 @@
+---
+title: "13 — 外观定制：colorscheme 与 statusline"
+updated: 2026-06-05
+---
+
 # 13 — 外观定制：colorscheme 与 statusline
 
 > 所属计划: Neovim + Lua 配置实战 (现代版)

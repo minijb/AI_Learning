@@ -1,3 +1,8 @@
+---
+title: "Recast/Detour 与 Unity 集成"
+updated: 2026-06-05
+---
+
 # Recast/Detour 与 Unity 集成
 
 > 所属计划: 高阶寻路系统

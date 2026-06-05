@@ -1,3 +1,8 @@
+---
+title: "网络同步 AI 与 GAS 深度集成"
+updated: 2026-06-05
+---
+
 # 网络同步 AI 与 GAS 深度集成
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -2238,4 +2243,4 @@ T=3.001s  ASC 的 Tag 变更事件触发
 
 ---
 
-> **下一步**: 完成本教程后，建议复习 [Tutorial 09: 行为树在 Unreal Engine 中的实现 (C++)](09-bt-unreal-cpp.md) 和 [Tutorial 15: 混合架构与 AI 系统设计](15-hybrid-architectures.md) 中与 GAS 相关的部分。对于面试准备，特别注意练习 1（网络架构设计）和练习 2（GAS 驱动 BT）——这两个场景是游戏 AI 面试中的高频网络/GAS 交叉问题。
+> **下一步**: 完成本教程后，建议复习 [[09-bt-unreal-cpp|Tutorial 09: 行为树在 Unreal Engine 中的实现 (C++)]] 和 [[15-hybrid-architectures|Tutorial 15: 混合架构与 AI 系统设计]] 中与 GAS 相关的部分。对于面试准备，特别注意练习 1（网络架构设计）和练习 2（GAS 驱动 BT）——这两个场景是游戏 AI 面试中的高频网络/GAS 交叉问题。

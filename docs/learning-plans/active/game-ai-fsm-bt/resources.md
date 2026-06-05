@@ -1,3 +1,8 @@
+---
+title: "学习资源: State Machines & Behavior Trees for Game AI"
+updated: 2026-06-05
+---
+
 # 学习资源: State Machines & Behavior Trees for Game AI
 
 ## 官方文档

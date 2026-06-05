@@ -1,8 +1,13 @@
+---
+title: "录像与战斗回放系统"
+updated: 2026-06-05
+---
+
 # 录像与战斗回放系统
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [12-帧同步进阶](12-lockstep-advanced.md), [25-混合同步进阶](25-hybrid-sync-advanced.md)
+> 前置知识: [[12-lockstep-advanced|12-帧同步进阶]], [[25-hybrid-sync-advanced|25-混合同步进阶]]
 
 ---
 

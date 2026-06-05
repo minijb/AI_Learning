@@ -1,3 +1,8 @@
+---
+title: "14 — kickstart.nvim 架构深度解析"
+updated: 2026-06-05
+---
+
 # 14 — kickstart.nvim 架构深度解析
 
 > 所属计划: Neovim + Lua 配置实战 (现代版)
@@ -249,7 +254,7 @@ require 'custom.plugins'
 
 ### 阶段 5: 完全模块化（高级）
 
-当 `init.lua` 太长时，把一个 section 提取成独立文件。详见 **[第 15 节：模块化配置架构](15-modular-config.md)**，其中包含了完整的迁移步骤、目录结构设计和常见陷阱。
+当 `init.lua` 太长时，把一个 section 提取成独立文件。详见 **[[15-modular-config|第 15 节：模块化配置架构]]**，其中包含了完整的迁移步骤、目录结构设计和常见陷阱。
 
 ```lua
 -- 从:

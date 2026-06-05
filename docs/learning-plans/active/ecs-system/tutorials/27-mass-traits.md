@@ -1,3 +1,8 @@
+---
+title: "Mass Traits 与实体模板"
+updated: 2026-06-05
+---
+
 # Mass Traits 与实体模板
 
 > 所属计划: ECS 系统 — 从原理到实践

@@ -1,3 +1,8 @@
+---
+title: "C++ 内存序 (memory_order) 深度剖析"
+updated: 2026-06-05
+---
+
 # C++ 内存序 (memory_order) 深度剖析
 
 > 深度等级: 第 6 层（源码分析）

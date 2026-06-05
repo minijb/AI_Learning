@@ -1,3 +1,8 @@
+---
+title: "Decorator、Service 与并行节点"
+updated: 2026-06-05
+---
+
 # Decorator、Service 与并行节点
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -1251,4 +1256,4 @@ Selector
 
 ---
 
-> **下一步**: 完成本教程后，进入 Tutorial 13 [行为树调试、可视化与性能优化](13-bt-debugging-visualization.md)，学习如何在实际项目中定位行为树的问题、使用可视化调试工具、以及优化大规模 AI 场景的性能。
+> **下一步**: 完成本教程后，进入 Tutorial 13 [[13-bt-debugging-visualization|行为树调试、可视化与性能优化]]，学习如何在实际项目中定位行为树的问题、使用可视化调试工具、以及优化大规模 AI 场景的性能。

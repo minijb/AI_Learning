@@ -1,3 +1,8 @@
+---
+title: "04 — init.lua 结构与基本选项配置"
+updated: 2026-06-05
+---
+
 # 04 — init.lua 结构与基本选项配置
 
 > 所属计划: Neovim + Lua 配置实战 (现代版)

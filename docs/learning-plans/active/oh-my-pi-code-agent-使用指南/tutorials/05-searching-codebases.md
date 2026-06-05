@@ -1,3 +1,8 @@
+---
+title: "05 — 搜索与导航大型代码库"
+updated: 2026-06-05
+---
+
 # 05 — 搜索与导航大型代码库
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -127,10 +132,10 @@ search: pattern="async function.*\n.*try \{", paths=["src/**/*.ts"]
 
 ## 4. 扩展阅读
 
-- [`search` 工具文档](omp://tools/search.md)
-- [`find` 工具文档](omp://tools/find.md)
-- [BM25 搜索引擎](omp://tools/search_tool_bm25.md) — 高级语义搜索
-- [原生文本搜索管道](omp://natives-text-search-pipeline.md)
+- [[omp://tools/search|`search` 工具文档]]
+- [[omp://tools/find|`find` 工具文档]]
+- [[omp://tools/search_tool_bm25|BM25 搜索引擎]] — 高级语义搜索
+- [[omp://natives-text-search-pipeline|原生文本搜索管道]]
 
 ---
 

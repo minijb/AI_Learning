@@ -1,3 +1,8 @@
+---
+title: "Unity DOTS 入门 — ECS + Job + Burst"
+updated: 2026-06-05
+---
+
 # Unity DOTS 入门 — ECS + Job + Burst
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 60min

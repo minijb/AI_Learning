@@ -1,3 +1,8 @@
+---
+title: "World / Coordinator 详解：ECS 的中央枢纽"
+updated: 2026-06-05
+---
+
 # World / Coordinator 详解：ECS 的中央枢纽
 
 > 所属计划: ECS 系统 — 从原理到实践

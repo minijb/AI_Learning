@@ -1,8 +1,13 @@
+---
+title: "20. 原子操作与 C++ 内存序精讲"
+updated: 2026-06-05
+---
+
 # 20. 原子操作与 C++ 内存序精讲
 
 > **所属计划**: C++ 游戏工程师详细攻略 — 阶段 6：并发与原子操作
 > **预计耗时**: 5 小时
-> **前置知识**: [2-对象生命周期与内存布局](02-object-lifetime-memory-layout.md)
+> **前置知识**: [[02-object-lifetime-memory-layout|2-对象生命周期与内存布局]]
 > **C++ 标准**: C++11 (atomic, memory_order), C++20 (atomic_ref, atomic_wait)
 > **参考深度探索**: `docs/deep-dives/cpp-memory-order-game-engine.md`
 

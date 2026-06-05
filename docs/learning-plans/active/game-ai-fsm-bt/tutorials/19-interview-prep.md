@@ -1,3 +1,8 @@
+---
+title: "面试准备与系统设计"
+updated: 2026-06-05
+---
+
 # 面试准备与系统设计
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -948,4 +953,4 @@ public struct Vector3
 
 ---
 
-> **下一篇**: [Tutorial 20: 综合项目 — 完整游戏 AI 系统](../20-capstone-project.md) — 将全部 19 个教程的知识整合为一个可运行的 Demo。
+> **下一篇**: [[../20-capstone-project|Tutorial 20: 综合项目 — 完整游戏 AI 系统]] — 将全部 19 个教程的知识整合为一个可运行的 Demo。

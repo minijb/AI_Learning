@@ -1,3 +1,8 @@
+---
+title: "着色器编程：GLSL/HLSL 与 GPU 计算"
+updated: 2026-06-05
+---
+
 # 着色器编程：GLSL/HLSL 与 GPU 计算
 
 > 所属计划: 游戏引擎开发工程师

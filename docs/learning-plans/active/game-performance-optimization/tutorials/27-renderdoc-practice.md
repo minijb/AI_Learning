@@ -1,3 +1,8 @@
+---
+title: "GPU Capture 实战 — RenderDoc 全流程"
+updated: 2026-06-05
+---
+
 # GPU Capture 实战 — RenderDoc 全流程
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 60 分钟
@@ -331,17 +336,17 @@ EID    Event Name                             Action
 
 | Draw Call | Vertices | Triangles | GPU Time (μs) | 说明 |
 |-----------|----------|-----------|---------------|------|
-| #73: Shadow Depth Pass | 284,312 | 94,771 | 1,240 | 阴影贴图，顶点数高 |
-| #142: GBuffer Opaque | 850,234 | 283,411 | 2,850 | 主场景不透明物体，几何体密集 |
-| #189: Particle Render | 24 | 8 (billboards) | 3,120 | **异常！** 只有 8 个三角形却耗时 3ms |
-| #201: PostProcess Bloom | 6 (fullscreen tri) | 2 | 1,850 | 全屏 Bloom，带宽敏感 |
-| #210: Skybox | 36 | 12 | 180 | 天空盒，开销极低 |
+| `#73`: Shadow Depth Pass | 284,312 | 94,771 | 1,240 | 阴影贴图，顶点数高 |
+| `#142`: GBuffer Opaque | 850,234 | 283,411 | 2,850 | 主场景不透明物体，几何体密集 |
+| `#189`: Particle Render | 24 | 8 (billboards) | 3,120 | **异常！** 只有 8 个三角形却耗时 3ms |
+| `#201`: PostProcess Bloom | 6 (fullscreen tri) | 2 | 1,850 | 全屏 Bloom，带宽敏感 |
+| `#210`: Skybox | 36 | 12 | 180 | 天空盒，开销极低 |
 
 **步骤 3: 逐 Draw Call 深入分析**
 
 下面是对上述 Top 5 的详细诊断：
 
-#### Top 1: #189 Particle Render（粒子渲染）— 3.12ms
+#### Top 1: `#189` Particle Render（粒子渲染）— 3.12ms
 
 **为什么贵？** 8 个三角形不可能花 3ms。选择该 Event，打开 **Pipeline State** 面板：
 
@@ -354,7 +359,7 @@ EID    Event Name                             Action
 - 使用 `discard` 提前退出非粒子覆盖区域的像素
 - 减小粒子渲染目标分辨率（Half-Res particles）
 
-#### Top 2: #142 GBuffer Opaque — 2.85ms
+#### Top 2: `#142` GBuffer Opaque — 2.85ms
 
 **为什么贵？** 85 万顶点，28 万三角形，合理范围内。但进一步检查：
 
@@ -367,7 +372,7 @@ EID    Event Name                             Action
 - 材质合并，减少 Unique Material 数量
 - 按材质排序渲染（Sort by Material Key）
 
-#### Top 3: #201 PostProcess Bloom — 1.85ms
+#### Top 3: `#201` PostProcess Bloom — 1.85ms
 
 **为什么贵？** 选择该 Event，在 **Texture Viewer** 中查看输入/输出。
 
@@ -380,7 +385,7 @@ EID    Event Name                             Action
 - 减少 Bloom Mip 层级数：6 级降为 4 级
 - 在较低分辨率下做模糊然后上采样
 
-#### Top 4: #73 Shadow Depth Pass — 1.24ms
+#### Top 4: `#73` Shadow Depth Pass — 1.24ms
 
 **为什么贵？** 在 **Texture Viewer** 中查看 Shadow Map 输出：
 
@@ -392,11 +397,11 @@ EID    Event Name                             Action
 - 对静态场景物体使用 Shadow Cache（只在光源移动时重新渲染）
 - 合并静态物体的 Shadow Casting 到单个 Mesh
 
-#### Top 5: #210 Skybox — 0.18ms
+#### Top 5: `#210` Skybox — 0.18ms
 
 **没问题**。但可以用 **Pixel History** 验证一个常见问题——天空盒是否在被其他物体覆盖的像素上还在绘制：
 
-1. 选中 #210 Skybox Draw Call
+1. 选中 `#210` Skybox Draw Call
 2. 点击工具栏的 **Pixel History** 按钮（或按 `H`）
 3. 点击场景中间位置（一个被建筑物完全覆盖的像素）
 4. Pixel History 显示该像素的完整历史：

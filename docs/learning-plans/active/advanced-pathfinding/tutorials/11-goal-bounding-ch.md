@@ -1,3 +1,8 @@
+---
+title: "Goal Bounding 与 Contraction Hierarchies：预处理驱动的极致加速"
+updated: 2026-06-05
+---
+
 # Goal Bounding 与 Contraction Hierarchies：预处理驱动的极致加速
 
 > 所属计划: 高阶寻路系统

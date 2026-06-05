@@ -1,3 +1,8 @@
+---
+title: "Component 详解：纯数据，零行为"
+updated: 2026-06-05
+---
+
 # Component 详解：纯数据，零行为
 
 > 所属计划: ECS 系统 — 从原理到实践

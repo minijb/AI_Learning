@@ -1,3 +1,8 @@
+---
+title: "Lock-Free 队列实现"
+updated: 2026-06-05
+---
+
 # Lock-Free 队列实现
 
 > 所属计划: C++ 游戏工程师详细攻略

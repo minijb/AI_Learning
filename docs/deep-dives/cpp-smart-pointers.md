@@ -1,8 +1,13 @@
+---
+title: "C++ 智能指针 深度剖析"
+updated: 2026-06-05
+---
+
 # C++ 智能指针 深度剖析
 
 > 深度等级: 第 7 层
-> 关联学习计划: 游戏引擎开发工程师 — [C++ 引擎编程：语言特性精要](../learning-plans/active/game-engine-dev/tutorials/00-cpp-for-game-engines.md#4-智能指针策略引擎中的取舍)
-> 关联深度探索: [RAII 深度剖析](raii-complete-analysis.md)、[特殊成员函数](cpp-special-member-functions.md)
+> 关联学习计划: 游戏引擎开发工程师 — [[../learning-plans/active/game-engine-dev/tutorials/00-cpp-for-game-engines#4-智能指针策略引擎中的取舍|C++ 引擎编程：语言特性精要]]
+> 关联深度探索: [[raii-complete-analysis|RAII 深度剖析]]、[[cpp-special-member-functions|特殊成员函数]]
 > 分析日期: 2026-05-28
 
 ---

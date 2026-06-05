@@ -1,3 +1,8 @@
+---
+title: "行为树节点类型深度剖析"
+updated: 2026-06-05
+---
+
 # 行为树节点类型深度剖析
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -1320,4 +1325,4 @@ Repeater(forever)
 
 ---
 
-> **下一步**: 完成本教程后，进入 Tutorial 08 [行为树在 Unity 中的实现 (C#)](08-bt-unity-csharp.md)，将本文中的伪代码转化为可运行的 Unity 行为树引擎，并在实际场景中测试 NPC AI。
+> **下一步**: 完成本教程后，进入 Tutorial 08 [[08-bt-unity-csharp|行为树在 Unity 中的实现 (C#)]]，将本文中的伪代码转化为可运行的 Unity 行为树引擎，并在实际场景中测试 NPC AI。

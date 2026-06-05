@@ -1,9 +1,14 @@
+---
+title: "03 战斗状态机与回合流程"
+updated: 2026-06-05
+---
+
 # 03 战斗状态机与回合流程
 
 ## 前置依赖
 
-- [01 架构入口与 Stage 状态机](./01-architecture-entry.md)
-- [02 Battle 类与组件系统](./02-battle-class-components.md)
+- [[./01-architecture-entry|01 架构入口与 Stage 状态机]]
+- [[./02-battle-class-components|02 Battle 类与组件系统]]
 - 理解 `Enum.lua` 中的枚举定义
 - 了解 Lua 的闭包与回调模式
 

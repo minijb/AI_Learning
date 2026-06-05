@@ -1,8 +1,13 @@
+---
+title: "断线重连与中途加入"
+updated: 2026-06-05
+---
+
 # 断线重连与中途加入
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [12-帧同步进阶](12-lockstep-advanced.md), [17-延迟补偿](17-lag-compensation.md)
+> 前置知识: [[12-lockstep-advanced|12-帧同步进阶]], [[17-lag-compensation|17-延迟补偿]]
 
 ---
 

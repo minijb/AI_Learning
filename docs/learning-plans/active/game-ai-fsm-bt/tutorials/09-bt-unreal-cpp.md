@@ -1,3 +1,8 @@
+---
+title: "行为树在 Unreal Engine 中的实现 (C++)"
+updated: 2026-06-05
+---
+
 # 行为树在 Unreal Engine 中的实现 (C++)
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -1019,4 +1024,4 @@ virtual void CleanupMemory(UBehaviorTreeComponent& OwnerComp,
 
 ---
 
-> **下一步**: 完成本教程后，进入 Tutorial 10 [行为树在 Lua 中的实现](10-bt-lua.md)，了解如何在没有 UE 基础设施的情况下从零实现完整的行为树引擎。或者继续 Tutorial 11 [Blackboard 系统与数据流](11-blackboard-data-flow.md)，深入理解 UE Blackboard 的高性能实现和与 BT 的深度集成。
+> **下一步**: 完成本教程后，进入 Tutorial 10 [[10-bt-lua|行为树在 Lua 中的实现]]，了解如何在没有 UE 基础设施的情况下从零实现完整的行为树引擎。或者继续 Tutorial 11 [[11-blackboard-data-flow|Blackboard 系统与数据流]]，深入理解 UE Blackboard 的高性能实现和与 BT 的深度集成。

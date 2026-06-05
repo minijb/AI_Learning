@@ -1,3 +1,8 @@
+---
+title: "Placement New 与对齐控制"
+updated: 2026-06-05
+---
+
 # Placement New 与对齐控制
 
 > 所属计划: C++ 游戏工程师详细攻略

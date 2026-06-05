@@ -1,3 +1,8 @@
+---
+title: "FSM 在 Unreal Engine 中的实现 (C++)"
+updated: 2026-06-05
+---
+
 # FSM 在 Unreal Engine 中的实现 (C++)
 
 > 所属计划: State Machines & Behavior Trees for Game AI

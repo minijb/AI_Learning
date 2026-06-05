@@ -1,3 +1,8 @@
+---
+title: "Unity 渲染管线优化 — URP/HDRP 选型与配置"
+updated: 2026-06-05
+---
+
 # Unity 渲染管线优化 — URP/HDRP 选型与配置
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 60min

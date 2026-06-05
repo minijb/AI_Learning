@@ -1,3 +1,8 @@
+---
+title: "11 — Treesitter：语法高亮与结构化分析"
+updated: 2026-06-05
+---
+
 # 11 — Treesitter：语法高亮与结构化分析
 
 > 所属计划: Neovim + Lua 配置实战 (现代版)

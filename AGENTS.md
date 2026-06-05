@@ -19,7 +19,7 @@
 │       ├── docs-manager/      ← 管理 docs 系统
 │       ├── writing-plans/     ← 计划创建 Skill
 │       ├── executing-plans/   ← 计划执行 Skill
-│       ├── markdown/          ← Markdown 书写规范
+│       ├── obsidian-md/       ← Obsidian Markdown 书写规范
 │       └── skill-creator/     ← 创建/改进/评测 Skill
 ├── docs/
 │   ├── README.md              ← docs 系统总览
@@ -161,13 +161,18 @@ python .omp/skills/executing-plans/scripts/plan-cleanup.py --all --what-if
 
 ---
 
-#### Markdown (`.omp/skills/markdown/`)
+#### Obsidian Markdown (`.omp/skills/obsidian-md/`)
 
-**何时激活：** 任何需要创建或编辑 `.md` 文件的场景——README、文档、博客、变更日志、技术说明、API 文档等。
+**何时激活：** 任何涉及创建、编辑 `.md` 文件的操作都必须使用此 skill——README、文档、博客、变更日志、技术说明、API 文档、Wiki 页面等。无论用户说"写个页面"、"创建笔记"、"更新索引"，还是任何会输出 markdown 内容的任务，都先触发此 skill 确保正确的 Obsidian 语法。
 
-详见 `skill://markdown`
+**核心规则：**
+- Frontmatter 必填（至少 `title` + `updated`）
+- 交叉引用用 wikilink `[[ ]]`，不用标准 `[text](url)`
+- 重要提示用 callout，不用纯文本强调
+- 特殊符号（尖括号 `<T>`、方括号 `[Attribute]`）用反引号包裹
+- 嵌入图片/文件用 `![[ ]]`
 
----
+详见 `skill://obsidian-md`
 
 ### 工具类 Skill
 
@@ -241,6 +246,7 @@ AI 根据学习进度建议相关主题
 6. **计划是一流工件** — 存储在仓库内，版本控制
 7. **成功沉默，失败输出** — 验证通过不产生噪声
 8. **CLI 优于抽象封装** — 工具直接可执行，输出可 grep
+9. **Obsidian Markdown 强制** — 本工作区所有 `.md` 文件必须使用 `obsidian-md` skill（`skill://obsidian-md`）生成和编辑，不得使用旧 `markdown` skill。Frontmatter 必填、wikilink 优先、callout 优先
 
 ---
 

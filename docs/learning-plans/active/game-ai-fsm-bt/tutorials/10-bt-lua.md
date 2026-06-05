@@ -1,8 +1,13 @@
+---
+title: "行为树在 Lua 中的实现"
+updated: 2026-06-05
+---
+
 # 行为树在 Lua 中的实现
 
 > 所属计划: State Machines & Behavior Trees for Game AI
 > 预计耗时: 90min
-> 前置知识: [06-bt-fundamentals](06-bt-fundamentals.md), [07-bt-node-types](07-bt-node-types.md)
+> 前置知识: [[06-bt-fundamentals]], [[07-bt-node-types]]
 
 ---
 

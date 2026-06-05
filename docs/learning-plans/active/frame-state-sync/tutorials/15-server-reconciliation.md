@@ -1,8 +1,13 @@
+---
+title: "服务端和解 (Server Reconciliation)"
+updated: 2026-06-05
+---
+
 # 服务端和解 (Server Reconciliation)
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 45min
-> 前置知识: [14-客户端预测](14-client-side-prediction.md)
+> 前置知识: [[14-client-side-prediction|14-客户端预测]]
 
 ---
 

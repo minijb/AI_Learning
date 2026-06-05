@@ -1,8 +1,13 @@
+---
+title: "行为树调试、可视化与性能优化"
+updated: 2026-06-05
+---
+
 # 行为树调试、可视化与性能优化
 
 > 所属计划: State Machines & Behavior Trees for Game AI
 > 预计耗时: 120min
-> 前置知识: [08-bt-unity-csharp.md](08-bt-unity-csharp.md), [09-bt-unreal-cpp.md](09-bt-unreal-cpp.md), [10-bt-lua.md](10-bt-lua.md)（以及 06-bt-fundamentals、07-bt-node-types）
+> 前置知识: [[08-bt-unity-csharp]], [[09-bt-unreal-cpp]], [[10-bt-lua]]（以及 06-bt-fundamentals、07-bt-node-types）
 
 ---
 

@@ -1,3 +1,8 @@
+---
+title: "04 — 精确编辑代码"
+updated: 2026-06-05
+---
+
 # 04 — 精确编辑代码
 
 > 所属计划: Oh My Pi Code Agent 使用指南
@@ -164,9 +169,9 @@ OMP 会展示精确的 diff 预览，让你确认修改内容。
 
 ## 4. 扩展阅读
 
-- [`edit` 工具完整文档](omp://tools/edit.md) — hashline 语法、多模式、恢复机制
-- [`write` 工具文档](omp://tools/write.md)
-- [Hashline 补丁语言规范](omp://tools/edit.md) — 完整的语法规则和边界情况
+- [[omp://tools/edit|`edit` 工具完整文档]] — hashline 语法、多模式、恢复机制
+- [[omp://tools/write|`write` 工具文档]]
+- [[omp://tools/edit|Hashline 补丁语言规范]] — 完整的语法规则和边界情况
 
 ---
 

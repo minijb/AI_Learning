@@ -1,8 +1,13 @@
+---
+title: "网络协议深度：UDP vs TCP 与可靠UDP层"
+updated: 2026-06-05
+---
+
 # 网络协议深度：UDP vs TCP 与可靠UDP层
 
 > 所属计划: 帧同步、状态同步与状态帧同步
 > 预计耗时: 60min
-> 前置知识: [01 - 游戏网络架构总览](01-game-network-architecture.md)
+> 前置知识: [[01-game-network-architecture|01 - 游戏网络架构总览]]
 
 ---
 

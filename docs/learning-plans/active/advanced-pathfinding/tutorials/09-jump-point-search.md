@@ -1,3 +1,8 @@
+---
+title: "Jump Point Search (JPS)：均匀网格上的对称性剪枝"
+updated: 2026-06-05
+---
+
 # Jump Point Search (JPS)：均匀网格上的对称性剪枝
 
 > 所属计划: 高阶寻路系统

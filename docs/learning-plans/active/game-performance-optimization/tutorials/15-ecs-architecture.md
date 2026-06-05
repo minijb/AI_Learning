@@ -1,3 +1,8 @@
+---
+title: "ECS 架构 — Entity Component System 原理"
+updated: 2026-06-05
+---
+
 # ECS 架构 — Entity Component System 原理
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 50min

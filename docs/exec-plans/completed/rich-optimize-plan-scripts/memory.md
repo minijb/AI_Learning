@@ -1,3 +1,8 @@
+---
+title: "Plan Memory: rich-optimize-plan-scripts"
+updated: 2026-06-05
+---
+
 # Plan Memory: rich-optimize-plan-scripts
 
 > 执行记忆 — 记录计划执行过程中产生的关键工件和决策。

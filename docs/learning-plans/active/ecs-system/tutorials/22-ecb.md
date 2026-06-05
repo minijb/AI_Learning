@@ -1,3 +1,8 @@
+---
+title: "EntityCommandBuffer 详解"
+updated: 2026-06-05
+---
+
 # EntityCommandBuffer 详解
 
 > 所属计划: ECS 系统 — 从原理到实践

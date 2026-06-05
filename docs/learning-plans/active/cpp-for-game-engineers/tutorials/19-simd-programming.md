@@ -1,8 +1,13 @@
+---
+title: "19. SIMD 编程入门"
+updated: 2026-06-05
+---
+
 # 19. SIMD 编程入门
 
 > **所属计划**: C++ 游戏工程师详细攻略 — 阶段 5：数据导向设计
 > **预计耗时**: 4 小时
-> **前置知识**: [12-Placement New 与对齐控制](12-placement-new-alignment.md)、[18-AoS vs SoA 与缓存优化](18-aos-soa-cache-optimization.md)
+> **前置知识**: [[12-placement-new-alignment|12-Placement New 与对齐控制]]、[[18-aos-soa-cache-optimization|18-AoS vs SoA 与缓存优化]]
 > **C++ 标准**: 不可移植的 intrinsic（需 `<xmmintrin.h>`, `<immintrin.h>` 等）
 
 ---

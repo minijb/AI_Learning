@@ -1,0 +1,6 @@
+{
+  "eval_id": 2,
+  "eval_name": "lockfree-queue-analysis",
+  "prompt": "帮我深入分析 drafts/test-lockfree-queue.md，尤其是多线程并发和内存序的部分我想搞明白",
+  "assertions": []
+}

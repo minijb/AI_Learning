@@ -1,3 +1,8 @@
+---
+title: "Unity Job System + Burst Compiler"
+updated: 2026-06-05
+---
+
 # Unity Job System + Burst Compiler
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 60min

@@ -1,3 +1,8 @@
+---
+title: "分层状态机 (HSM) 与 Pushdown Automata"
+updated: 2026-06-05
+---
+
 # 分层状态机 (HSM) 与 Pushdown Automata
 
 > 所属计划: State Machines & Behavior Trees for Game AI
@@ -1729,4 +1734,4 @@ public class MeleeState : HierarchicalState
 
 ---
 
-> **下一步**: 完成本教程后，进入 Tutorial 06 [行为树基础理论](06-bt-fundamentals.md)，了解如何将状态的"层次继承"思维转化为行为的"优先级组合"思维。你将看到 Halo 2 的行为树如何从 HSM 的概念中自然演化而来。
+> **下一步**: 完成本教程后，进入 Tutorial 06 [[06-bt-fundamentals|行为树基础理论]]，了解如何将状态的"层次继承"思维转化为行为的"优先级组合"思维。你将看到 Halo 2 的行为树如何从 HSM 的概念中自然演化而来。

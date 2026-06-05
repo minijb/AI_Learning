@@ -1,3 +1,8 @@
+---
+title: "光照优化 — 烘焙、Light Culling、阴影"
+updated: 2026-06-05
+---
+
 # 光照优化 — 烘焙、Light Culling、阴影
 > 所属计划: 游戏性能优化全攻略
 > 预计耗时: 60min

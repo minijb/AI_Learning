@@ -1,3 +1,8 @@
+---
+title: "Navigation Mesh 理论与数据结构"
+updated: 2026-06-05
+---
+
 # Navigation Mesh 理论与数据结构
 
 > 所属计划: 高阶寻路系统

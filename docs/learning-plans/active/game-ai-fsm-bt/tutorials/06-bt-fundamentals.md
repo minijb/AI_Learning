@@ -1,3 +1,8 @@
+---
+title: "行为树基础理论"
+updated: 2026-06-05
+---
+
 # 行为树基础理论
 
 > 所属计划: State Machines & Behavior Trees for Game AI

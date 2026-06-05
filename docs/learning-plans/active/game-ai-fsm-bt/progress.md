@@ -1,3 +1,8 @@
+---
+title: "进度追踪: State Machines & Behavior Trees for Game AI"
+updated: 2026-06-05
+---
+
 # 进度追踪: State Machines & Behavior Trees for Game AI
 
 > 创建日期: 2026-06-02

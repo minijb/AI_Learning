@@ -1,8 +1,13 @@
+---
+title: "渲染引擎架构：多线程渲染、Render Graph 与可见性裁剪"
+updated: 2026-06-05
+---
+
 # 渲染引擎架构：多线程渲染、Render Graph 与可见性裁剪
 
-> **所属计划**: [游戏引擎开发工程师](../plan.md)
+> **所属计划**: [[../plan|游戏引擎开发工程师]]
 > **预计耗时**: 8 小时
-> **前置知识**: [06-渲染管线基础](06-rendering-pipeline.md), [07-着色器编程](07-shader-programming.md), [16-多线程与并发](16-multithreading-and-jobs.md)
+> **前置知识**: [[06-rendering-pipeline|06-渲染管线基础]], [[07-shader-programming|07-着色器编程]], [[16-multithreading-and-jobs|16-多线程与并发]]
 
 ---
 

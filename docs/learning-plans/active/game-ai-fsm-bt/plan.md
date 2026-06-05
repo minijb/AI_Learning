@@ -1,3 +1,8 @@
+---
+title: "学习计划: 状态机与行为树 — 游戏 AI 开发"
+updated: 2026-06-05
+---
+
 # 学习计划: 状态机与行为树 — 游戏 AI 开发
 
 > 创建日期: 2026-06-02
@@ -21,7 +26,7 @@
 
 ## 前置要求
 
-- [x] C++ 基础：类、继承、虚函数、模板基础（参考 [cpp-special-member-functions](../../../knowledge-notes/cpp-special-member-rules.md)）
+- [x] C++ 基础：类、继承、虚函数、模板基础（参考 [[../../../knowledge-notes/cpp-special-member-rules|cpp-special-member-functions]]）
 - [x] C# 基础：类、接口、泛型、委托/事件
 - [x] Lua 基础：table、metatable、闭包、协程
 - [x] Unity 基础：MonoBehaviour、GameObject、Update/LateUpdate

@@ -1,3 +1,8 @@
+---
+title: "栈展开（Stack Unwinding）深度剖析"
+updated: 2026-06-05
+---
+
 # 栈展开（Stack Unwinding）深度剖析
 
 > 深度等级: 第 7 层
