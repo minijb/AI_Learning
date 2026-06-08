@@ -1,11 +1,6 @@
----
-title: "学习计划索引"
-updated: 2026-06-05
----
-
 # 学习计划索引
 
-> 自动生成于 2026-06-03
+> 自动生成于 2026-06-08
 
 ## 进行中
 
@@ -13,7 +8,10 @@ updated: 2026-06-05
 |---------|---------|
 | advanced-pathfinding | — |
 | battle-system | — |
+| cpp-async-programming | — |
 | cpp-for-game-engineers | — |
+| cpp-memory-model | 2026-06-08 |
+| design-patterns-csharp | — |
 | ecs-system | — |
 | frame-state-sync | — |
 | game-ai-fsm-bt | — |

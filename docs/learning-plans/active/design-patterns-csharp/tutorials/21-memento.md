@@ -1,0 +1,1527 @@
+---
+title: "备忘录模式 Memento"
+updated: 2026-06-08
+tags: [design-patterns, behavioral, memento, undo, snapshot, csharp, cpp, record, serialization]
+---
+
+# 备忘录模式 (Memento Pattern)
+
+> 所属计划: [[design-patterns-csharp|设计模式 (C#)]]
+> 预计耗时: 50 分钟
+> 前置知识: [[16-behavioral-intro|行为型模式总览]]、C# 深拷贝与浅拷贝、`record` 不可变性、`System.Text.Json` 基础
+
+---
+
+## 1. 概念讲解
+
+### 备忘录模式解决什么问题？
+
+几乎所有带"编辑"功能的软件都需要**撤销**：文本编辑器、图像软件、数据库 GUI。核心矛盾是：
+
+- 你需要**保存对象在某个时刻的完整状态**（以便恢复）
+- 但对象的内部状态是**封装的**——外部不应直接访问私有字段
+- 如果把状态保存工作交给对象自己，又会让它**承担额外职责**（违反单一职责原则）
+
+直接在外部操作内部状态就是破坏封装：
+
+```csharp
+// ❌ 反例：外部直接访问内部状态实现"保存"
+public class Editor
+{
+    public string Text;        // 为了"保存"被迫公开
+    public int CursorX;        // 为了"保存"被迫公开
+    public int CursorY;        // 为了"保存"被迫公开
+    public List<Style> Styles; // 为了"保存"被迫公开
+}
+
+// 外部"保存"代码——与 Editor 的封装深度耦合
+var snapshot = (editor.Text, editor.CursorX, editor.CursorY,
+    editor.Styles.Select(s => s.Clone()).ToList());
+```
+
+一旦 `Editor` 新增字段，所有保存/恢复代码都要改。这是**封装泄漏**。
+
+**备忘录模式的核心思想**：由 Originator（原发器）自己创建并消费快照（Memento），外部 Caretaker（负责人）只负责存储和传递——它永不窥探 Memento 的内容。
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Originator              Memento              Caretaker     │
+│  (拥有状态)              (状态快照)           (管理历史)      │
+│                                                             │
+│  CreateMemento() ──────► [封存状态] ──────► Push(snapshot)   │
+│                                                             │
+│  ... 用户修改状态 ...                                        │
+│                                                             │
+│  SetMemento(m) ◄──────── [封存状态] ◄─────── Pop()           │
+│                                                             │
+│  Caretaker 从不读取 Memento 内部 — 它只是一个"黑盒"传递者     │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 备忘录模式结构
+
+```mermaid
+classDiagram
+    class Originator {
+        -_state : string
+        +SetState(state) void
+        +GetState() string
+        +CreateMemento() Memento
+        +SetMemento(memento: Memento) void
+    }
+    class Memento {
+        -_state : string
+        -_timestamp : DateTime
+        +GetState() string
+        +GetTimestamp() DateTime
+        +Note : string
+    }
+    class Caretaker {
+        -_history : Stack~Memento~
+        -_backupHistory : Stack~Memento~
+        +Save(originator: Originator, note?: string) void
+        +Undo(originator: Originator) bool
+        +Redo(originator: Originator) bool
+        +HistoryCount() int
+    }
+
+    Originator ..> Memento : creates
+    Originator ..> Memento : consumes
+    Caretaker o--> Memento : stores
+
+    note for Originator "拥有内部状态
+        自己生成和恢复快照"
+    note for Memento "不可变快照
+        只对 Originator 透明"
+    note for Caretaker "只管存储/传递
+        绝不解包 Memento"
+```
+
+**关键角色：**
+
+| 角色 | 职责 |
+|------|------|
+| `Originator` | 拥有内部状态的对象；创建 Memento 记录当前状态；从 Memento 恢复状态 |
+| `Memento` | 不可变的值对象，持有 Originator 某一时刻的内部状态快照 |
+| `Caretaker` | 持有 Memento 集合；触发保存/恢复；**永远不读取 Memento 内部** |
+
+### 备忘录模式交互流程
+
+```mermaid
+sequenceDiagram
+    participant User as 用户/客户端
+    participant Caretaker as Caretaker<br/>(History)
+    participant Originator as Originator<br/>(Editor)
+    participant Memento as Memento<br/>(EditorState)
+
+    User->>Originator: 编辑文本 "Hello"
+    User->>Caretaker: Ctrl+S (保存)
+
+    Caretaker->>Originator: CreateMemento()
+    Originator->>Memento: new Memento(state)
+    Memento-->>Originator: snapshot
+    Originator-->>Caretaker: Memento
+    Caretaker->>Caretaker: 压入 _history 栈
+
+    User->>Originator: 编辑文本 "Hello World!!!"
+    Note over Originator: 状态已改变
+
+    User->>Caretaker: Ctrl+Z (撤销)
+
+    Caretaker->>Caretaker: 弹出 _history 栈顶
+    Caretaker->>Originator: SetMemento(snapshot)
+    Originator->>Memento: 读取 _state
+    Originator->>Originator: 恢复到 "Hello"
+    Caretaker->>Caretaker: 压入 _backupHistory (支持重做)
+
+    User->>Caretaker: Ctrl+Y (重做)
+
+    Caretaker->>Caretaker: 弹出 _backupHistory 栈顶
+    Caretaker->>Originator: SetMemento(snapshot)
+    Originator->>Originator: 恢复到 "Hello World!!!"
+```
+
+> [!tip] 关键约束
+> Caretaker 通过 Originator 间接与 Memento 交互。它持有 Memento 但从不调用 `GetState()`——那个方法只对 Originator 可见（或通过窄接口）。
+
+### 备忘录模式的两个接口纬度
+
+GoF 原版讨论了 Memento 的**宽/窄接口**问题——一个重要的封装权衡：
+
+| 接口类型 | 可见范围 | 适用场景 | 实现方式 |
+|----------|---------|---------|---------|
+| **宽接口** | Originator 可见全部 | Originator 需要完整状态恢复 | Originator 和 Memento 在同一 assembly，用 `internal` |
+| **窄接口** | Caretaker 只看到"黑盒" | 保护封装，Caretaker 无感知 | Memento 的 `GetState()` 标记 `internal`；Caretaker 在外部 |
+
+```mermaid
+flowchart LR
+    subgraph Wide[宽接口视角 Originator]
+        W1[Originator] -- "可访问所有属性" --> M[Memento]
+    end
+    subgraph Narrow[窄接口视角 Caretaker]
+        N1[Caretaker] -- "只能持有引用\n无法读取内容" --> M
+    end
+    M -- "是同一个对象" --> Wide
+    M -- "不同角色看到不同API" --> Narrow
+```
+
+在 C# 中，这通过 `internal` 访问修饰符自然实现：Memento 的属性标记 `internal`，Originator 在同一程序集中可以访问，而 Caretaker 如果在外部程序集中则只能持有引用。
+
+---
+
+## 2. 代码示例
+
+### 2.1 文本编辑器撤销/重做
+
+**场景**：一个简易文本编辑器，支持修改文本、光标位置、字体大小，并能撤销和重做所有操作。
+
+```csharp
+// ============================================
+// Memento — 不可变快照
+// ============================================
+public class EditorState
+{
+    // internal: 只对此 assembly 内的 Originator 可见
+    internal string Text { get; }
+    internal int CursorPosition { get; }
+    internal int FontSize { get; }
+    public DateTime Timestamp { get; }
+    public string? Note { get; }
+
+    internal EditorState(string text, int cursorPosition, int fontSize,
+        DateTime timestamp, string? note = null)
+    {
+        Text = text;
+        CursorPosition = cursorPosition;
+        FontSize = fontSize;
+        Timestamp = timestamp;
+        Note = note;
+    }
+
+    // 方便调试/日志（不暴露内部细节）
+    public override string ToString()
+        => $"[{Timestamp:HH:mm:ss}] {(Note ?? "snapshot")}";
+}
+```
+
+```csharp
+// ============================================
+// Originator — 编辑器
+// ============================================
+public class Editor
+{
+    private string _text = string.Empty;
+    private int _cursorPosition;
+    private int _fontSize = 12;
+
+    public void Type(string text)
+    {
+        _text += text;
+        _cursorPosition = _text.Length;
+    }
+
+    public void Delete(int count)
+    {
+        if (count > _text.Length) count = _text.Length;
+        _text = _text[..^count];
+        _cursorPosition = _text.Length;
+    }
+
+    public void MoveCursor(int position)
+    {
+        _cursorPosition = Math.Clamp(position, 0, _text.Length);
+    }
+
+    public void SetFontSize(int size)
+    {
+        _fontSize = Math.Clamp(size, 8, 72);
+    }
+
+    public void Display()
+    {
+        Console.WriteLine($"文本: \"{_text}\"");
+        Console.WriteLine($"光标位置: {_cursorPosition}, 字号: {_fontSize}");
+        Console.WriteLine();
+    }
+
+    // 创建当前状态的快照
+    public EditorState CreateMemento(string? note = null)
+    {
+        return new EditorState(_text, _cursorPosition, _fontSize,
+            DateTime.Now, note);
+    }
+
+    // 从快照恢复
+    public void SetMemento(EditorState memento)
+    {
+        _text = memento.Text;
+        _cursorPosition = memento.CursorPosition;
+        _fontSize = memento.FontSize;
+    }
+}
+```
+
+```csharp
+// ============================================
+// Caretaker — 历史管理器
+// ============================================
+public class History
+{
+    private readonly Stack<EditorState> _undoStack = new();
+    private readonly Stack<EditorState> _redoStack = new();
+
+    public void Save(Editor editor, string? note = null)
+    {
+        var memento = editor.CreateMemento(note);
+        _undoStack.Push(memento);
+        _redoStack.Clear(); // 新操作清空重做链
+        Console.WriteLine($"  [History] 已保存: {memento}");
+    }
+
+    public bool Undo(Editor editor)
+    {
+        if (_undoStack.Count == 0)
+        {
+            Console.WriteLine("  [History] 无可撤销操作");
+            return false;
+        }
+
+        // 当前状态先压入重做栈
+        _redoStack.Push(editor.CreateMemento("before redo"));
+
+        var memento = _undoStack.Pop();
+        editor.SetMemento(memento);
+        Console.WriteLine($"  [History] 撤销至: {memento}");
+        return true;
+    }
+
+    public bool Redo(Editor editor)
+    {
+        if (_redoStack.Count == 0)
+        {
+            Console.WriteLine("  [History] 无可重做操作");
+            return false;
+        }
+
+        _undoStack.Push(editor.CreateMemento("before undo"));
+
+        var memento = _redoStack.Pop();
+        editor.SetMemento(memento);
+        Console.WriteLine($"  [History] 重做至: {memento}");
+        return true;
+    }
+
+    public int UndoCount => _undoStack.Count;
+    public int RedoCount => _redoStack.Count;
+}
+```
+
+```csharp
+// ============================================
+// 运行演示
+// ============================================
+var editor = new Editor();
+var history = new History();
+
+Console.WriteLine("=== 备忘录模式 — 文本编辑器 Undo/Redo ===\n");
+
+// 1. 初始状态
+editor.Type("Hello");
+history.Save(editor, "输入 Hello");
+editor.Display();
+
+// 2. 追加文本
+editor.Type(" World");
+history.Save(editor, "输入 World");
+editor.Display();
+
+// 3. 修改字号
+editor.SetFontSize(16);
+history.Save(editor, "改字号 16");
+editor.Display();
+
+// 4. 删除字符
+editor.Delete(3);
+history.Save(editor, "删除 3 字符");
+editor.Display();
+
+// 5. Undo 两次
+Console.WriteLine("--- Undo x2 ---");
+history.Undo(editor);
+editor.Display();
+history.Undo(editor);
+editor.Display();
+
+// 6. Redo 一次
+Console.WriteLine("--- Redo x1 ---");
+history.Redo(editor);
+editor.Display();
+
+/* 输出:
+=== 备忘录模式 — 文本编辑器 Undo/Redo ===
+
+  [History] 已保存: [12:00:01] 输入 Hello
+文本: "Hello"
+光标位置: 5, 字号: 12
+
+  [History] 已保存: [12:00:02] 输入 World
+文本: "Hello World"
+光标位置: 11, 字号: 12
+
+  [History] 已保存: [12:00:03] 改字号 16
+文本: "Hello World"
+光标位置: 11, 字号: 16
+
+  [History] 已保存: [12:00:04] 删除 3 字符
+文本: "Hello Wor"
+光标位置: 9, 字号: 16
+
+--- Undo x2 ---
+  [History] 撤销至: [12:00:03] 改字号 16
+文本: "Hello World"
+光标位置: 11, 字号: 16
+  [History] 撤销至: [12:00:02] 输入 World
+文本: "Hello World"
+光标位置: 11, 字号: 12
+
+--- Redo x1 ---
+  [History] 重做至: [12:00:03] 改字号 16
+文本: "Hello World"
+光标位置: 11, 字号: 16
+*/
+```
+
+**运行方式:**
+```bash
+dotnet new console -n MementoTextEditor
+# 将上述代码放入 Program.cs
+dotnet run --project MementoTextEditor
+```
+
+### 2.2 游戏存档系统
+
+**场景**：RPG 游戏中保存和加载玩家状态（位置、血量、背包）。支持多个存档槽位。
+
+```csharp
+// ============================================
+// Memento — 游戏存档快照（不可变）
+// ============================================
+public class PlayerSnapshot
+{
+    internal int Level { get; }
+    internal int Health { get; }
+    internal int MaxHealth { get; }
+    internal float PositionX { get; }
+    internal float PositionY { get; }
+    internal string[] Inventory { get; }
+    internal string CurrentQuest { get; }
+    public DateTime SavedAt { get; }
+    public string SlotName { get; }
+
+    internal PlayerSnapshot(int level, int health, int maxHealth,
+        float posX, float posY, string[] inventory, string currentQuest,
+        DateTime savedAt, string slotName)
+    {
+        Level = level;
+        Health = health;
+        MaxHealth = maxHealth;
+        PositionX = posX;
+        PositionY = posY;
+        Inventory = inventory;
+        CurrentQuest = currentQuest;
+        SavedAt = savedAt;
+        SlotName = slotName;
+    }
+
+    public override string ToString()
+        => $"[{SlotName}] Lv.{Level} HP:{Health}/{MaxHealth} @({PositionX:F1},{PositionY:F1})";
+}
+```
+
+```csharp
+// ============================================
+// Originator — 玩家
+// ============================================
+public class Player
+{
+    public int Level { get; private set; } = 1;
+    public int Health { get; private set; } = 100;
+    public int MaxHealth { get; private set; } = 100;
+    public float PositionX { get; private set; }
+    public float PositionY { get; private set; }
+    public string CurrentQuest { get; private set; } = "序章：觉醒";
+    private readonly List<string> _inventory = new() { "木剑", "布衣" };
+
+    public void MoveTo(float x, float y)
+    {
+        PositionX = x;
+        PositionY = y;
+    }
+
+    public void TakeDamage(int damage)
+    {
+        Health = Math.Max(0, Health - damage);
+    }
+
+    public void LevelUp()
+    {
+        Level++;
+        MaxHealth += 20;
+        Health = MaxHealth;
+    }
+
+    public void AddItem(string item) => _inventory.Add(item);
+
+    public void SetQuest(string quest) => CurrentQuest = quest;
+
+    public void Display()
+    {
+        Console.WriteLine($"  Lv.{Level} 勇者 | HP: {Health}/{MaxHealth}");
+        Console.WriteLine($"  位置: ({PositionX:F1}, {PositionY:F1})");
+        Console.WriteLine($"  任务: {CurrentQuest}");
+        Console.WriteLine($"  背包: [{string.Join(", ", _inventory)}]");
+        Console.WriteLine();
+    }
+
+    public PlayerSnapshot CreateSnapshot(string slotName)
+    {
+        // 深拷贝数组，防止外部修改
+        return new PlayerSnapshot(
+            Level, Health, MaxHealth, PositionX, PositionY,
+            _inventory.ToArray(), CurrentQuest,
+            DateTime.Now, slotName);
+    }
+
+    public void RestoreSnapshot(PlayerSnapshot snapshot)
+    {
+        Level = snapshot.Level;
+        Health = snapshot.Health;
+        MaxHealth = snapshot.MaxHealth;
+        PositionX = snapshot.PositionX;
+        PositionY = snapshot.PositionY;
+        CurrentQuest = snapshot.CurrentQuest;
+
+        _inventory.Clear();
+        _inventory.AddRange(snapshot.Inventory);
+    }
+}
+```
+
+```csharp
+// ============================================
+// Caretaker — 存档管理器（多槽位）
+// ============================================
+public class SaveManager
+{
+    private readonly Dictionary<string, PlayerSnapshot> _slots = new();
+
+    public bool Save(Player player, string slotName)
+    {
+        if (string.IsNullOrWhiteSpace(slotName))
+        {
+            Console.WriteLine("  [SaveManager] 槽位名不能为空");
+            return false;
+        }
+
+        var snapshot = player.CreateSnapshot(slotName);
+        _slots[slotName] = snapshot;
+        Console.WriteLine($"  [SaveManager] 已保存至槽位 \"{slotName}\"");
+        return true;
+    }
+
+    public bool Load(Player player, string slotName)
+    {
+        if (!_slots.TryGetValue(slotName, out var snapshot))
+        {
+            Console.WriteLine($"  [SaveManager] 槽位 \"{slotName}\" 不存在");
+            return false;
+        }
+
+        player.RestoreSnapshot(snapshot);
+        Console.WriteLine($"  [SaveManager] 已从槽位 \"{slotName}\" 加载");
+        return true;
+    }
+
+    public void ListSlots()
+    {
+        Console.WriteLine("  存档列表:");
+        if (_slots.Count == 0)
+        {
+            Console.WriteLine("    (空)");
+            return;
+        }
+        foreach (var (name, snap) in _slots)
+        {
+            Console.WriteLine($"    {snap}");
+        }
+    }
+
+    public bool DeleteSlot(string slotName) => _slots.Remove(slotName);
+}
+```
+
+```csharp
+// ============================================
+// 运行演示
+// ============================================
+var player = new Player();
+var saves = new SaveManager();
+
+Console.WriteLine("=== 备忘录模式 — 游戏存档系统 ===\n");
+
+// 初始状态
+Console.WriteLine("1. 初始状态:");
+player.Display();
+
+// 存档
+saves.Save(player, "自动存档");
+Console.WriteLine();
+
+// 游戏进程
+Console.WriteLine("2. 玩家开始冒险...");
+player.MoveTo(120.5f, -45.3f);
+player.TakeDamage(30);
+player.LevelUp();
+player.AddItem("铁剑");
+player.SetQuest("第一章：森林之影");
+player.Display();
+
+// 一个新存档
+saves.Save(player, "Boss战前");
+Console.WriteLine();
+
+// 继续冒险
+Console.WriteLine("3. 继续冒险（Boss 战）...");
+player.MoveTo(200f, -100f);
+player.TakeDamage(80);
+player.AddItem("龙鳞盾");
+player.SetQuest("第一章：击败巨龙");
+player.Display();
+
+// 加载 Boss 战前的存档
+Console.WriteLine("4. 加载 \"Boss战前\" 存档...");
+saves.Load(player, "Boss战前");
+player.Display();
+
+// 查看所有存档
+Console.WriteLine("5. 全部存档:");
+saves.ListSlots();
+
+/* 输出:
+=== 备忘录模式 — 游戏存档系统 ===
+
+1. 初始状态:
+  Lv.1 勇者 | HP: 100/100
+  位置: (0.0, 0.0)
+  任务: 序章：觉醒
+  背包: [木剑, 布衣]
+
+  [SaveManager] 已保存至槽位 "自动存档"
+
+2. 玩家开始冒险...
+  Lv.2 勇者 | HP: 90/120
+  位置: (120.5, -45.3)
+  任务: 第一章：森林之影
+  背包: [木剑, 布衣, 铁剑]
+
+  [SaveManager] 已保存至槽位 "Boss战前"
+
+3. 继续冒险（Boss 战）...
+  Lv.2 勇者 | HP: 10/120
+  位置: (200.0, -100.0)
+  任务: 第一章：击败巨龙
+  背包: [木剑, 布衣, 铁剑, 龙鳞盾]
+
+4. 加载 "Boss战前" 存档...
+  [SaveManager] 已从槽位 "Boss战前" 加载
+  Lv.2 勇者 | HP: 90/120
+  位置: (120.5, -45.3)
+  任务: 第一章：森林之影
+  背包: [木剑, 布衣, 铁剑]
+
+5. 全部存档:
+  存档列表:
+    [自动存档] Lv.1 HP:100/100 @(0.0,0.0)
+    [Boss战前] Lv.2 HP:90/120 @(120.5,-45.3)
+*/
+```
+
+### 2.3 C# 惯用写法：`record` + `with` 表达式
+
+C# 9+ 的 `record` 类型天然不可变且自带值语义——用来做 Memento 非常合适。`with` 表达式可以在快照基础上创建增量修改。
+
+```csharp
+// ============================================
+// Memento — 用 record 定义（天然不可变）
+// ============================================
+public sealed record DocumentMemento(
+    string Title,
+    string Content,
+    DateTime LastModified,
+    int Version,
+    string? Author
+);
+
+// ============================================
+// Originator — 文档
+// ============================================
+public class Document
+{
+    public string Title { get; private set; }
+    public string Content { get; private set; }
+    public DateTime LastModified { get; private set; }
+    public int Version { get; private set; }
+    public string? Author { get; set; }
+
+    public Document(string title, string content = "")
+    {
+        Title = title;
+        Content = content;
+        LastModified = DateTime.Now;
+        Version = 1;
+    }
+
+    public void Edit(string newContent)
+    {
+        Content = newContent;
+        LastModified = DateTime.Now;
+        Version++;
+    }
+
+    public void Rename(string newTitle)
+    {
+        Title = newTitle;
+        LastModified = DateTime.Now;
+    }
+
+    public void Display()
+    {
+        Console.WriteLine($"  文档: \"{Title}\"");
+        Console.WriteLine($"  版本: v{Version}");
+        Console.WriteLine($"  内容: {Content[..Math.Min(Content.Length, 50)]}...");
+        Console.WriteLine($"  修改: {LastModified:yyyy-MM-dd HH:mm:ss}");
+        if (Author != null) Console.WriteLine($"  作者: {Author}");
+        Console.WriteLine();
+    }
+
+    // 创建快照 — 一行搞定
+    public DocumentMemento CreateMemento()
+        => new(Title, Content, LastModified, Version, Author);
+
+    // 恢复快照
+    public void SetMemento(DocumentMemento m)
+    {
+        Title = m.Title;
+        Content = m.Content;
+        LastModified = m.LastModified;
+        Version = m.Version;
+        Author = m.Author;
+    }
+}
+```
+
+```csharp
+// ============================================
+// Caretaker — 版本历史
+// ============================================
+public class VersionHistory
+{
+    private readonly Stack<DocumentMemento> _versions = new();
+
+    public void Save(Document doc)
+    {
+        _versions.Push(doc.CreateMemento());
+        Console.WriteLine($"  [History] 已保存 v{doc.Version}");
+    }
+
+    public bool Undo(Document doc)
+    {
+        if (_versions.Count == 0)
+        {
+            Console.WriteLine("  [History] 无历史版本");
+            return false;
+        }
+        var memento = _versions.Pop();
+        doc.SetMemento(memento);
+        Console.WriteLine($"  [History] 已回退至 v{doc.Version}");
+        return true;
+    }
+}
+
+// ============================================
+// with 表达式：创建增量 Memento
+// ============================================
+public static class MementoExtensions
+{
+    // 基于旧 Memento 仅修改一个字段创建新 Memento
+    public static DocumentMemento WithAuthor(
+        this DocumentMemento memento, string author)
+        => memento with { Author = author };
+
+    public static DocumentMemento WithContent(
+        this DocumentMemento memento, string content)
+        => memento with { Content = content, LastModified = DateTime.Now };
+}
+```
+
+```csharp
+// ============================================
+// 运行演示
+// ============================================
+var doc = new Document("设计模式笔记", "# 备忘录模式\n\n待补充...");
+var history = new VersionHistory();
+
+Console.WriteLine("=== record 作为 Memento + with 表达式 ===\n");
+
+// 保存初始状态
+history.Save(doc);
+doc.Display();
+
+// 编辑 + 保存
+doc.Edit("# 备忘录模式\n\n捕获和恢复对象状态...");
+history.Save(doc);
+doc.Display();
+
+// 重命名 + 保存
+doc.Rename("设计模式笔记 v2");
+doc.Author = "张三";
+history.Save(doc);
+doc.Display();
+
+// Undo 两次
+Console.WriteLine("--- Undo x2 ---");
+history.Undo(doc);
+doc.Display();
+history.Undo(doc);
+doc.Display();
+
+// with 表达式演示：基于已有 Memento 创建修改版
+var originalMemento = doc.CreateMemento();
+var updatedMemento = originalMemento with { Author = "李四" };
+Console.WriteLine($"原 Memento 作者: {originalMemento.Author}");
+Console.WriteLine($"新 Memento 作者: {updatedMemento.Author}");
+Console.WriteLine($"原 Memento 未被修改: {originalMemento.Author == null}");
+
+/* 输出:
+=== record 作为 Memento + with 表达式 ===
+
+  [History] 已保存 v1
+  文档: "设计模式笔记"
+  版本: v1
+  内容: # 备忘录模式
+
+待补充......
+  修改: 2026-06-08 10:00:00
+
+  [History] 已保存 v2
+  文档: "设计模式笔记"
+  版本: v2
+  内容: # 备忘录模式
+
+捕获和恢复对象状态......
+  修改: 2026-06-08 10:00:01
+
+  [History] 已保存 v3
+  文档: "设计模式笔记 v2"
+  版本: v3
+  内容: # 备忘录模式
+
+捕获和恢复对象状态......
+  修改: 2026-06-08 10:00:02
+  作者: 张三
+
+--- Undo x2 ---
+  [History] 已回退至 v2
+  文档: "设计模式笔记"
+  版本: v2
+  内容: # 备忘录模式
+
+捕获和恢复对象状态......
+  修改: 2026-06-08 10:00:01
+
+  [History] 已回退至 v1
+  文档: "设计模式笔记"
+  版本: v1
+  内容: # 备忘录模式
+
+待补充......
+  修改: 2026-06-08 10:00:00
+
+原 Memento 作者:
+新 Memento 作者: 李四
+原 Memento 未被修改: True
+*/
+```
+
+> [!tip] `record` 的三大优势
+> 1. **天然不可变**：`record` 的 positional 构造生成的属性是 `{ get; init; }`，创建后无法修改
+> 2. **值语义**：`Equals`/`GetHashCode` 自动比较所有属性——两个内容相同的快照自动相等
+> 3. **`with` 表达式**：基于现有 Memento 创建修改版，零样板代码
+
+### 2.4 进阶：序列化实现深度 Memento
+
+当 Originator 包含多层嵌套的引用类型时，手动逐字段复制繁琐且容易出错（浅拷贝 Bug）。将整个对象图序列化为 JSON/二进制，实现通用深度快照。
+
+```csharp
+using System.Text.Json;
+
+// ============================================
+// 复杂对象图 — 包含嵌套引用类型
+// ============================================
+public class Project
+{
+    public string Name { get; set; } = "";
+    public ProjectSettings Settings { get; set; } = new();
+    public List<TaskItem> Tasks { get; set; } = new();
+    public Dictionary<string, string> Metadata { get; set; } = new();
+
+    public void Display()
+    {
+        Console.WriteLine($"项目: {Name}");
+        Console.WriteLine($"  设置: Theme={Settings.Theme}, AutoSave={Settings.AutoSaveInterval}s");
+        Console.WriteLine($"  任务数: {Tasks.Count}");
+        foreach (var t in Tasks)
+            Console.WriteLine($"    [{t.Status}] {t.Title} ({t.EstimatedHours}h)");
+        Console.WriteLine($"  元数据: {Metadata.Count} 项");
+        Console.WriteLine();
+    }
+}
+
+public class ProjectSettings
+{
+    public string Theme { get; set; } = "Light";
+    public int AutoSaveInterval { get; set; } = 300;
+    public bool SpellCheck { get; set; } = true;
+}
+
+public class TaskItem
+{
+    public string Title { get; set; } = "";
+    public string Status { get; set; } = "Todo";
+    public int EstimatedHours { get; set; }
+    public List<string> Tags { get; set; } = new();
+}
+
+// ============================================
+// 通用 Memento — 用序列化实现深度快照
+// ============================================
+public class DeepMemento<T> where T : class
+{
+    private readonly string _json;
+    public DateTime Timestamp { get; }
+    public string? Note { get; }
+
+    public DeepMemento(T source, string? note = null)
+    {
+        _json = JsonSerializer.Serialize(source,
+            new JsonSerializerOptions { WriteIndented = false });
+        Timestamp = DateTime.Now;
+        Note = note;
+    }
+
+    public T Restore()
+    {
+        return JsonSerializer.Deserialize<T>(_json)
+            ?? throw new InvalidOperationException("反序列化失败");
+    }
+
+    public override string ToString()
+        => $"[{Timestamp:HH:mm:ss}] {(Note ?? "snapshot")} " +
+           $"({_json.Length} bytes)";
+}
+```
+
+```csharp
+// ============================================
+// Originator + Caretaker 合为一体的简化设计
+// ============================================
+public class ProjectManager
+{
+    private Project _project = new();
+    private readonly Stack<DeepMemento<Project>> _undoStack = new();
+    private readonly Stack<DeepMemento<Project>> _redoStack = new();
+
+    public Project Current => _project;
+
+    public void NewProject(string name)
+    {
+        _project = new Project { Name = name };
+        _undoStack.Clear();
+        _redoStack.Clear();
+    }
+
+    public void SaveCheckpoint(string? note = null)
+    {
+        _undoStack.Push(new DeepMemento<Project>(_project, note));
+        _redoStack.Clear();
+        Console.WriteLine($"  [Checkpoint] {_undoStack.Peek()}");
+    }
+
+    public bool Undo()
+    {
+        if (_undoStack.Count == 0) return false;
+        _redoStack.Push(new DeepMemento<Project>(_project, "redo-checkpoint"));
+        _project = _undoStack.Pop().Restore();
+        Console.WriteLine($"  [Undo] 已恢复");
+        return true;
+    }
+
+    public bool Redo()
+    {
+        if (_redoStack.Count == 0) return false;
+        _undoStack.Push(new DeepMemento<Project>(_project, "undo-checkpoint"));
+        _project = _redoStack.Pop().Restore();
+        Console.WriteLine($"  [Redo] 已恢复");
+        return true;
+    }
+}
+```
+
+```csharp
+// ============================================
+// 运行演示
+// ============================================
+var manager = new ProjectManager();
+
+Console.WriteLine("=== 序列化 Memento — 深度对象图快照 ===\n");
+
+// 创建项目
+manager.NewProject("设计模式学习平台");
+manager.Current.Settings = new ProjectSettings
+{
+    Theme = "Dark",
+    AutoSaveInterval = 600
+};
+manager.Current.Tasks.AddRange(new[]
+{
+    new TaskItem
+    {
+        Title = "实现备忘录模式", Status = "InProgress",
+        EstimatedHours = 4, Tags = new List<string> { "behavioral", "undo" }
+    },
+    new TaskItem
+    {
+        Title = "写单元测试", Status = "Todo",
+        EstimatedHours = 2, Tags = new List<string> { "testing" }
+    }
+});
+manager.Current.Metadata["Owner"] = "张三";
+manager.Current.Metadata["Deadline"] = "2026-06-15";
+
+Console.WriteLine("1. 初始状态:");
+manager.Current.Display();
+
+// 保存检查点
+manager.SaveCheckpoint("初始版本");
+
+// 修改项目
+Console.WriteLine("2. 修改项目...");
+manager.Current.Tasks[0].Status = "Done";
+manager.Current.Tasks.Add(new TaskItem
+{
+    Title = "重构 Caretaker", Status = "Todo",
+    EstimatedHours = 3, Tags = new List<string> { "refactor" }
+});
+manager.Current.Settings.SpellCheck = false;
+manager.Current.Display();
+
+// 保存检查点
+manager.SaveCheckpoint("任务更新");
+
+// 再次修改
+Console.WriteLine("3. 删除一个任务...");
+manager.Current.Tasks.RemoveAt(0);
+manager.Current.Metadata["Reviewer"] = "李四";
+manager.Current.Display();
+
+// Undo 两步
+Console.WriteLine("--- Undo x2 ---");
+manager.Undo();
+manager.Current.Display();
+manager.Undo();
+manager.Current.Display();
+
+// Redo
+Console.WriteLine("--- Redo x1 ---");
+manager.Redo();
+manager.Current.Display();
+
+/* 输出:
+=== 序列化 Memento — 深度对象图快照 ===
+
+1. 初始状态:
+项目: 设计模式学习平台
+  设置: Theme=Dark, AutoSave=600s
+  任务数: 2
+    [InProgress] 实现备忘录模式 (4h)
+    [Todo] 写单元测试 (2h)
+  元数据: 2 项
+
+  [Checkpoint] [10:00:01] 初始版本 (312 bytes)
+
+2. 修改项目...
+项目: 设计模式学习平台
+  设置: Theme=Dark, AutoSave=600s
+  任务数: 3
+    [Done] 实现备忘录模式 (4h)
+    [Todo] 写单元测试 (2h)
+    [Todo] 重构 Caretaker (3h)
+  元数据: 2 项
+
+  [Checkpoint] [10:00:02] 任务更新 (387 bytes)
+
+3. 删除一个任务...
+项目: 设计模式学习平台
+  设置: Theme=Dark, AutoSave=600s
+  任务数: 2
+    [Todo] 写单元测试 (2h)
+    [Todo] 重构 Caretaker (3h)
+  元数据: 3 项
+
+--- Undo x2 ---
+  [Undo] 已恢复
+项目: 设计模式学习平台
+  设置: Theme=Dark, AutoSave=600s
+  任务数: 3
+    [Done] 实现备忘录模式 (4h)
+    [Todo] 写单元测试 (2h)
+    [Todo] 重构 Caretaker (3h)
+  元数据: 2 项
+
+  [Undo] 已恢复
+项目: 设计模式学习平台
+  设置: Theme=Dark, AutoSave=600s
+  任务数: 2
+    [InProgress] 实现备忘录模式 (4h)
+    [Todo] 写单元测试 (2h)
+  元数据: 2 项
+
+--- Redo x1 ---
+  [Redo] 已恢复
+项目: 设计模式学习平台
+  设置: Theme=Dark, AutoSave=600s
+  任务数: 3
+    [Done] 实现备忘录模式 (4h)
+    [Todo] 写单元测试 (2h)
+    [Todo] 重构 Caretaker (3h)
+  元数据: 2 项
+*/
+```
+
+**运行方式:**
+```bash
+dotnet new console -n MementoSerialization
+# 将上述代码放入 Program.cs
+dotnet run --project MementoSerialization
+```
+
+> [!warning] 序列化 Memento 的适用条件
+> 1. 对象图中的所有类型必须可序列化（`System.Text.Json` 要求公共属性、无参构造器或 `[JsonConstructor]`）
+> 2. 循环引用会导致 `StackOverflowException`——设置 `ReferenceHandler.Preserve`
+> 3. 大对象图的序列化成本不低——如果状态只改了一个字段，序列化全图是浪费（见练习 3 的差分存储方案）
+
+> [!tip] 序列化 vs 手动复制 vs `record with`
+> | 方案 | 适用场景 | 优点 | 缺点 |
+> |------|---------|------|------|
+> | **手动逐字段复制** | 简单对象，字段少 | 最高性能，完全控制 | 极易遗漏新字段 |
+> | **`record` + `with`** | 中等复杂度，不可变对象 | 编译期安全，简洁 | 仅适用于 `record` 类型 |
+> | **序列化深度快照** | 复杂嵌套对象图 | 通用，不怕遗漏 | 有序列化成本，需可序列化约束 |
+
+---
+
+
+## C++ 实现
+
+C++ 中使用 `friend class` 控制访问权限：`EditorMemento` 构造函数私有化，仅 `Editor` 可创建与读取，`History` 只负责存储 `unique_ptr<EditorMemento>`。这与 GoF 的"窄接口/宽接口"原则一致 —— Caretaker 看到的只是黑盒。
+
+```cpp
+#include <iostream>
+#include <string>
+#include <vector>
+#include <memory>
+using namespace std;
+
+// ============================================================
+// 1. EditorMemento (Memento) — 不可变快照，私有构造函数
+// ============================================================
+class EditorMemento {
+    string text;
+    int cursorPosition;
+
+    // 只有 Editor 可以创建和读取 Memento
+    friend class Editor;
+
+    EditorMemento(string t, int pos)
+        : text(move(t)), cursorPosition(pos) {}
+public:
+    // Caretaker 只看到描述信息，不接触内部状态
+    void describe() const {
+        cout << "  [Memento] 快照 (文本长度: "
+             << text.size() << ", 光标: " << cursorPosition << ")" << endl;
+    }
+};
+
+// ============================================================
+// 2. Editor (Originator) — 拥有内部状态，创建和恢复快照
+// ============================================================
+class Editor {
+    string text;
+    int cursorPosition{0};
+public:
+    void type(const string& words) {
+        text += words;
+        cursorPosition = static_cast<int>(text.size());
+    }
+
+    void deleteLast(int count) {
+        if (count > static_cast<int>(text.size()))
+            count = static_cast<int>(text.size());
+        text.erase(text.size() - count);
+        cursorPosition = static_cast<int>(text.size());
+    }
+
+    void display() const {
+        cout << "  文本: \"" << text << "\""
+             << " | 光标: " << cursorPosition << endl;
+    }
+
+    // 创建当前状态快照
+    auto createMemento() const {
+        return make_unique<EditorMemento>(text, cursorPosition);
+    }
+
+    // 从快照恢复
+    void restoreFrom(const EditorMemento& m) {
+        text = m.text;
+        cursorPosition = m.cursorPosition;
+    }
+};
+
+// ============================================================
+// 3. History (Caretaker) — 只存储和传递快照，不解包
+// ============================================================
+class History {
+    vector<unique_ptr<EditorMemento>> snapshots;
+public:
+    void save(const Editor& editor) {
+        auto m = editor.createMemento();
+        m->describe();
+        snapshots.push_back(move(m));
+    }
+
+    bool undo(Editor& editor) {
+        if (snapshots.empty()) {
+            cout << "  [History] 无可撤销操作" << endl;
+            return false;
+        }
+        auto m = move(snapshots.back());
+        snapshots.pop_back();
+        cout << "  [History] 恢复到上一个快照" << endl;
+        editor.restoreFrom(*m);
+        return true;
+    }
+};
+
+// === main / usage ===
+int main() {
+    Editor editor;
+    History history;
+
+    editor.type("Hello");
+    editor.display();
+    history.save(editor);       // 保存快照 1: "Hello"
+
+    editor.type(", World!");
+    editor.display();
+    history.save(editor);       // 保存快照 2: "Hello, World!"
+
+    editor.type(" How are you?");
+    editor.display();
+    // 此行不保存 — 稍后撤销会丢弃它
+
+    cout << "\n=== 开始撤销 ===" << endl;
+    history.undo(editor);       // 恢复到 "Hello, World!"
+    editor.display();
+
+    history.undo(editor);       // 恢复到 "Hello"
+    editor.display();
+
+    history.undo(editor);       // 无可撤销
+
+    return 0;
+}
+```
+
+**编译运行：**
+```bash
+g++ -std=c++17 -o prog main.cpp && ./prog
+```
+
+**预期输出：**
+```text
+  文本: "Hello" | 光标: 5
+  [Memento] 快照 (文本长度: 5, 光标: 5)
+  文本: "Hello, World!" | 光标: 13
+  [Memento] 快照 (文本长度: 13, 光标: 13)
+  文本: "Hello, World! How are you?" | 光标: 26
+
+=== 开始撤销 ===
+  [History] 恢复到上一个快照
+  文本: "Hello, World!" | 光标: 13
+  [History] 恢复到上一个快照
+  文本: "Hello" | 光标: 5
+  [History] 无可撤销操作
+```
+
+## 3. 练习
+
+### 练习 1：Command + Memento 实现 Undo/Redo
+
+结合 [[18-command|命令模式]] 和备忘录模式，实现一个支持完整 Undo/Redo 的文本编辑器。
+
+**要求：**
+- 每个编辑操作（插入、删除、替换）封装为 `ICommand` 接口的实现
+- 每个 Command 在执行前自动保存当前状态的 Memento
+- Undo 时恢复 Memento 并执行 Command 的逆操作
+- 支持批量操作的 Macro Command（一组命令作为一个事务）
+
+**接口提示：**
+```csharp
+public interface ICommand
+{
+    void Execute(Editor editor);
+    void Undo(Editor editor);
+    string Description { get; }
+}
+
+public class InsertCommand : ICommand { /* ... */ }
+public class DeleteCommand : ICommand { /* ... */ }
+public class MacroCommand : ICommand { /* ... */ }
+```
+
+**验证：** 执行 5 个操作后，连续 Undo 5 次，状态必须精确回到初始状态。
+
+### 练习 2：多槽位游戏存档系统
+
+扩展 2.2 的游戏存档系统：
+
+**要求：**
+- 支持 3 个存档槽位（Slot1/Slot2/Slot3），每个槽位可保存不同角色或不同进度
+- 存档时显示预览信息（等级、位置、游戏时长）但不暴露全部内部状态
+- 支持存档覆盖确认（"该槽位已有存档，是否覆盖？"）
+- 支持删除指定槽位的存档
+- 提供"快速存档/读档"（专用槽位，绑定热键 F5/F9）
+
+**验证：** 在 3 个槽位分别保存不同进度的存档，依次加载每个槽位并打印状态。
+
+### 练习 3：差分存储 Memento
+
+当对象状态很大时，每次保存完整副本浪费内存。实现一个只存储**变化部分**的 Memento 系统。
+
+**要求：**
+- 第一个 Memento 保存完整状态（Baseline）
+- 后续 Memento 只存储与前一个 Memento 的差异（Delta）
+- Caretaker 在 Undo 时能正确"回放"差异链
+- 实现两种差异算法任选其一：
+  - **基于属性比较**：比较新旧 Memento 的每个属性，只记录不同的
+  - **基于 JSON Patch**：序列化为 JSON，用 `System.Text.Json` 的 `JsonDocument` 计算差异
+
+**接口提示：**
+```csharp
+public interface IMementoDelta
+{
+    // 应用此差异到给定的 Memento，返回新 Memento
+    Memento Apply(Memento baseMemento);
+    // 反此差异（用于 Undo）
+    IMementoDelta Invert();
+}
+```
+
+**验证：** 保存一个包含 100 个任务的项目 Memento 作为 baseline，然后只修改 1 个任务的状态，再保存——delta Memento 占用的内存应远小于全量快照。
+
+---
+
+## 4. 扩展阅读
+
+### 相关模式
+
+- [[16-behavioral-intro|行为型模式总览]] — 理解行为型模式的统一视角
+- [[18-command|命令模式]] — Command + Memento 是 Undo/Redo 的经典组合：Command 执行操作，Memento 保存状态
+- [[03-singleton|单例模式]] — Caretaker 通常设计为单例，因为整个应用只需一个历史管理器
+- [[07-prototype|原型模式]] — 创建 Memento 的另一种方式：先用原型克隆自身，再存储克隆体
+
+### 现实世界中的备忘录模式
+
+| 应用 | 如何使用 Memento |
+|------|-----------------|
+| VS Code Undo | 编辑器维护一个 `TextBufferSnapshot` 栈；每次编辑前自动保存 |
+| Git | Commit 就是 Memento（树快照）；working directory 是 Originator；`git stash`/`git reset` 是 Caretaker |
+| 浏览器后退/前进 | 每个页面是一个 Memento；`history.pushState` 是 Save；`history.back()` 是 Undo |
+| RPG 游戏存档 | 玩家状态序列化为存档文件；存档槽 = Caretaker 的存储策略 |
+| React/Vue 的 Virtual DOM | 旧 VDOM 是 Memento；Diff 后 patch 到新的 Originator（真实 DOM） |
+| `IEditableObject` (WPF) | `BeginEdit()` 保存 Memento；`CancelEdit()` 恢复；`EndEdit()` 提交 |
+
+### 外部资源
+
+- [Refactoring Guru: Memento Pattern](https://refactoring.guru/design-patterns/memento)
+- [Microsoft Docs: System.Text.Json Serialization](https://learn.microsoft.com/en-us/dotnet/standard/serialization/system-text-json/overview)
+- [C# `record` types](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record)
+- [Memento pattern in .NET — `IEditableObject` and `IRevertibleChangeTracking`](https://learn.microsoft.com/en-us/dotnet/api/system.componentmodel.ieditableobject)
+
+---
+
+## 常见陷阱
+
+### 1. 内存爆炸——每次保存完整状态
+
+```csharp
+// ❌ 每个 Memento 存储整个文档的完整副本
+public class DocumentMemento
+{
+    public string FullText { get; }      // 100KB
+    public byte[] EmbeddedImages { get; } // 50MB × 每次保存！
+    public List<Style> Styles { get; }    // 全部样式信息
+}
+```
+
+**正确做法：**
+- 对大数据使用**引用共享**（如不可变数据结构的结构共享）
+- 大二进制数据（图片/视频）不放入 Memento，用引用/哈希替代
+- 实现**差分存储**（见练习 3）
+- 限制历史栈深度：`const int MaxHistory = 50;`
+
+```csharp
+// ✓ 限制历史深度，超过后丢弃最旧的
+private const int MaxHistory = 50;
+private readonly LinkedList<EditorState> _history = new();
+
+public void Save(Editor editor)
+{
+    _history.AddLast(editor.CreateMemento());
+    if (_history.Count > MaxHistory)
+        _history.RemoveFirst(); // 丢弃最旧的快照
+}
+```
+
+### 2. Memento 暴露内部状态
+
+```csharp
+// ❌ Memento 的全部属性都是 public — 任何 Caretaker 都能读取
+public class BadMemento
+{
+    public string InternalState { get; init; }  // 信息泄漏
+    public string PasswordHash { get; init; }   // 安全风险！
+    public List<User> UserList { get; init; }   // 封装破坏
+}
+```
+
+**正确做法：**
+- Memento 的"有意义"状态用 `internal` 修饰，只对同 assembly 的 Originator 可见
+- Caretaker 只持有 Memento 引用，不调用任何属性访问器
+- 或使用**嵌套类 + private 构造器**模式：
+
+```csharp
+// ✓ 嵌套 Memento：CareTaker 只能用 IMemento 窄接口
+public class Editor
+{
+    public interface IMemento { }  // 窄接口 — 空！Caretaker 只能持有
+
+    private class MementoImpl : IMemento
+    {
+        internal string Text { get; init; }
+        internal int CursorPos { get; init; }
+    }
+
+    public IMemento CreateMemento()
+        => new MementoImpl { Text = _text, CursorPos = _cursorPos };
+
+    public void SetMemento(IMemento m)
+    {
+        var impl = (MementoImpl)m;  // Originator 可以解包
+        _text = impl.Text;
+        _cursorPos = impl.CursorPos;
+    }
+}
+
+// Caretaker 的视角：Stack<Editor.IMemento> — 完全无法访问内部
+```
+
+### 3. Caretaker 持有引用而非副本
+
+```csharp
+// ❌ Memento 持有可变对象的引用——快照会被意外修改
+public class BadSnapshot
+{
+    public List<string> Items { get; init; } // 引用类型！
+
+    public BadSnapshot(List<string> items)
+    {
+        Items = items; // 外部列表变了，快照也跟着变！
+    }
+}
+```
+
+**正确做法：** Memento 构造时必须**深拷贝**所有引用类型成员。
+
+```csharp
+// ✓ 构造时深拷贝
+public class GoodSnapshot
+{
+    internal List<string> Items { get; }
+
+    internal GoodSnapshot(List<string> items)
+    {
+        Items = new List<string>(items); // 深拷贝
+    }
+}
+```
+
+### 4. 浅拷贝导致的"幽灵修改"
+
+当对象图中存在多层嵌套引用类型时，简单的 `MemberwiseClone()` 只复制引用，深层对象仍共享。
+
+```csharp
+// ❌ MemberwiseClone 只复制第一层引用
+public class ProjectSnapshot
+{
+    public ProjectSettings Settings { get; init; } // 还是同一个引用！
+
+    public ProjectSnapshot Clone()
+    {
+        return (ProjectSnapshot)MemberwiseClone();
+        // Settings 指向与原始对象同一个实例！
+        // 修改原始对象的 Settings.Theme → 快照中的也变了
+    }
+}
+```
+
+**正确做法：**
+- 使用 `record` 类型（值语义 + 不可变）作为所有嵌套数据
+- 使用序列化实现完整深拷贝（见 2.4）
+- 或递归手动深拷贝每一层
+
+```csharp
+// ✓ 所有嵌套类型都使用 record（不可变 + 值语义）
+public sealed record ProjectSettings(string Theme, int AutoSaveInterval);
+public sealed record TaskItem(string Title, string Status, int EstHours);
+
+// 现在整个对象图天然不可变——Copy 就是深拷贝
+public sealed record ProjectMemento(
+    string Name,
+    ProjectSettings Settings,
+    ImmutableList<TaskItem> Tasks
+);
+```
+
+### 5. 忘记清空 Redo 栈
+
+用户 Undo 后做了新操作——此时旧的 Redo 链应该作废，否则状态树会分叉导致不一致。
+
+```csharp
+// ✓ 每次 Save 新状态时清空 Redo 栈
+public void Save(Editor editor)
+{
+    _undoStack.Push(editor.CreateMemento());
+    _redoStack.Clear(); // ← 关键！新操作使旧重做链失效
+}
+```

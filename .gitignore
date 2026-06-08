@@ -1,4 +1,4 @@
-# Pi IDE configs
+﻿# Pi IDE configs
 .pi/
 
 # Temp files
@@ -9,3 +9,7 @@ __pycache__/
 
 # Obsidian workspace config
 .obsidian/
+
+# Codex workspace config (keep skills, ignore runtime)
+.codex/.cache/
+.codex/logs/
