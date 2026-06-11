@@ -1890,6 +1890,446 @@ public class DebugPanel : MonoBehaviour
 
 **验收标准**：能清晰地看到注入误差前后的哈希变化。在代码注释中解释蝴蝶效应的累积路径。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：补全客户端 — SimulateServer 模式
+> **核心思路**：在 `LockstepManager` 中添加一个 `SimulateServer` 模式，跳过真正的网络层，在本地模拟服务器行为：收集所有玩家输入 → 广播帧包 → 写入 `FrameBuffer`。
+>
+> **Step 1：在 `LockstepManager` 中添加 SimulateServer 模式**
+>
+> ```csharp
+> // LockstepManager.cs 新增字段和模式
+> [Header("Simulate Server")]
+> [SerializeField] private bool _useSimulateServer = true; // 无网络时开启
+> [SerializeField] private int _simulatedPlayerCount = 2;  // 模拟玩家人数（含本地）
+>
+> // 本地玩家 ID（0），AI 玩家 ID（1）
+> private byte _aiPlayerId = 1;
+> private FP _aiAttackTimer = FP.Zero;
+> private const int AI_ATTACK_INTERVAL_FRAMES = 15; // 每15帧攻击一次（1s @ 15fps）
+>
+> // 修改 Start()：
+> void Start()
+> {
+>     if (_useSimulateServer)
+>     {
+>         StartSimulateServer();
+>     }
+>     else
+>     {
+>         _networkClient.Initialize(_frameBuffer, this);
+>     }
+>     _state = LockstepState.Disconnected;
+> }
+>
+> // 启动模拟服务器
+> private void StartSimulateServer()
+> {
+>     byte playerId = 0;
+>     uint startFrame = 0;
+>     int totalPlayers = _simulatedPlayerCount;
+>
+>     OnConnected(playerId, startFrame, totalPlayers);
+>     Debug.Log($"[LockstepManager] SimulateServer 模式启动, {totalPlayers} 名玩家");
+> }
+> ```
+>
+> **Step 2：AI 输入生成——向本地玩家移动并攻击**
+>
+> ```csharp
+> // 新增方法：生成 AI 玩家（playerId=1）的输入
+> private byte GenerateAIInput()
+> {
+>     byte input = 0;
+>
+>     // 找到 AI 实体和本地玩家实体
+>     LogicEntity aiEntity = null;
+>     LogicEntity localEntity = null;
+>     foreach (var entity in _gameLogic.Entities)
+>     {
+>         if (entity.OwnerPlayerId == _aiPlayerId && entity.Type == EntityType.Player)
+>             aiEntity = entity;
+>         if (entity.OwnerPlayerId == _localPlayerId && entity.Type == EntityType.Player)
+>             localEntity = entity;
+>     }
+>
+>     if (aiEntity == null || localEntity == null || aiEntity.IsDead)
+>         return 0;
+>
+>     // 计算 AI → 本地玩家的方向
+>     FPVector2 diff = localEntity.Position - aiEntity.Position;
+>     FP absX = diff.X.Abs();
+>     FP absY = diff.Y.Abs();
+>
+>     // 优先沿距离较远的轴移动
+>     if (absX.RawValue > absY.RawValue)
+>     {
+>         if (diff.X.RawValue > 0)
+>             input = InputManager.INPUT_MOVE_RIGHT;
+>         else
+>             input = InputManager.INPUT_MOVE_LEFT;
+>     }
+>     else if (absY.RawValue > 0)
+>     {
+>         if (diff.Y.RawValue > 0)
+>             input = InputManager.INPUT_MOVE_UP;
+>         else
+>             input = InputManager.INPUT_MOVE_DOWN;
+>     }
+>
+>     // 每 AI_ATTACK_INTERVAL_FRAMES 帧攻击一次
+>     _aiAttackTimer -= FP.One;
+>     if (_aiAttackTimer.RawValue <= 0)
+>     {
+>         // 检查攻击范围
+>         FP dist = diff.Magnitude();
+>         if (dist.RawValue <= FP.CreateFromFloat(1.5f).RawValue * FP.SCALE / FP.SCALE)
+>         // 简化：直接用 RawValue 比较
+>         if (dist.RawValue <= 98304) // 1.5 * 65536 ≈ 98304
+>         {
+>             input |= InputManager.INPUT_ATTACK;
+>         }
+>         _aiAttackTimer = FP.CreateFromInt(AI_ATTACK_INTERVAL_FRAMES);
+>     }
+>
+>     return input;
+> }
+> ```
+>
+> **Step 3：修改 AdvanceFrame() 以支持 SimulateServer**
+>
+> ```csharp
+> private bool AdvanceFrame()
+> {
+>     uint nextFrame = _currentFrame + 1;
+>
+>     // ── 1. 消费本地输入 ──
+>     byte localInput = _inputManager.ConsumeInput();
+>
+>     if (_useSimulateServer)
+>     {
+>         // SimulateServer 模式：模拟服务器收集所有玩家输入并广播
+>         var simFrameData = new FrameData(nextFrame, _totalPlayers);
+>         simFrameData.PlayerInputs[_localPlayerId] = localInput;
+>         simFrameData.PlayerInputs[_aiPlayerId] = GenerateAIInput();
+>         simFrameData.ArrivalTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+>         _frameBuffer.EnqueueFrame(simFrameData);
+>     }
+>     else
+>     {
+>         _networkClient.SendInput(nextFrame, _localPlayerId, localInput);
+>     }
+>
+>     // ── 2. 从缓冲区获取完整输入 ──
+>     FrameData frameData = _frameBuffer.TryGetFrame(nextFrame);
+>     if (frameData == null) return false;
+>
+>     // ── 3~6 步保持不变 ──
+>     _gameLogic.ExecuteFrame(frameData.PlayerInputs);
+>     _currentFrame = nextFrame;
+>     _serverFrame = System.Math.Max(_serverFrame, _frameBuffer.NewestFrame);
+>
+>     if (_renderProxy != null)
+>         _renderProxy.OnLogicFrameCompleted(_gameLogic.Entities);
+>
+>     if (_currentFrame % HASH_CHECK_INTERVAL == 0)
+>     {
+>         ulong hash = _gameLogic.ComputeStateHash();
+>         _frameHashes.Add(hash);
+>         OnFrameHashReady?.Invoke(_currentFrame, hash);
+>     }
+>
+>     _frameBuffer.ConsumeFrame(nextFrame);
+>     return true;
+> }
+> ```
+>
+> **验收验证**：
+> - 单客户端运行，Scene 视图出现两个 Cube（绿色=本地，红色=AI）
+> - AI 向本地玩家方向移动，每约 1 秒（15 逻辑帧）攻击一次
+> - DebugPanel 显示状态为 Playing，帧号递增
+> - 两个实体互相攻击，血量下降，HP=0 时实体消失
+
+> [!tip]- 练习 2 参考答案：多帧插值 — 可配置帧偏移
+> **核心思路**：在 `RenderProxy` 中不再只缓存 `PreviousPosition` 和 `TargetPosition`，而是维护一个长度为 `_interpDelayFrames + 1` 的位置历史环形缓冲区。渲染时用 `当前帧 - interpDelayFrames` 和 `当前帧 - interpDelayFrames + 1` 两个历史位置做插值。
+>
+> ```csharp
+> // RenderProxy.cs 修改
+>
+> [Header("Interpolation")]
+> [SerializeField] private int _interpDelayFrames = 1; // 插值延迟帧数（1/2/3）
+> // 位置历史：最多缓存 _interpDelayFrames + 1 个位置
+> private class PositionHistory
+> {
+>     private Vector3[] _buffer;
+>     private int _writeIndex;
+>     private int _count;
+>
+>     public PositionHistory(int capacity)
+>     {
+>         _buffer = new Vector3[capacity];
+>         _writeIndex = 0;
+>         _count = 0;
+>     }
+>
+>     public void Push(Vector3 pos)
+>     {
+>         _buffer[_writeIndex] = pos;
+>         _writeIndex = (_writeIndex + 1) % _buffer.Length;
+>         if (_count < _buffer.Length) _count++;
+>     }
+>
+>     // 获取第 index 个元素（0 = 最旧, _count-1 = 最新）
+>     public Vector3 GetFromOldest(int index)
+>     {
+>         if (index < 0 || index >= _count) return _buffer[(_writeIndex - 1 + _buffer.Length) % _buffer.Length];
+>         int realIndex = (_writeIndex - _count + index + _buffer.Length) % _buffer.Length;
+>         return _buffer[realIndex];
+>     }
+>
+>     public int Count => _count;
+>     public void Clear() { _count = 0; _writeIndex = 0; }
+> }
+>
+> public class RenderEntity
+> {
+>     public uint LogicEntityId;
+>     public GameObject GameObject;
+>     public Transform Transform;
+>     public SpriteRenderer Renderer;
+>     // 替换 PreviousPosition / TargetPosition 为历史缓冲区
+>     public PositionHistory PosHistory; // 由 RenderProxy 管理
+>     public float InterpTime;
+> }
+>
+> // OnLogicFrameCompleted 中：推送新位置到历史缓冲区
+> public void OnLogicFrameCompleted(List<LogicEntity> logicEntities)
+> {
+>     // ... 创建/同步实体逻辑不变 ...
+>     foreach (var logicEntity in logicEntities)
+>     {
+>         if (_renderEntities.TryGetValue(logicEntity.Id, out RenderEntity renderEntity))
+>         {
+>             // 推入历史（已有实体）
+>             renderEntity.PosHistory.Push(LogicPosToWorldPos(logicEntity.Position));
+>             renderEntity.InterpTime = 0f;
+>         }
+>         else
+>         {
+>             // 新实体：创建时预填充历史
+>             CreateRenderEntity(logicEntity);
+>             var re = _renderEntities[logicEntity.Id];
+>             Vector3 initPos = LogicPosToWorldPos(logicEntity.Position);
+>             for (int i = 0; i < _interpDelayFrames + 1; i++)
+>                 re.PosHistory.Push(initPos);
+>         }
+>     }
+> }
+>
+> // Update() 中：用历史位置插值
+> void Update()
+> {
+>     float interval = _lockstep != null ? _lockstep.LogicFrameInterval : 0.066f;
+>
+>     foreach (var kv in _renderEntities)
+>     {
+>         RenderEntity re = kv.Value;
+>         if (re.GameObject == null) continue;
+>
+>         re.InterpTime += Time.deltaTime / interval;
+>         if (re.InterpTime > 1f) re.InterpTime = 1f;
+>
+>         // 从历史缓冲区取"过去帧"做插值
+>         // fromPos = 第(count - interpDelayFrames - 1)个，toPos = 第(count - interpDelayFrames)个
+>         int count = re.PosHistory.Count;
+>         int fromIndex = count - _interpDelayFrames - 1;
+>         int toIndex = count - _interpDelayFrames;
+>
+>         if (fromIndex < 0)
+>         {
+>             // 历史不足 → 用最新位置（初始阶段）
+>             re.Transform.position = re.PosHistory.GetFromOldest(count - 1);
+>         }
+>         else
+>         {
+>             Vector3 from = re.PosHistory.GetFromOldest(fromIndex);
+>             Vector3 to = re.PosHistory.GetFromOldest(toIndex);
+>             re.Transform.position = Vector3.Lerp(from, to, re.InterpTime);
+>         }
+>     }
+> }
+>
+> private void CreateRenderEntity(LogicEntity logicEntity)
+> {
+>     // ... 创建 GameObject 逻辑不变 ...
+>     var renderEntity = new RenderEntity
+>     {
+>         LogicEntityId = logicEntity.Id,
+>         GameObject = go,
+>         Transform = go.transform,
+>         Renderer = go.GetComponent<SpriteRenderer>(),
+>         PosHistory = new PositionHistory(_interpDelayFrames + 1),
+>         InterpTime = 1f,
+>     };
+>     // 预填充
+>     Vector3 initPos = LogicPosToWorldPos(logicEntity.Position);
+>     for (int i = 0; i < _interpDelayFrames + 1; i++)
+>         renderEntity.PosHistory.Push(initPos);
+>
+>     _renderEntities[logicEntity.Id] = renderEntity;
+> }
+> ```
+>
+> **帧偏移分析**：
+>
+> | 帧偏移 | 额外延迟 | 流畅度 | 适用场景 |
+> |--------|----------|--------|----------|
+> | 1 帧 (66ms @15fps) | +66ms | 轻微跳跃感（逻辑帧间隔=表现帧间隔，插值时间刚好） | 低延迟要求（格斗游戏、FPS 近战） |
+> | 2 帧 (133ms @15fps) | +133ms | 平滑——有 2 帧缓冲，即使一帧抖动也能平滑 | **推荐**：RTS/MOBA 默认值 |
+> | 3 帧 (200ms @15fps) | +200ms | 非常平滑——3 帧缓冲完全吸收网络抖动 | 高延迟容忍场景（SLG、回合制） |
+>
+> **关键洞察**：
+> - 帧偏移 = 用"额外延迟"换取"抖动平滑"。偏移越大，渲染层看到的运动越连续，但操作延迟越大
+> - 1 帧偏移时，`fromPos` = 上上帧，`toPos` = 上一帧 → 当前帧"看到"的是过去的画面
+> - 对于高速移动（如单位每帧移动 1m），3 帧偏移意味着玩家看到的画面比逻辑层慢 200ms——在 MOBA 中这个延迟可接受（MOBA 操作→响应延迟约 200-400ms），在 FPS 中则不可接受
+> - 帧偏移和预缓冲帧数叠加：`_bufferSize=8` + `_interpDelayFrames=2` = 总共约 666ms 端到端延迟
+
+> [!tip]- 练习 3 参考答案：Desync 注入与检测
+> **核心思路**：在 `GameLogic.ExecuteFrame()` 中添加可控的确定性随机误差注入。因为使用了 `DeterministicRandom`，注入时机必须独立于随机序列——用 `_desyncInjectChance` 和额外的确定性随机种子控制。
+>
+> ```csharp
+> // GameLogic.cs 新增字段
+> private float _desyncInjectChance = 0.0f; // 0.0~1.0，每帧注入概率
+> private DeterministicRandom _injectRandom; // 独立的随机源，不影响游戏逻辑
+> private bool _injectionActive = false;     // 是否已开始注入
+> private uint _injectionStartFrame = 0;
+>
+> // 修改 Initialize()
+> public void Initialize(ulong randomSeed, int playerCount, float desyncInjectChance = 0.0f)
+> {
+>     _random = new DeterministicRandom(randomSeed);
+>     // 注入用独立种子的随机源
+>     _injectRandom = new DeterministicRandom(randomSeed ^ 0xDEADBEEFCAFE1234UL);
+>     _desyncInjectChance = desyncInjectChance;
+>     _injectionActive = false;
+>     // ... 其余初始化不变 ...
+> }
+>
+> // 修改 ExecuteFrame()：在移动处理完后、攻击处理前加入注入逻辑
+> public void ExecuteFrame(byte[] frameInputs)
+> {
+>     CurrentFrame++;
+>
+>     // ... 处理玩家输入（移动）不变 ...
+>
+>     // ── Desync 注入 ──────────────────────────────
+>     if (!_injectionActive && _desyncInjectChance > 0.0f)
+>     {
+>         // 用独立随机源判断本帧是否注入
+>         FP roll = _injectRandom.NextFP(); // [0, 1)
+>         if (roll.ToFloat() < _desyncInjectChance)
+>         {
+>             // 随机选一个实体，将其 X 位置偏移 1 个定点单位
+>             if (Entities.Count > 0)
+>             {
+>                 int targetIndex = _injectRandom.Next(Entities.Count);
+>                 LogicEntity target = Entities[targetIndex];
+>
+>                 // 偏移 1 个定点单位（= 1/65536 ≈ 0.000015 世界单位）
+>                 int newX = target.Position.X.RawValue + 1; // 仅 +1 RawValue
+>                 target.Position = new FPVector2(
+>                     FP.CreateFromRaw(newX),
+>                     target.Position.Y
+>                 );
+>
+>                 _injectionActive = true;
+>                 _injectionStartFrame = CurrentFrame;
+>                 UnityEngine.Debug.Log(
+>                     $"[DESYNC INJECT] Frame {CurrentFrame}: Entity {target.Id} " +
+>                     $"X offset by +1 raw unit (now RawValue={newX})"
+>                 );
+>             }
+>         }
+>     }
+>
+>     // ... 后续处理（攻击、冷却、清理）不变 ...
+> }
+> ```
+>
+> **哈希发散分析**：
+>
+> 在 `LockstepManager` 或新增的 `DesyncAnalyzer` 中记录注入前后的哈希变化：
+>
+> ```csharp
+> // DesyncAnalyzer.cs — 分析注入帧前后的哈希发散
+> public class DesyncAnalyzer : MonoBehaviour
+> {
+>     [SerializeField] private float _injectChance = 0.01f;  // 1% 每帧
+>     [SerializeField] private int _logWindow = 50;           // 日志窗口帧数
+>
+>     private List<(uint frame, ulong hash)> _hashHistory = new List<(uint, ulong)>();
+>     private uint _injectFrame = 0;
+>     private ulong _preInjectHash = 0;
+>
+>     // 每 100 帧记录哈希，并在 OnInjectFrame 回调中标记
+>     public void OnFrameHash(uint frame, ulong hash)
+>     {
+>         _hashHistory.Add((frame, hash));
+>         if (_hashHistory.Count > _logWindow * 2)
+>             _hashHistory.RemoveAt(0);
+>     }
+>
+>     public void OnInjectDetected(uint injectFrame, ulong preInjectHash)
+>     {
+>         _injectFrame = injectFrame;
+>         _preInjectHash = preInjectHash;
+>     }
+>
+>     void OnGUI()
+>     {
+>         if (_injectFrame == 0) return;
+>         GUILayout.BeginArea(new Rect(Screen.width - 400, 10, 380, 500));
+>         GUILayout.Label($"Desync Injection at Frame: {_injectFrame}");
+>         GUILayout.Label($"Pre-Inject Hash: {_preInjectHash:X16}");
+>
+>         // 显示注入后的哈希变化
+>         foreach (var (frame, hash) in _hashHistory)
+>         {
+>             if (frame >= _injectFrame - 100 && frame <= _injectFrame + 500)
+>             {
+>                 string marker = (frame == _injectFrame) ? " ← INJECT" : "";
+>                 GUILayout.Label($"F{frame}: {hash:X16}{marker}");
+>             }
+>         }
+>         GUILayout.EndArea();
+>     }
+> }
+> ```
+>
+> **蝴蝶效应分析**（为什么 1 个定点单位的误差会导致哈希完全发散）：
+>
+> 1. **位置偏移 → 攻击范围判断**：+1 RawValue 的 X 偏移虽然只有约 0.000015 世界单位，但当两个实体处于攻击范围临界值时，这个微小的偏移可能改变 `distance.RawValue <= ATTACK_RANGE.RawValue` 的比较结果。例如：某帧 AI 实体距离攻击目标刚好 1.500000 单位（RawValue=98304），偏移后变成了 1.500015（RawValue=98305），越过了阈值——本应命中的攻击变为未命中。
+>
+> 2. **攻击结果 → HP 差异**：攻击命中/未命中的差异导致目标 HP 差 20 点。此后的所有帧中，HP 参与 `ComputeStateHash()` → 哈希值立即不同。
+>
+> 3. **HP=0 → 存活/死亡状态翻转**：20 点 HP 差异可能在关键帧决定一个实体是存活还是死亡。死亡实体会从 `Entities` 列表中移除，后续的 `foreach` 遍历和攻击目标选择完全不同。
+>
+> 4. **死亡 → 攻击目标变化**：如果实体 A 死亡了，原来攻击 A 的实体 B 转而攻击实体 C——整个战斗的走向被改变。
+>
+> 5. **累积扩散速度估计**：
+>    - 注入后第 1 帧：只有被注入实体的 Position.X 不同 → 哈希不同但差异仅 1 bit
+>    - 注入后 ~10 帧内：攻击判定可能因距离差异改变 → HP 不同 → 哈希差异扩散到多个字段
+>    - 注入后 ~30-50 帧内：HP=0 触发 → 死亡/存活状态翻转 → 实体列表不同 → 哈希完全无关
+>    - 注入后 ~100 帧后：战斗结果完全不同，两个客户端的游戏状态"分叉"为两个平行宇宙
+>
+> 6. **1000 帧前的位级差异能在多少帧内完全发散？** 取决于游戏的"耦合度"。在密集战斗场景中（多个实体在攻击范围内），1 个位级差异通常在 **20-50 帧内开始扩散**，**100-200 帧内完全发散**（哈希值的每一位都不再相关）。在稀疏场景中（实体相距很远，无交互），差异可能永远停留在 1 个实体的 Position 字段内——哈希不同但差异可控。
+>
+> **关键教训**：帧同步的确定性必须做到**逐位一致**。任何看似"微小"的误差——即使是 1/65536 的位置偏移——会在战斗判定中通过"临界条件放大"机制滚雪球，最终导致两个客户端的游戏世界完全分叉。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

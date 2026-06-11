@@ -453,6 +453,307 @@ static_assert(crc32("hello", 5) == 0x3610A686u, "CRC32 mismatch");
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> > #include <string_view>
+> > #include <cstdint>
+> > #include <array>
+> > #include <algorithm>
+> > #include <iostream>
+> > #include <optional>
+> > #include <cassert>
+> >
+> > // ============ 1. 编译期 FNV-1a 哈希 ============
+> > constexpr uint64_t fnv1a_hash(std::string_view sv) {
+> >     uint64_t hash = 0xcbf29ce484222325ULL;  // FNV offset basis
+> >     for (char c : sv) {
+> >         hash ^= static_cast<uint64_t>(static_cast<uint8_t>(c));
+> >         hash *= 0x100000001b3ULL;           // FNV prime
+> >     }
+> >     return hash;
+> > }
+> >
+> > // ============ 2. 用户自定义字面量 ============
+> > consteval uint64_t operator""_id(const char* str, size_t len) {
+> >     return fnv1a_hash({str, len});
+> > }
+> >
+> > // ============ 3. 资源条目 ============
+> > struct ResourceEntry {
+> >     uint64_t id;
+> >     std::string_view path;
+> >     constexpr bool operator<(const ResourceEntry& o) const { return id < o.id; }
+> >     constexpr bool operator==(const ResourceEntry& o) const { return id == o.id; }
+> > };
+> >
+> > // ============ 4. AssetDatabase（编译期） ============
+> > template<size_t N>
+> > class AssetDatabase {
+> >     std::array<ResourceEntry, N> entries_;
+> > public:
+> >     constexpr AssetDatabase(std::array<ResourceEntry, N> data) : entries_(data) {
+> >         // 编译期排序
+> >         std::sort(entries_.begin(), entries_.end());
+> >     }
+> >
+> >     constexpr std::optional<std::string_view> find(uint64_t id) const {
+> >         ResourceEntry key{id, {}};
+> >         auto it = std::lower_bound(entries_.begin(), entries_.end(), key);
+> >         if (it != entries_.end() && it->id == id)
+> >             return it->path;
+> >         return std::nullopt;
+> >     }
+> >
+> >     constexpr size_t size() const { return N; }
+> > };
+> >
+> > // 编译期构建数据库
+> > constexpr auto build_db() {
+> >     return AssetDatabase<6>(std::array<ResourceEntry, 6>{{
+> >         {"player"_id,     "/assets/player.mesh"},
+> >         {"enemy"_id,      "/assets/enemy.mesh"},
+> >         {"skybox"_id,     "/assets/skybox.tex"},
+> >         {"main_bgm"_id,   "/assets/audio/bgm.ogg"},
+> >         {"ui_font"_id,    "/assets/ui/font.ttf"},
+> >         {"level01"_id,    "/assets/levels/01.bin"},
+> >     }});
+> > }
+> >
+> > constexpr auto g_asset_db = build_db();
+> >
+> > // ============ 5. static_assert 验证 ============
+> > static_assert(g_asset_db.size() == 6);
+> >
+> > // 验证 5 个资源 ID 互不相同（通过编译期查找确认各自路径不同）
+> > static_assert(g_asset_db.find("player"_id).value() == "/assets/player.mesh");
+> > static_assert(g_asset_db.find("enemy"_id).value()  == "/assets/enemy.mesh");
+> > static_assert(g_asset_db.find("skybox"_id).value() == "/assets/skybox.tex");
+> > static_assert(g_asset_db.find("main_bgm"_id).value() == "/assets/audio/bgm.ogg");
+> > static_assert(g_asset_db.find("ui_font"_id).value() == "/assets/ui/font.ttf");
+> >
+> > // 确认不同名字产生不同 ID
+> > static_assert("player"_id != "enemy"_id);
+> > static_assert("player"_id != "skybox"_id);
+> > static_assert("player"_id != "main_bgm"_id);
+> > static_assert("player"_id != "ui_font"_id);
+> > static_assert("player"_id != "level01"_id);
+> >
+> > int main() {
+> >     // 运行时查找
+> >     auto result = g_asset_db.find("skybox"_id);
+> >     if (result) std::cout << "Found: " << *result << '\n';
+> >
+> >     // 运行时 switch（编译期哈希 → 运行时整数比较）
+> >     uint64_t rid = "player"_id;
+> >     switch (rid) {
+> >         case "player"_id:  std::cout << "Player resource\n"; break;
+> >         case "enemy"_id:   std::cout << "Enemy resource\n";  break;
+> >         default: std::cout << "Unknown\n";
+> >     }
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > #include <string_view>
+> > #include <cstdint>
+> > #include <array>
+> > #include <cstdio>
+> > #include <cassert>
+> >
+> > // ============ 1. 编译期 CRC32 ============
+> > // CRC32 表生成（constexpr）
+> > constexpr auto generate_crc32_table() {
+> >     std::array<uint32_t, 256> table{};
+> >     for (uint32_t i = 0; i < 256; ++i) {
+> >         uint32_t crc = i;
+> >         for (int j = 0; j < 8; ++j) {
+> >             if (crc & 1)
+> >                 crc = (crc >> 1) ^ 0xEDB88320u;
+> >             else
+> >                 crc >>= 1;
+> >         }
+> >         table[i] = crc;
+> >     }
+> >     return table;
+> > }
+> >
+> > constexpr auto CRC32_TABLE = generate_crc32_table();
+> >
+> > // consteval CRC32 计算
+> > consteval uint32_t crc32(std::string_view data) {
+> >     uint32_t crc = 0xFFFFFFFFu;
+> >     for (char c : data) {
+> >         uint8_t idx = (crc ^ static_cast<uint8_t>(c)) & 0xFF;
+> >         crc = (crc >> 8) ^ CRC32_TABLE[idx];
+> >     }
+> >     return crc ^ 0xFFFFFFFFu;
+> > }
+> >
+> > // 编译期验证
+> > static_assert(crc32("hello") == 0x3610A686u, "CRC32 mismatch for 'hello'");
+> > static_assert(crc32("123456789") == 0xCBF43926u, "CRC32 mismatch");
+> >
+> > // ============ 2. constinit 重构 ============
+> > #include <cstdio>
+> >
+> > // 日志系统
+> > struct Logger {
+> >     FILE* file = nullptr;
+> >     explicit Logger(const char* path) { file = std::fopen(path, "w"); }
+> >     ~Logger() { if (file) std::fclose(file); }
+> >     void log(const char* msg) {
+> >         if (file) std::fprintf(file, "[LOG] %s\n", msg);
+> >     }
+> >     bool initialized() const { return file != nullptr; }
+> > };
+> >
+> > // 内存追踪器（依赖 Logger）
+> > struct MemoryTracker {
+> >     Logger* logger;
+> >     size_t total_alloc = 0;
+> >
+> >     // ❌ 原始问题：构造函数依赖外部 Logger
+> >     // MemoryTracker(Logger* l) : logger(l) { logger->log("Tracker init"); }
+> >     // 如果 logger 尚未初始化 → UB
+> >
+> >     void init(Logger* l) {
+> >         logger = l;
+> >         if (logger && logger->initialized())
+> >             logger->log("MemoryTracker initialized safely");
+> >     }
+> >     void record_alloc(size_t bytes) {
+> >         total_alloc += bytes;
+> >         if (logger) logger->log("Allocation recorded");
+> >     }
+> > };
+> >
+> > // ✅ constinit 解决方案
+> > constinit Logger*        g_logger = nullptr;
+> > constinit MemoryTracker* g_tracker = nullptr;
+> >
+> > // 可控的引擎初始化
+> > void engine_init() {
+> >     static Logger        logger_instance("engine.log");
+> >     static MemoryTracker tracker_instance;
+> >
+> >     g_logger  = &logger_instance;             // ① 先初始化 logger
+> >     g_tracker = &tracker_instance;            // ② 然后 tracker
+> >     g_tracker->init(g_logger);                // ③ 安全注入依赖
+> > }
+> >
+> > void engine_shutdown() {
+> >     g_tracker = nullptr;
+> >     g_logger  = nullptr;
+> >     // static 对象自动析构（析构顺序与构造相反 → 安全）
+> > }
+> >
+> > int main() {
+> >     engine_init();
+> >
+> >     // 验证初始化顺序可控
+> >     assert(g_logger != nullptr);
+> >     assert(g_tracker != nullptr);
+> >     assert(g_logger->initialized());
+> >     g_tracker->record_alloc(1024);
+> >     std::printf("Total allocated: %zu bytes\n", g_tracker->total_alloc);
+> >
+> >     engine_shutdown();
+> >     std::printf("All assertions passed — constinit eliminated SIOF\n");
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> > #include <string_view>
+> > #include <cstdint>
+> > #include <array>
+> > #include <algorithm>
+> > #include <cassert>
+> > #include <iostream>
+> >
+> > // ============ 复用 FNV-1a ============
+> > constexpr uint64_t fnv1a(std::string_view sv) {
+> >     uint64_t h = 0xcbf29ce484222325ULL;
+> >     for (char c : sv) { h ^= (uint8_t)c; h *= 0x100000001b3ULL; }
+> >     return h;
+> > }
+> > consteval uint64_t operator""_id(const char* s, size_t n) { return fnv1a({s,n}); }
+> >
+> > // ============ AssetBlob ============
+> > struct AssetBlob {
+> >     uint64_t id;
+> >     uint32_t offset;  // 模拟：偏移 = id % 1000
+> >     uint32_t size;    // 模拟：大小 = 路径长度 * 13
+> >
+> >     constexpr bool operator<(const AssetBlob& o) const { return id < o.id; }
+> > };
+> >
+> > // ============ 编译期打包 ============
+> > template<size_t N>
+> > consteval auto pack_assets(const std::array<std::string_view, N>& paths) {
+> >     std::array<AssetBlob, N> blobs{};
+> >     for (size_t i = 0; i < N; ++i) {
+> >         blobs[i].id     = fnv1a(paths[i]);
+> >         blobs[i].offset = static_cast<uint32_t>(fnv1a(paths[i]) % 1000);
+> >         blobs[i].size   = static_cast<uint32_t>(paths[i].size() * 13);
+> >     }
+> >     // 编译期排序
+> >     std::sort(blobs.begin(), blobs.end());
+> >     return blobs;
+> > }
+> >
+> > // ============ 编译期二分查找 ============
+> > template<size_t N>
+> > consteval const AssetBlob* find_blob(const std::array<AssetBlob, N>& blobs, uint64_t id) {
+> >     AssetBlob key{id, 0, 0};
+> >     auto it = std::lower_bound(blobs.begin(), blobs.end(), key);
+> >     if (it != blobs.end() && it->id == id) return &(*it);
+> >     return nullptr;
+> > }
+> >
+> > // ============ 编译期测试 ============
+> > constexpr auto PATHS = std::array<std::string_view, 4>{
+> >     "/assets/textures/player.tex",
+> >     "/assets/meshes/hero.mesh",
+> >     "/assets/audio/bgm.ogg",
+> >     "/assets/scripts/ai.lua"
+> > };
+> >
+> > constexpr auto PACKED = pack_assets(PATHS);
+> >
+> > // static_assert：验证排序顺序
+> > static_assert(PACKED[0].id < PACKED[1].id);
+> > static_assert(PACKED[1].id < PACKED[2].id);
+> > static_assert(PACKED[2].id < PACKED[3].id);
+> >
+> > // static_assert：查找已知路径 → 正确的 offset 和 size
+> > static_assert(find_blob(PACKED, "player"_id) != nullptr);
+> > static_assert(find_blob(PACKED, "player"_id)->offset ==
+> >               static_cast<uint32_t>(fnv1a("/assets/textures/player.tex") % 1000));
+> > static_assert(find_blob(PACKED, "player"_id)->size ==
+> >               static_cast<uint32_t>(PATHS[0].size() * 13));
+> >
+> > // 不存在的 ID → nullptr
+> > static_assert(find_blob(PACKED, "nonexistent"_id) == nullptr);
+> >
+> > int main() {
+> >     std::cout << "Packed " << PACKED.size() << " assets:\n";
+> >     for (const auto& b : PACKED)
+> >         std::cout << "  id=" << b.id << " offset=" << b.offset
+> >                   << " size=" << b.size << '\n';
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **C++ Reference: [constexpr specifier](https://en.cppreference.com/w/cpp/language/constexpr)** — 完整的 constexpr 规则

@@ -779,6 +779,344 @@ public class AllocationDetector : MonoBehaviour
 - 分析 `Library/ScriptAssemblies/Assembly-CSharp.dll`
 - 递归遍历 IL 指令，检测 `call/callvirt` 目标是否为 `GetComponent`
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **扫描项目 — 常见问题清单与修复方案**
+> 
+> | 搜索模式 | 典型发现 | 1 行修复方案 |
+> |----------|----------|-------------|
+> | `GetComponent<` in Update | `GetComponent<Rigidbody>()` 在 Update 中调用 | `Awake(){ _rb = GetComponent<Rigidbody>(); }` |
+> | `Camera.main` | `Camera.main.transform` 出现在 5 个脚本的 Update 中 | `Awake(){ _cam = Camera.main; }`，统一在一个 Manager 中缓存 |
+> | `Instantiate(` in Update | 每帧 Instantiate 子弹/特效 Prefab | 用对象池（见练习 2），预热 20~50 个实例 |
+> | `foreach` in hot path | `foreach(var enemy in enemies)` 每帧遍历 500 个敌人 | 改用 `for(int i=0; i<enemies.Count; i++)`（Unity < 2022）或确保 IL2CPP 优化开启 |
+> | `OnGUI` | 遗留的调试 UI 代码仍在 OnGUI 中 | 迁移到 uGUI Canvas 或 UI Toolkit；如必须保留，用 `#if UNITY_EDITOR` 包裹 |
+> | `Debug.Log` in Update | 每帧 log 碰撞信息 | 包裹在 `#if UNITY_EDITOR` 或使用 `[Conditional("UNITY_EDITOR")]` |
+> | `transform.position =` 在 Update | 每帧设置 transform（即使值未变） | `if(newPos != transform.position) transform.position = newPos;` |
+> | `FindObjectsOfType` | 启动时遍历所有对象注册到列表 | `Awake()` 中 `staticList.Add(this)`，`OnDestroy()` 中 `staticList.Remove(this)` |
+> | `SendMessage` | `SendMessage("OnDamage", dmg)` 调用伤害处理 | 改为直接方法调用或 UnityEvent |
+> | `string +` / `$“{x}”` 在 Update | 每帧拼接 UI 文本 | 使用 `StringBuilder` 或 `TextMeshPro.SetText("{0}", val)`（无分配重载） |
+> 
+> **Profiler 验证步骤**：
+> 1. 修复前：运行 Profiler（Deep Profile 模式），记录 GC.Alloc 和 CPU 时间
+> 2. 修复后：重新 Profiler，对比同一场景的差异
+> 3. 重点观察：GC.Alloc 是否从 per-frame 降低到 0；CPU 时间的尖峰是否消失
+> 
+> **优先级排序**（先修这个）：
+> 1. `FindObjectsOfType` + `Camera.main` → 最慢，可节省 1~5ms per frame
+> 2. `Instantiate` in Update → 消除 GC Spike
+> 3. `GetComponent` in Update → 批量修复，简单安全
+> 4. `Debug.Log` in Update → 释放 I/O 管线
+> 5. `foreach` → 收益小但零成本替换
+
+> [!tip]- 练习 2 参考答案
+> **通用 ObjectPool<T> 组件**
+> 
+> ```csharp
+> using UnityEngine;
+> using System.Collections.Generic;
+> 
+> public class ObjectPool<T> : MonoBehaviour where T : Component
+> {
+>     [SerializeField] private T prefab;
+>     [SerializeField] private int prewarmCount = 20;
+>     [SerializeField] private int maxCapacity = 200;
+>     [SerializeField] private bool autoExpand = true;
+> 
+>     private Queue<T> pool = new Queue<T>();
+>     private List<T> activeObjects = new List<T>();
+>     private Transform poolRoot;
+> 
+>     // 统计
+>     private int totalCreated;
+>     private float lastReportTime;
+> 
+>     void Awake()
+>     {
+>         poolRoot = new GameObject($"[Pool] {typeof(T).Name}").transform;
+>         poolRoot.SetParent(transform);
+>         Prewarm(prewarmCount);
+>     }
+> 
+>     public void Prewarm(int count)
+>     {
+>         int toCreate = Mathf.Min(count, maxCapacity) - totalCreated;
+>         for (int i = 0; i < toCreate; i++)
+>         {
+>             T obj = Instantiate(prefab, poolRoot);
+>             obj.gameObject.SetActive(false);
+>             obj.name = $"{typeof(T).Name}_{totalCreated}";
+>             pool.Enqueue(obj);
+>             totalCreated++;
+>         }
+>     }
+> 
+>     public T Get()
+>     {
+>         T obj;
+>         if (pool.Count > 0)
+>         {
+>             obj = pool.Dequeue();
+>         }
+>         else if (autoExpand && totalCreated < maxCapacity)
+>         {
+>             obj = Instantiate(prefab, poolRoot);
+>             obj.name = $"{typeof(T).Name}_{totalCreated}";
+>             totalCreated++;
+>         }
+>         else
+>         {
+>             Debug.LogWarning($"[ObjectPool<{typeof(T).Name}>] Pool exhausted! " +
+>                 $"Active: {activeObjects.Count}, Max: {maxCapacity}");
+>             return null;
+>         }
+> 
+>         obj.gameObject.SetActive(true);
+>         activeObjects.Add(obj);
+>         return obj;
+>     }
+> 
+>     public void Return(T obj)
+>     {
+>         if (obj == null) return;
+>         obj.gameObject.SetActive(false);
+>         obj.transform.SetParent(poolRoot); // 回到池根（避免层级混乱）
+>         activeObjects.Remove(obj);
+>         pool.Enqueue(obj);
+>     }
+> 
+>     public void ReturnAll()
+>     {
+>         // 回收所有活跃对象（遍历时需倒序以避免修改集合异常）
+>         for (int i = activeObjects.Count - 1; i >= 0; i--)
+>             Return(activeObjects[i]);
+>     }
+> 
+>     void Update()
+>     {
+>         // Debug 模式下每 10 秒报告一次使用率
+> #if UNITY_EDITOR || DEVELOPMENT_BUILD
+>         if (Time.time - lastReportTime > 10f)
+>         {
+>             lastReportTime = Time.time;
+>             int total = activeObjects.Count + pool.Count;
+>             float usage = total > 0 ? (float)activeObjects.Count / total * 100f : 0f;
+>             Debug.Log($"[Pool<{typeof(T).Name}>] " +
+>                 $"Active: {activeObjects.Count}, Pooled: {pool.Count}, " +
+>                 $"Total: {total}, Usage: {usage:F1}%");
+>         }
+> #endif
+>     }
+> 
+>     // 便捷工厂方法
+>     public static ObjectPool<T> Create(GameObject owner, T prefab,
+>         int prewarm = 20, int max = 200)
+>     {
+>         var pool = owner.AddComponent<ObjectPool<T>>();
+>         // 用反射设置字段（因为 SerializeField 不能通过构造函数设置）
+>         var type = typeof(ObjectPool<T>);
+>         type.GetField("prefab",
+>             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+>             ?.SetValue(pool, prefab);
+>         type.GetField("prewarmCount",
+>             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+>             ?.SetValue(pool, prewarm);
+>         type.GetField("maxCapacity",
+>             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+>             ?.SetValue(pool, max);
+>         return pool;
+>     }
+> }
+> ```
+> 
+> **子弹系统测试示例**：
+> ```csharp
+> public class BulletShooter : MonoBehaviour
+> {
+>     private ObjectPool<Bullet> bulletPool;
+>     [SerializeField] private Bullet bulletPrefab;
+>     [SerializeField] private float fireRate = 100f; // 100 发/秒
+>     private float nextFireTime;
+> 
+>     void Start()
+>     {
+>         bulletPool = ObjectPool<Bullet>.Create(gameObject, bulletPrefab, 50, 500);
+>     }
+> 
+>     void Update()
+>     {
+>         if (Time.time >= nextFireTime)
+>         {
+>             nextFireTime = Time.time + 1f / fireRate;
+>             Bullet b = bulletPool.Get();
+>             if (b != null)
+>             {
+>                 b.transform.position = transform.position;
+>                 b.Fire(transform.forward);
+>                 // 子弹飞行 3 秒后自动回收（在 Bullet 类中处理）
+>                 StartCoroutine(ReturnAfterDelay(b, 3f));
+>             }
+>         }
+>     }
+> 
+>     System.Collections.IEnumerator ReturnAfterDelay(Bullet b, float delay)
+>     {
+>         yield return new WaitForSeconds(delay);
+>         bulletPool.Return(b);
+>     }
+> }
+> ```
+> 
+> **验收确认**：
+> - 发射 1000 发子弹 → Profiler 中 `GC.Alloc` = 0（对象池 + IEnumerator 用 yield return null 时仍有少量分配，可改用 `UniTask` 或手动计时器消除）
+> - Instance 计数：prewarm 50 + 峰值超出（最大活跃数）→ 稳定在 50 + 30 ≈ 80 个实例
+> - 关键：没有任何 `Instantiate` 或 `Destroy` 调用在热路径中
+
+> [!tip]- 练习 3 参考答案（挑战）
+> **性能陷阱自动化检测工具 — 核心代码框架**
+> 
+> ```csharp
+> #if UNITY_EDITOR
+> using UnityEngine;
+> using UnityEditor;
+> using System.Collections.Generic;
+> using System.IO;
+> using System.Linq;
+> using System.Text;
+> 
+> public class PerfTrapScanner : EditorWindow
+> {
+>     [MenuItem("Tools/Performance/Scan for Performance Traps")]
+>     public static void Scan()
+>     {
+>         var report = new StringBuilder();
+>         report.AppendLine("File,Class,Method,Issue,Line");
+> 
+>         // 获取所有场景中的 MonoBehaviour
+>         var allObjects = FindObjectsOfType<MonoBehaviour>(true);
+>         foreach (var mb in allObjects)
+>         {
+>             if (mb == null) continue;
+>             string className = mb.GetType().Name;
+>             string filePath = GetScriptPath(mb);
+> 
+>             // 1. 检测 OnGUI
+>             var onGUIMethod = mb.GetType().GetMethod("OnGUI",
+>                 System.Reflection.BindingFlags.Instance |
+>                 System.Reflection.BindingFlags.Public |
+>                 System.Reflection.BindingFlags.NonPublic);
+>             bool hasDeclaredOnGUI = onGUIMethod != null &&
+>                 onGUIMethod.DeclaringType == mb.GetType();
+>             if (hasDeclaredOnGUI)
+>             {
+>                 report.AppendLine($"{filePath},{className},OnGUI,OnGUI declared,0");
+>             }
+> 
+>             // 2. 检测 SendMessage / BroadcastMessage 使用
+>             // 通过分析 IL 或简单文本搜索源文件
+>             if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
+>             {
+>                 string source = File.ReadAllText(filePath);
+>                 int lineNum = 1;
+>                 foreach (var line in source.Split('\n'))
+>                 {
+>                     if (line.Contains("SendMessage") || line.Contains("BroadcastMessage"))
+>                     {
+>                         report.AppendLine($"{filePath},{className},?," +
+>                             $"SendMessage/BroadcastMessage,{lineNum}");
+>                     }
+>                     lineNum++;
+>                 }
+>             }
+>         }
+> 
+>         // 输出到 CSV 文件
+>         string outputPath = "Assets/PerfTrapReport.csv";
+>         File.WriteAllText(outputPath, report.ToString());
+>         Debug.Log($"Performance trap report saved to {outputPath}\n{report}");
+>         EditorUtility.RevealInFinder(outputPath);
+>     }
+> 
+>     // 通过 MonoScript 找到 .cs 文件路径
+>     private static string GetScriptPath(MonoBehaviour mb)
+>     {
+>         var monoScript = MonoScript.FromMonoBehaviour(mb);
+>         if (monoScript != null)
+>             return AssetDatabase.GetAssetPath(monoScript);
+>         return "";
+>     }
+> }
+> #endif
+> ```
+> 
+> **高级方案 — Mono.Cecil IL 分析**（更精确）：
+> ```csharp
+> #if UNITY_EDITOR
+> using Mono.Cecil;
+> using Mono.Cecil.Cil;
+> 
+> public class CilPerfAnalyzer
+> {
+>     [MenuItem("Tools/Performance/CIL Analysis for GetComponent in Update")]
+>     public static void AnalyzeIL()
+>     {
+>         string dllPath = "Library/ScriptAssemblies/Assembly-CSharp.dll";
+>         if (!File.Exists(dllPath)) { Debug.LogError("DLL not found. Build first."); return; }
+> 
+>         var assembly = AssemblyDefinition.ReadAssembly(dllPath);
+>         var report = new StringBuilder();
+>         report.AppendLine("Class,Method,Issue");
+> 
+>         foreach (var type in assembly.MainModule.Types)
+>         {
+>             foreach (var method in type.Methods)
+>             {
+>                 // 检测 Update/FixedUpdate/LateUpdate 方法
+>                 if (method.Name != "Update" &&
+>                     method.Name != "FixedUpdate" &&
+>                     method.Name != "LateUpdate") continue;
+>                 if (!method.HasBody) continue;
+> 
+>                 foreach (var instruction in method.Body.Instructions)
+>                 {
+>                     if (instruction.OpCode == OpCodes.Call ||
+>                         instruction.OpCode == OpCodes.Callvirt)
+>                     {
+>                         var calledMethod = instruction.Operand as MethodReference;
+>                         if (calledMethod != null &&
+>                             calledMethod.Name == "GetComponent")
+>                         {
+>                             report.AppendLine($"{type.Name},{method.Name}," +
+>                                 $"GetComponent in {method.Name}");
+>                             break; // 每个方法只报告一次
+>                         }
+>                     }
+>                 }
+>             }
+>         }
+> 
+>         Debug.Log(report.ToString());
+>     }
+> }
+> #endif
+> ```
+> 
+> **检测能力对比**：
+> 
+> | 方法 | GetComponent | Debug.Log | SendMessage | OnGUI | 字符串分配 |
+> |------|-------------|-----------|-------------|-------|-----------|
+> | 文本搜索 | ✓ | ✓ | ✓ | ✓ | ✓ |
+> | CIL 分析 | ✓（精确） | ✓（精确） | ✓（精确） | ✗（是方法名，不是调用） | ✗（需数据流分析） |
+> | Roslyn 分析 | ✓✓（含语义） | ✓✓ | ✓✓ | ✓✓ | ✓✓ |
+> 
+> **推荐实践**：
+> - 快速扫描：文本搜索（Ctrl+Shift+F 手动，或本工具自动化）
+> - 精确分析：CIL 分析确认热路径中的调用
+> - CI 集成：将 CIL 分析脚本添加到构建后步骤，发现新增反模式时发出警告
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

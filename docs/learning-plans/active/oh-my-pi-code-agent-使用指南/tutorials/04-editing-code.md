@@ -165,6 +165,87 @@ OMP 会展示精确的 diff 预览，让你确认修改内容。
 2. 手动构造一个 hashline 编辑请求（在 OMP 提示符中直接粘贴 patch）
 3. 故意写一个错误的锚点，观察 OMP 如何报错
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在一个 TypeScript 文件中执行单文件修改：
+>
+> ```text
+> 1. "把 TITLE 常量重命名为 PREFIX"
+>    → OMP 会先 read 目标文件获取锚点
+>    → 然后使用 edit 精确替换变量定义行
+>    → 如果该变量在文件中还有其他引用，可能还会替换引用行
+>
+> 2. "在 greet 函数之前插入一个新函数 formatName"
+>    → OMP 会用 read 定位 greet 函数所在行
+>    → 使用 edit: «ANCHOR 插入 formatName 的定义
+>    → 插入后文件行号整体偏移，但锚点哈希确保精确定位
+>
+> 3. "删除第 4 行到第 6 行的注释块"
+>    → OMP 先用 read 确认目标行的内容和锚点
+>    → 使用 edit: ≔A..B（无 body）删除该范围
+> ```
+>
+> **观察要点：**
+> - OMP 的每次编辑都是"读锚点 → 编辑"两步操作，锚点保证安全性
+> - 改名操作 OMP 可能只用 `edit`，也可能同时用 `search` 找到所有引用再逐一编辑
+> - 删除后文件长度变化，后续编辑不受影响——锚点基于哈希而非行号
+
+> [!tip]- 练习 2 参考答案
+> 跨文件重构工作流：
+>
+> ```text
+> 1. 创建模块（3 个文件）：
+>    - src/math/operations.ts  (导出 add, subtract)
+>    - src/math/advanced.ts    (导入并使用 add)
+>    - src/app.ts              (导入并使用 add, subtract)
+>
+> 2. "把 operations.ts 中的 add 函数重命名为 sum"
+>    → OMP 会：
+>      a. read src/math/operations.ts 获取锚点
+>      b. search "add" 在 src/ 下找到所有引用
+>      c. 发现 src/math/advanced.ts 和 src/app.ts 使用了 add
+>      d. read 这两个文件获取锚点
+>      e. edit: 在 3 个文件中分别替换 add → sum
+>
+> 3. 观察 OMP 的工具调用序列：
+>    → [read] operations.ts → 获取原始锚点
+>    → [search] pattern="add" paths=["src/**/*.ts"] → 发现调用点
+>    → [read] advanced.ts → 获取锚点
+>    → [read] app.ts → 获取锚点
+>    → [edit] 多文件编辑（一次调用包含多个 § 文件段）
+> ```
+>
+> **关键观察：** OMP 能感知"函数重命名需要更新 import"。它通过 search 找到所有引用位置，通过 read 获取每个文件的锚点，最后在单个 edit 调用中完成所有修改。对比 LSP rename（练习 6 的主题），这个过程的差异在于：OMP 基于文本匹配而非语义理解——它可能误伤注释或字符串中的同名文本。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 手动构造 hashline 编辑：
+>
+> ```text
+> 1. read src/test.ts:raw
+>    → 观察输出，每行格式为 LINEhh|TEXT，如：
+>      1df|const TITLE = "Mr";
+>      2ej|export function greet(name) {
+>
+> 2. 在 OMP 提示符中直接粘贴 patch：
+>    §src/test.ts
+>    ≔1df
+>    const TITLE = "Ms";
+>
+> 3. 故意写一个错误锚点：
+>    §src/test.ts
+>    ≔XXXX    ← 不存在的锚点
+>    const TITLE = "Mx";
+>
+>    → OMP 报错："Hashline anchor not found: XXXX"
+>    → 或 "File content changed since last read"
+> ```
+>
+> **思考题答案：** Hashline 锚点是内容哈希，不是行号。只要行的内容不变，即使行号因前面的插入/删除而偏移，锚点仍然匹配。双层安全体现在：(1) 编辑时 OMP 重新哈希目标行并与锚点比对——不匹配就拒绝；(2) 如果文件被外部工具修改了，OMP 能从 read 缓存恢复旧版本做 3-way merge，而不是用旧锚点去改新文件。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

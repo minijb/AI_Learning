@@ -879,6 +879,535 @@ public class UnityNavMeshPathfinder : MonoBehaviour
 
 **目标**: 将 Detour 的 minimial-path 转换为适合 game agent 运动的平滑轨道。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 创建 3×3 Cube 场景并运行时烘焙 NavMesh：
+>
+> ```csharp
+> // CubeNavMeshDemo.cs — 运行时生成 3×3 Cube 网格并烘焙 NavMesh
+> // 挂在空 GameObject 上即可运行
+> using UnityEngine;
+> using System.Collections.Generic;
+>
+> public class CubeNavMeshDemo : MonoBehaviour
+> {
+>     [Header("Grid Settings")]
+>     public int gridSize = 3;        // 3×3
+>     public float spacing = 2.0f;   // Cube 间距
+>     public float cubeSize = 1.0f;  // Cube 边长
+>
+>     [Header("Bake Settings")]
+>     public RecastUnity.RecastBakeConfig bakeConfig = RecastUnity.RecastBakeConfig.Default;
+>
+>     [Header("Visualization")]
+>     public bool showNavMeshGizmos = true;
+>     public bool showTestPath = true;
+>
+>     private byte[] navMeshData;
+>     private bool navMeshReady = false;
+>     private Vector3[] lastPath;
+>
+>     void Start()
+>     {
+>         GenerateCubes();
+>         BakeNavMeshFromScene();
+>         if (navMeshReady && showTestPath)
+>             lastPath = RecastUnity.RecastBridge.FindPath(
+>                 GetCubeCenter(0, 0), GetCubeCenter(gridSize - 1, gridSize - 1));
+>     }
+>
+>     void GenerateCubes()
+>     {
+>         float offset = (gridSize - 1) * spacing * 0.5f;
+>
+>         for (int z = 0; z < gridSize; ++z)
+>         {
+>             for (int x = 0; x < gridSize; ++x)
+>             {
+>                 GameObject cube = GameObject.CreatePrimitive(PrimitiveType.Cube);
+>                 cube.name = $"Cube_{x}_{z}";
+>                 cube.transform.SetParent(transform);
+>                 cube.transform.position = new Vector3(
+>                     x * spacing - offset, 0, z * spacing - offset);
+>                 cube.transform.localScale = Vector3.one * cubeSize;
+>                 // 确保有 MeshFilter（CreatePrimitive 自带）
+>             }
+>         }
+>     }
+>
+>     void BakeNavMeshFromScene()
+>     {
+>         // 复用 RecastNavMeshBaker 的几何体收集逻辑
+>         // 或直接在此收集所有子 Cube 的 Mesh
+>         var allVerts = new List<Vector3>();
+>         var allTris = new List<int>();
+>         int vertOffset = 0;
+>
+>         foreach (var mf in GetComponentsInChildren<MeshFilter>())
+>         {
+>             if (mf.sharedMesh == null) continue;
+>             Matrix4x4 l2w = mf.transform.localToWorldMatrix;
+>             // 只收集 Cube 顶部面（Y-up 平面）用于 NavMesh
+>             // 但更简单的做法是收集所有顶点，让 Recast 的 walkable 过滤处理
+>             Vector3[] verts = mf.sharedMesh.vertices;
+>             int[] tris = mf.sharedMesh.triangles;
+>
+>             foreach (var v in verts)
+>                 allVerts.Add(l2w.MultiplyPoint3x4(v));
+>             foreach (var t in tris)
+>                 allTris.Add(t + vertOffset);
+>             vertOffset += verts.Length;
+>         }
+>
+>         Debug.Log($"Collecting geometry: {allVerts.Count} verts, {allTris.Count / 3} tris");
+>
+>         // 调用 Recast 烘焙
+>         navMeshData = RecastUnity.RecastBridge.BakeNavMesh(
+>             allVerts.ToArray(), allTris.ToArray(), bakeConfig);
+>
+>         if (navMeshData != null)
+>         {
+>             navMeshReady = RecastUnity.RecastBridge.InitDetour(navMeshData);
+>             Debug.Log(navMeshReady
+>                 ? $"NavMesh baked: {navMeshData.Length} bytes"
+>                 : "Detour init failed");
+>         }
+>     }
+>
+>     Vector3 GetCubeCenter(int x, int z)
+>     {
+>         float offset = (gridSize - 1) * spacing * 0.5f;
+>         return new Vector3(x * spacing - offset, cubeSize * 0.5f,
+>                            z * spacing - offset);
+>     }
+>
+>     void OnDrawGizmos()
+>     {
+>         if (!showNavMeshGizmos || !navMeshReady) return;
+>
+>         // 绘制测试路径
+>         if (lastPath != null && lastPath.Length > 1)
+>         {
+>             Gizmos.color = Color.cyan;
+>             for (int i = 0; i < lastPath.Length - 1; ++i)
+>                 Gizmos.DrawLine(lastPath[i], lastPath[i + 1]);
+>
+>             // 在每个拐点处画小球
+>             Gizmos.color = Color.yellow;
+>             foreach (var p in lastPath)
+>                 Gizmos.DrawSphere(p, 0.15f);
+>
+>             Gizmos.color = Color.green;
+>             Gizmos.DrawSphere(lastPath[0], 0.3f);
+>             Gizmos.color = Color.red;
+>             Gizmos.DrawSphere(lastPath[^1], 0.3f);
+>         }
+>
+>         // 绘制 Cube 间隙的不可通行区域（红色半透明方框）
+>         float offset = (gridSize - 1) * spacing * 0.5f;
+>         Gizmos.color = new Color(1, 0, 0, 0.3f);
+>         for (int z = 0; z < gridSize - 1; ++z)
+>         {
+>             for (int x = 0; x < gridSize - 1; ++x)
+>             {
+>                 Vector3 center = new Vector3(
+>                     x * spacing - offset + spacing * 0.5f,
+>                     0,
+>                     z * spacing - offset + spacing * 0.5f);
+>                 Gizmos.DrawWireCube(center,
+>                     new Vector3(spacing - cubeSize, 0.1f, spacing - cubeSize));
+>             }
+>         }
+>     }
+>
+>     void OnDestroy()
+>     {
+>         RecastUnity.RecastBridge.Cleanup();
+>     }
+> }
+> ```
+>
+> **关键点**：Cube 之间的间隙（间距 > cubeSize 时）不会被 Recast 体素化，因为那里没有几何体表面。Recast 只在实际有三角形的区域生成 walkable span。间隙自动成为不可通行区域。如果想测试 Cube 间隙是否被正确标记，可以尝试设置路径从 Cube A 到 Cube C（中间隔了一个 Cube B）——路径应该绕过间隙而不是跳过去（因为 agent 的 `agentRadius` 限制）。
+
+> [!tip]- 练习 2 参考答案
+> 实现逐帧路径重规划 + 动态障碍检测：
+>
+> ```csharp
+> // DynamicPathAgent.cs — 使用 Detour 寻路 + raycast 检测 + 动态重规划
+> using UnityEngine;
+> using System.Collections;
+> using System.Collections.Generic;
+>
+> public class DynamicPathAgent : MonoBehaviour
+> {
+>     [Header("Movement")]
+>     public float speed = 5.0f;
+>     public float waypointThreshold = 0.5f;  // 距目标点多远算"到达"
+>
+>     [Header("Detection")]
+>     public float raycastCheckInterval = 0.5f; // 射线检测间隔
+>     public float raycastLookAhead = 5.0f;     // 前瞻距离
+>
+>     private Vector3[] currentPath;
+>     private int currentWaypointIndex = 0;
+>     private float lastRaycastTime = 0f;
+>     private bool needsReplan = false;
+>
+>     // 动态障碍物列表（通过 OnTriggerEnter/Exit 维护）
+>     private HashSet<Collider> nearbyObstacles = new HashSet<Collider>();
+>
+>     public void SetDestination(Vector3 target)
+>     {
+>         currentPath = RecastUnity.RecastBridge.FindPath(transform.position, target);
+>         currentWaypointIndex = 0;
+>         needsReplan = false;
+>
+>         if (currentPath.Length == 0)
+>             Debug.LogWarning("No path found to target!");
+>         else
+>             Debug.Log($"Path found: {currentPath.Length} waypoints");
+>     }
+>
+>     void Update()
+>     {
+>         if (currentPath == null || currentPath.Length == 0) return;
+>         if (currentWaypointIndex >= currentPath.Length) return;
+>
+>         // ---- 射线检测前方是否有新障碍 ----
+>         if (Time.time - lastRaycastTime > raycastCheckInterval)
+>         {
+>             lastRaycastTime = Time.time;
+>             CheckPathAhead();
+>         }
+>
+>         // ---- 如果需要重规划 ----
+>         if (needsReplan)
+>         {
+>             Vector3 target = currentPath[^1]; // 原始目标
+>             SetDestination(target);
+>             return;
+>         }
+>
+>         // ---- 沿路径移动 ----
+>         Vector3 targetWaypoint = currentPath[currentWaypointIndex];
+>         Vector3 direction = (targetWaypoint - transform.position).normalized;
+>         transform.position += direction * speed * Time.deltaTime;
+>
+>         // 面向移动方向
+>         if (direction != Vector3.zero)
+>             transform.rotation = Quaternion.LookRotation(direction);
+>
+>         // 到达 waypoint → 前进到下一个
+>         if (Vector3.Distance(transform.position, targetWaypoint) < waypointThreshold)
+>         {
+>             currentWaypointIndex++;
+>             if (currentWaypointIndex >= currentPath.Length)
+>                 Debug.Log("Destination reached!");
+>         }
+>     }
+>
+>     void CheckPathAhead()
+>     {
+>         if (currentPath == null || currentWaypointIndex >= currentPath.Length)
+>             return;
+>
+>         // 沿当前路径方向做 raycast
+>         Vector3 from = transform.position;
+>         int lookIdx = Mathf.Min(currentWaypointIndex + 3, currentPath.Length - 1);
+>         Vector3 to = currentPath[lookIdx];
+>         Vector3 dir = (to - from).normalized;
+>         Vector3 rayEnd = from + dir * raycastLookAhead;
+>
+>         float hitTime;
+>         Vector3 hitNormal;
+>         bool blocked = RecastUnity.RecastBridge.Raycast(from, rayEnd,
+>                                                          out hitTime, out hitNormal);
+>
+>         if (blocked && hitTime < 1.0f)
+>         {
+>             Vector3 hitPoint = from + (rayEnd - from) * hitTime;
+>             Debug.Log($"Path blocked at {hitPoint} (hitTime={hitTime:F2}) — replanning");
+>             needsReplan = true;
+>         }
+>
+>         // 也检查 Unity 物理障碍（通过 OnTriggerEnter 收集的）
+>         foreach (var col in nearbyObstacles)
+>         {
+>             if (col == null) continue;
+>             Vector3 closestPoint = col.ClosestPoint(transform.position);
+>             float dist = Vector3.Distance(transform.position, closestPoint);
+>             if (dist < raycastLookAhead)
+>             {
+>                 // 检查障碍物是否在路径方向的锥形区域中
+>                 Vector3 toClosest = (closestPoint - transform.position).normalized;
+>                 float dot = Vector3.Dot(dir, toClosest);
+>                 if (dot > 0.5f) // 在前进方向 ±60° 内
+>                 {
+>                     Debug.Log($"Dynamic obstacle ahead: {col.name} — replanning");
+>                     needsReplan = true;
+>                     break;
+>                 }
+>             }
+>         }
+>     }
+>
+>     void OnTriggerEnter(Collider other)
+>     {
+>         if (other.CompareTag("DynamicObstacle"))
+>             nearbyObstacles.Add(other);
+>     }
+>
+>     void OnTriggerExit(Collider other)
+>     {
+>         nearbyObstacles.Remove(other);
+>     }
+>
+>     void OnDrawGizmos()
+>     {
+>         if (currentPath == null) return;
+>
+>         // 绘制剩余路径
+>         Gizmos.color = Color.cyan;
+>         for (int i = currentWaypointIndex; i < currentPath.Length - 1; ++i)
+>             Gizmos.DrawLine(currentPath[i], currentPath[i + 1]);
+>
+>         // 绘制前瞻射线
+>         if (currentWaypointIndex < currentPath.Length)
+>         {
+>             Gizmos.color = Color.yellow;
+>             Vector3 from = transform.position;
+>             int lookIdx = Mathf.Min(currentWaypointIndex + 3, currentPath.Length - 1);
+>             Gizmos.DrawRay(from, (currentPath[lookIdx] - from).normalized * raycastLookAhead);
+>         }
+>     }
+> }
+> ```
+>
+> **关键点**：
+> - `detour_raycast` 检测路径是否被 NavMesh 边界阻挡（如 tile 边界、新烘焙的障碍区）
+> - Unity 的 `OnTriggerEnter` 检测 Unity 层面的动态障碍（如移动的箱子）
+> - 两者配合：NavMesh 级别障碍用 Detour raycast，物理级别障碍用 Unity 碰撞检测
+> - 重规划频率需要节流（`raycastCheckInterval`），避免每帧都重新 `findPath`
+> - 生产环境中，通常在 `dtCrowd::update` 内部自动处理局部避障，而不需要手动 raycast 触发重规划
+
+> [!tip]- 练习 3 参考答案（可选）
+> 路径拐点可视化 + Catmull-Rom 样条平滑：
+>
+> ```csharp
+> // PathSmoother.cs — 对 Detour 路径做 Catmull-Rom 插值 + NavMesh 验证
+> using UnityEngine;
+> using System.Collections.Generic;
+>
+> public class PathSmoother : MonoBehaviour
+> {
+>     [Header("Smooth Settings")]
+>     [Range(2, 20)] public int subdivisionsPerSegment = 8;
+>     [Range(0f, 1f)] public float alpha = 0.5f; // Catmull-Rom 张力参数
+>
+>     [Header("Validation")]
+>     public bool validateOnNavMesh = true;
+>     public float validationSearchRadius = 2.0f;
+>
+>     [Header("Visualization")]
+>     public Color cornerColor = Color.yellow;
+>     public float cornerSize = 0.3f;
+>     public Color rawPathColor = Color.gray;
+>     public Color smoothPathColor = Color.cyan;
+>     public Color invalidSegmentColor = Color.red;
+>
+>     /// <summary>
+>     /// 获取原始路径拐点（在拐点处放置 Gizmo Sphere）
+>     /// </summary>
+>     public void DrawCorners(Vector3[] path)
+>     {
+>         if (path == null || path.Length < 2) return;
+>
+>         Gizmos.color = cornerColor;
+>         for (int i = 1; i < path.Length - 1; ++i) // 跳过首尾（起点/终点）
+>         {
+>             Gizmos.DrawSphere(path[i], cornerSize);
+>         }
+>     }
+>
+>     /// <summary>
+>     /// Catmull-Rom 样条插值
+>     /// 对每对相邻路径点之间的段进行细分
+>     /// </summary>
+>     public Vector3[] SmoothPath(Vector3[] rawPath)
+>     {
+>         if (rawPath == null || rawPath.Length < 2)
+>             return rawPath;
+>
+>         int segmentCount = rawPath.Length - 1;
+>         var smooth = new List<Vector3>();
+>
+>         for (int i = 0; i < segmentCount; ++i)
+>         {
+>             // Catmull-Rom 需要 4 个控制点: P(i-1), P(i), P(i+1), P(i+2)
+>             Vector3 p0 = rawPath[Mathf.Max(i - 1, 0)];
+>             Vector3 p1 = rawPath[i];
+>             Vector3 p2 = rawPath[Mathf.Min(i + 1, rawPath.Length - 1)];
+>             Vector3 p3 = rawPath[Mathf.Min(i + 2, rawPath.Length - 1)];
+>
+>             // 边界处理：如果是首段，p0 = p1（或镜像）
+>             if (i == 0) p0 = p1 + (p1 - p2); // 反射
+>             // 如果是末段，p3 = p2 + (p2 - p1)
+>             if (i == segmentCount - 1) p3 = p2 + (p2 - p1);
+>
+>             for (int s = 0; s < subdivisionsPerSegment; ++s)
+>             {
+>                 float t = s / (float)subdivisionsPerSegment;
+>                 smooth.Add(CatmullRom(p0, p1, p2, p3, t, alpha));
+>             }
+>         }
+>
+>         // 添加终点
+>         smooth.Add(rawPath[^1]);
+>
+>         return smooth.ToArray();
+>     }
+>
+>     /// <summary>
+>     /// 标准 Catmull-Rom 公式
+>     /// </summary>
+>     Vector3 CatmullRom(Vector3 p0, Vector3 p1, Vector3 p2, Vector3 p3,
+>                         float t, float alpha)
+>     {
+>         // 使用 centripetal Catmull-Rom（alpha=0.5）
+>         // 比 uniform (alpha=0) 更平滑，比 chordal (alpha=1) 更自然
+>         float t0 = 0f;
+>         float t1 = GetT(t0, p0, p1, alpha);
+>         float t2 = GetT(t1, p1, p2, alpha);
+>         float t3 = GetT(t2, p2, p3, alpha);
+>
+>         float tt = Mathf.Lerp(t1, t2, t);
+>
+>         Vector3 a1 = (t1 - tt) / (t1 - t0) * p0 + (tt - t0) / (t1 - t0) * p1;
+>         Vector3 a2 = (t2 - tt) / (t2 - t1) * p1 + (tt - t1) / (t2 - t1) * p2;
+>         Vector3 a3 = (t3 - tt) / (t3 - t2) * p2 + (tt - t2) / (t3 - t2) * p3;
+>
+>         Vector3 b1 = (t2 - tt) / (t2 - t0) * a1 + (tt - t0) / (t2 - t0) * a2;
+>         Vector3 b2 = (t3 - tt) / (t3 - t1) * a2 + (tt - t1) / (t3 - t1) * a3;
+>
+>         return (t2 - tt) / (t2 - t1) * b1 + (tt - t1) / (t2 - t1) * b2;
+>     }
+>
+>     float GetT(float tPrev, Vector3 p0, Vector3 p1, float alpha)
+>     {
+>         float dist = Vector3.Distance(p0, p1);
+>         return tPrev + Mathf.Pow(dist, alpha);
+>     }
+>
+>     /// <summary>
+>     /// 验证平滑后的路径点是否仍在 NavMesh 上
+>     /// 通过检查每个点到最近 poly 的距离是否在范围内
+>     /// </summary>
+>     public List<Vector3> ValidatePath(Vector3[] smoothPath)
+>     {
+>         if (!validateOnNavMesh) return new List<Vector3>(smoothPath);
+>
+>         var valid = new List<Vector3>();
+>         bool inInvalidSegment = false;
+>
+>         for (int i = 0; i < smoothPath.Length; ++i)
+>         {
+>             // 用 Detour 的路径查询验证：尝试从该点到自身 findPath
+>             // 如果该点对应的 poly ref 为 0（不在 NavMesh 上），则回退
+>             var testPath = RecastUnity.RecastBridge.FindPath(
+>                 smoothPath[i], smoothPath[i], maxPoints: 2);
+>
+>             if (testPath.Length > 0)
+>             {
+>                 // 该点在 NavMesh 上
+>                 valid.Add(smoothPath[i]);
+>                 inInvalidSegment = false;
+>             }
+>             else
+>             {
+>                 // 不在 NavMesh 上 → 回退到上一个有效拐点
+>                 if (!inInvalidSegment && valid.Count > 0)
+>                 {
+>                     inInvalidSegment = true;
+>                     Debug.Log($"Smooth point [{i}] off NavMesh — "
+>                              + $"clamping to last valid corner {valid[^1]}");
+>                 }
+>                 // 跳过该点
+>             }
+>         }
+>         return valid;
+>     }
+>
+>     /// <summary>
+>     /// 完整流程：原始路径 → 平滑 → 验证
+>     /// </summary>
+>     public Vector3[] ProcessPath(Vector3[] rawPath)
+>     {
+>         var smooth = SmoothPath(rawPath);
+>         var valid = ValidatePath(smooth);
+>         return valid.ToArray();
+>     }
+>
+>     // ---- Gizmos 绘制 ----
+>     public void DrawFullGizmos(Vector3[] rawPath, Vector3[] processed)
+>     {
+>         // 原始路径
+>         if (rawPath != null && rawPath.Length > 1)
+>         {
+>             Gizmos.color = rawPathColor;
+>             for (int i = 0; i < rawPath.Length - 1; ++i)
+>                 Gizmos.DrawLine(rawPath[i], rawPath[i + 1]);
+>         }
+>
+>         // 拐点球
+>         DrawCorners(rawPath);
+>
+>         // 平滑后路径
+>         if (processed != null && processed.Length > 1)
+>         {
+>             Gizmos.color = smoothPathColor;
+>             for (int i = 0; i < processed.Length - 1; ++i)
+>                 Gizmos.DrawLine(processed[i], processed[i + 1]);
+>         }
+>     }
+> }
+>
+> // ============================================================
+> // 使用示例：挂到 RecastNavMeshBaker 所在的 GameObject 上
+> // ============================================================
+> // [RequireComponent(typeof(RecastNavMeshBaker))]
+> // public class PathSmoothDemo : MonoBehaviour
+> // {
+> //     private PathSmoother smoother;
+> //     private Vector3[] rawPath;
+> //     private Vector3[] smoothPath;
+> //
+> //     void Start()
+> //     {
+> //         smoother = GetComponent<PathSmoother>();
+> //         rawPath = RecastUnity.RecastBridge.FindPath(
+> //             Vector3.zero, new Vector3(18, 0, 18));
+> //         smoothPath = smoother.ProcessPath(rawPath);
+> //     }
+> //
+> //     void OnDrawGizmos()
+> //     {
+> //         if (smoother != null)
+> //             smoother.DrawFullGizmos(rawPath, smoothPath);
+> //     }
+> // }
+> ```
+>
+> **关键点**：
+> - **Centripetal Catmull-Rom** (alpha=0.5)：比 uniform 版本更平滑自然，不会在长段和短段交界处产生"打结"（因为参数化基于距离的平方根而非均匀 t）
+> - **NavMesh 验证**是平滑的难点：平滑曲线可能会"切角"穿出 NavMesh。解决方案：对每个平滑点用 `findPath` 检验（如果该点到自身的路径有效 → 在 NavMesh 上），不在 NavMesh 上的段用上一个有效拐点替代
+> - 也可以反过来做：先用漏斗算法获得最小拐点路径，再用 Catmull-Rom 平滑漏斗路径，这样平滑偏离 NavMesh 的概率更低
+> - 生产环境通常用 steering（`dtCrowd` 的 moveTarget）而非样条插值来平滑运动，因为 steering 考虑了 agent 的物理约束（加速度、转弯半径）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。Unity 端的代码需要 `RecastBridge.cs`（教程中的 P/Invoke wrapper）和编译好的 native plugin 才能实际运行。没有 native plugin 时，可以用 `UnityEngine.AI.NavMesh` 的等效 API 做概念验证。
+
 ## 4. 扩展阅读
 
 - **Unity Native Plugin 文档**: `docs.unity3d.com/Manual/NativePlugins.html` — 官方 P/Invoke 和 Native Plugin 指南

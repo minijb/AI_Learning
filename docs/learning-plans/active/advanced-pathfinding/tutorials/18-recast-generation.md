@@ -1079,6 +1079,374 @@ g++ -std=c++17 -O2 -I recastnavigation/Recast/Include \
 
 **目标**: 理解为什么 Watershed 产生"更自然"的区域边界——agent 在凹陷区域内部有自然行走路径，而不是随机切断。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 调整 `cellSize` 并统计各阶段输出：
+>
+> ```cpp
+> // 在 main() 中添加参数化测试函数
+> struct BakeStats {
+>     float cellSize;
+>     int gridW, gridH;
+>     int totalSpans, walkableSpans;
+>     int regions;
+>     int contours;
+>     int polys, verts;
+> };
+>
+> BakeStats bakeWithCellSize(float cellSize, const std::vector<Triangle>& tris) {
+>     RecastConfig cfg;
+>     cfg.cellSize = cellSize;
+>     // cellHeight 也等比缩放以保持体素形状
+>     cfg.cellHeight = cellSize * 0.67f;
+>
+>     Heightfield hf;
+>     hf.bmin = {0, -1, 0};
+>     hf.bmax = {10, 5, 10};
+>     hf.cs = cfg.cellSize;
+>     hf.ch = cfg.cellHeight;
+>     hf.width  = (int)((hf.bmax.x - hf.bmin.x) / hf.cs) + 1;
+>     hf.height = (int)((hf.bmax.z - hf.bmin.z) / hf.cs) + 1;
+>     hf.spans = new Span*[hf.width * hf.height]();
+>
+>     for (auto& tri : tris) rasterizeTriangle(hf, tri);
+>
+>     int totalSpans = 0, walkableSpans = 0;
+>     for (int i = 0; i < hf.width*hf.height; ++i) {
+>         Span* s = hf.spans[i];
+>         while (s) { totalSpans++; s = s->next; }
+>     }
+>
+>     filterWalkableSurfaces(hf, cfg);
+>     for (int i = 0; i < hf.width*hf.height; ++i) {
+>         Span* s = hf.spans[i];
+>         while (s) { if (s->area != 0) walkableSpans++; s = s->next; }
+>     }
+>
+>     HeightfieldRegion regs = buildRegions(hf);
+>     auto contours = traceContours(hf, regs, cfg);
+>     PolyMesh mesh = buildPolyMesh(contours, hf);
+>
+>     BakeStats stats = {cellSize, hf.width, hf.height,
+>                        totalSpans, walkableSpans,
+>                        regs.maxRegions, (int)contours.size(),
+>                        (int)mesh.polys.size(), (int)mesh.verts.size()};
+>
+>     // 清理
+>     for (int i = 0; i < hf.width*hf.height; ++i) {
+>         Span* s = hf.spans[i];
+>         while (s) { Span* n = s->next; delete s; s = n; }
+>     }
+>     delete[] hf.spans;
+>     delete[] regs.regionIds;
+>     return stats;
+> }
+>
+> // 在 main() 末尾添加对比
+> std::cout << "\n=== cellSize 参数对比 ===\n";
+> std::cout << std::left
+>           << std::setw(10) << "cellSize"
+>           << std::setw(12) << "Grid (W×H)"
+>           << std::setw(14) << "Total Spans"
+>           << std::setw(16) << "Walkable Spans"
+>           << std::setw(10) << "Regions"
+>           << std::setw(10) << "Contours"
+>           << std::setw(10) << "Polys"
+>           << std::setw(10) << "Verts\n";
+>
+> for (float cs : {0.1f, 0.3f, 1.0f}) {
+>     auto s = bakeWithCellSize(cs, inputTris);
+>     std::cout << std::setw(10) << s.cellSize
+>               << std::setw(12) << (std::to_string(s.gridW)+"×"+std::to_string(s.gridH))
+>               << std::setw(14) << s.totalSpans
+>               << std::setw(16) << s.walkableSpans
+>               << std::setw(10) << s.regions
+>               << std::setw(10) << s.contours
+>               << std::setw(10) << s.polys
+>               << std::setw(10) << s.verts << "\n";
+> }
+> ```
+>
+> **预期结果**：
+>
+> | cellSize | 格网 (W×H) | 总Span数 | 区域 | 多边形 |
+> |----------|-----------|---------|------|--------|
+> | 0.1m | ~100×160 | ~4000+ | 5-8（细节多） | 20-40 |
+> | 0.3m | ~34×54  | ~500   | 3-5 | 10-15 |
+> | 1.0m | ~11×17  | ~50    | 1-2（合并了细节） | 3-6 |
+>
+> **关键洞察**：cellSize 小 → 体素数量增长 O(1/cellSize²)，spans 数、区域数、最终多边形数都随之增长。小 cellSize 能保留细小的地形特征（如小台阶），但也产生更多的 NavMesh 多边形——增加寻路时的节点扩展数。生产环境典型值 0.2-0.3m。
+
+> [!tip]- 练习 2 参考答案
+> 在 `traceContours()` 中实现 Douglas-Peucker 简化：
+>
+> ```cpp
+> // ============================================================
+> // Douglas-Peucker 递归简化
+> // ============================================================
+> // 返回点 p 到直线 (a,b) 的垂直距离（2D 投影）
+> float perpendicularDist(const std::pair<float,float>& a,
+>                          const std::pair<float,float>& b,
+>                          const std::pair<float,float>& p) {
+>     float dx = b.first  - a.first;
+>     float dy = b.second - a.second;
+>     if (std::abs(dx) < 1e-6f && std::abs(dy) < 1e-6f)
+>         return std::hypot(p.first-a.first, p.second-a.second);
+>     // 面积公式：|cross(AB, AP)| / |AB|
+>     float cross = dx*(p.second - a.second) - dy*(p.first - a.first);
+>     return std::abs(cross) / std::hypot(dx, dy);
+> }
+>
+> void douglasPeucker(const std::vector<std::pair<float,float>>& verts,
+>                     int lo, int hi, float epsilon,
+>                     std::vector<std::pair<float,float>>& result) {
+>     // 找距离最大点
+>     float maxDist = 0;
+>     int maxIdx = lo;
+>     for (int i = lo + 1; i < hi; ++i) {
+>         float d = perpendicularDist(verts[lo], verts[hi], verts[i]);
+>         if (d > maxDist) { maxDist = d; maxIdx = i; }
+>     }
+>
+>     if (maxDist > epsilon) {
+>         // 递归简化两侧
+>         douglasPeucker(verts, lo, maxIdx, epsilon, result);
+>         douglasPeucker(verts, maxIdx, hi, epsilon, result);
+>     } else {
+>         // 此段可以用线段 (lo,hi) 近似
+>         result.push_back(verts[lo]);
+>         // 不 push hi——由下一段的 lo 或最终调用 push
+>     }
+> }
+>
+> std::vector<std::pair<float,float>> simplifyContour(
+>     const std::vector<std::pair<float,float>>& rawVerts,
+>     float epsilon) {
+>     if (rawVerts.size() <= 3) return rawVerts;
+>
+>     std::vector<std::pair<float,float>> result;
+>     douglasPeucker(rawVerts, 0, (int)rawVerts.size() - 1, epsilon, result);
+>     result.push_back(rawVerts.back()); // 闭合
+>     return result;
+> }
+> ```
+>
+> **修改 `traceContours`**（在按角度排序后插入简化步骤）：
+>
+> ```cpp
+> // 在 push_back(c) 之前（原 L542-552 区域），替换为：
+> if (c.verts.size() > 3) {
+>     // 1. 先按角度排序获得有序轮廓
+>     float cx = 0, cz = 0;
+>     for (auto& v : c.verts) { cx += v.first; cz += v.second; }
+>     cx /= c.verts.size(); cz /= c.verts.size();
+>     std::sort(c.verts.begin(), c.verts.end(),
+>         [cx, cz](auto& a, auto& b) {
+>             return std::atan2(a.second-cz, a.first-cx)
+>                  < std::atan2(b.second-cz, b.first-cx);
+>         });
+>
+>     // 2. Douglas-Peucker 简化
+>     int before = (int)c.verts.size();
+>     c.verts = simplifyContour(c.verts, cfg.maxSimplificationError);
+>     std::cout << "  Region " << r << ": " << before
+>               << " verts → " << c.verts.size() << " verts"
+>               << " (ε=" << cfg.maxSimplificationError << ")\n";
+> }
+> if (c.verts.size() >= 3) contours.push_back(c);
+> ```
+>
+> **效果分析**：
+> - ε=0：不简化，顶点数 = rawVerts.size()
+> - ε=0.5：去除共线顶点，减少 20-40%
+> - ε=2.0：激进简化，减少 50-80%，但轮廓变形（可能产生穿墙路径）
+>
+> **关键点**：Douglas-Peucker 是 O(N²) 最坏但实际 O(N log N) 的递归算法。生产环境（Recast）使用更高效的迭代版本。简化后轮廓顶点数减少 → 三角剖分更快 → 最终 NavMesh 多边形更少 → 寻路更快。但过度简化（ε 过大）会让 NavMesh 边界偏离原始几何体，导致 agent 可能穿墙。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 实现 Watershed Partitioning 替代简化 Flood Fill：
+>
+> ```cpp
+> // ============================================================
+> // Watershed Partitioning (流域分割)
+> // ============================================================
+> // 阶段 A：为每个 walkable span 计算距离值
+> // 从边界（NULL_AREA 邻居）向内 BFS，距离值表示到边界的步数
+> void computeDistanceField(const Heightfield& hf,
+>                           HeightfieldRegion& dist) {
+>     const int W = hf.width, H = hf.height;
+>     const int INVALID = -1;
+>
+>     // 初始化：所有格子距离 = -1
+>     for (int i = 0; i < W*H; ++i) dist.regionIds[i] = INVALID;
+>
+>     std::queue<std::pair<int,int>> q;
+>
+>     // 种子：有 NULL_AREA 邻居的 walkable span → 距离=1（边界）
+>     const int dx[] = {1,-1,0,0};
+>     const int dz[] = {0,0,1,-1};
+>     for (int z = 0; z < H; ++z) {
+>         for (int x = 0; x < W; ++x) {
+>             Span* s = hf.spans[x + z*W];
+>             if (!s || s->area == 0) continue;
+>             for (int d = 0; d < 4; ++d) {
+>                 int nx = x+dx[d], nz = z+dz[d];
+>                 if (nx < 0 || nx >= W || nz < 0 || nz >= H) {
+>                     dist.regionIds[x+z*W] = 1; q.push({x,z}); break;
+>                 }
+>                 Span* ns = hf.spans[nx + nz*W];
+>                 if (!ns || ns->area == 0) {
+>                     dist.regionIds[x+z*W] = 1; q.push({x,z}); break;
+>                 }
+>             }
+>         }
+>     }
+>
+>     // BFS 向内传播距离
+>     while (!q.empty()) {
+>         auto [x, z] = q.front(); q.pop();
+>         int curDist = dist.regionIds[x+z*W];
+>         for (int d = 0; d < 4; ++d) {
+>             int nx = x+dx[d], nz = z+dz[d];
+>             if (nx < 0 || nx >= W || nz < 0 || nz >= H) continue;
+>             Span* ns = hf.spans[nx + nz*W];
+>             if (!ns || ns->area == 0) continue;
+>             if (dist.regionIds[nx+nz*W] == INVALID) {
+>                 // 检查高度可跨越性
+>                 Span* cs = hf.spans[x+z*W];
+>                 if (cs && ns) {
+>                     int climb = std::abs((int)cs->smax - (int)ns->smax);
+>                     if (climb <= 2) { // 简化：2 体素 ≈ agentMaxClimb
+>                         dist.regionIds[nx+nz*W] = curDist + 1;
+>                         q.push({nx, nz});
+>                     }
+>                 }
+>             }
+>         }
+>     }
+> }
+>
+> // 阶段 B：找局部距离最大值作为种子
+> std::vector<std::pair<int,int>> findWatershedSeeds(
+>     const Heightfield& hf, const HeightfieldRegion& dist) {
+>     const int W = hf.width, H = hf.height;
+>     const int dx[] = {1,-1,0,0};
+>     const int dz[] = {0,0,1,-1};
+>     std::vector<std::pair<int,int>> seeds;
+>
+>     for (int z = 0; z < H; ++z) {
+>         for (int x = 0; x < W; ++x) {
+>             int d = dist.regionIds[x+z*W];
+>             if (d <= 0) continue;
+>             bool isMax = true;
+>             for (int i = 0; i < 4; ++i) {
+>                 int nx = x+dx[i], nz = z+dz[i];
+>                 if (nx < 0 || nx >= W || nz < 0 || nz >= H) continue;
+>                 int nd = dist.regionIds[nx+nz*W];
+>                 if (nd > d) { isMax = false; break; }
+>             }
+>             if (isMax) seeds.push_back({x, z});
+>         }
+>     }
+>     return seeds;
+> }
+>
+> // 阶段 C：从种子出发，按距离值降序分配区域
+> HeightfieldRegion buildRegionsWatershed(const Heightfield& hf) {
+>     HeightfieldRegion dist;
+>     dist.width = hf.width;
+>     dist.height = hf.height;
+>     dist.regionIds = new int[dist.width * dist.height];
+>     memset(dist.regionIds, 0, sizeof(int) * dist.width * dist.height);
+>
+>     // 1. 计算距离场
+>     computeDistanceField(hf, dist);
+>
+>     // 2. 找种子（局部最大距离）
+>     auto seeds = findWatershedSeeds(hf, dist);
+>     std::cout << "  Watershed seeds: " << seeds.size() << "\n";
+>
+>     // 3. 分配区域 ID（1-based）
+>     HeightfieldRegion reg;
+>     reg.width = hf.width;
+>     reg.height = hf.height;
+>     reg.regionIds = new int[reg.width * reg.height]();
+>     reg.maxRegions = 0;
+>
+>     // 从高距离到低距离排序所有格子
+>     struct CellDist { int x, z, dist; };
+>     std::vector<CellDist> cells;
+>     for (int z = 0; z < hf.height; ++z)
+>         for (int x = 0; x < hf.width; ++x)
+>             if (dist.regionIds[x+z*hf.width] > 0)
+>                 cells.push_back({x, z, dist.regionIds[x+z*hf.width]});
+>
+>     std::sort(cells.begin(), cells.end(),
+>         [](auto& a, auto& b) { return a.dist > b.dist; });
+>
+>     // 先给种子分配区域
+>     std::map<std::pair<int,int>, int> seedToRegion;
+>     for (auto& s : seeds) {
+>         reg.maxRegions++;
+>         seedToRegion[{s.first, s.second}] = reg.maxRegions;
+>         reg.regionIds[s.first + s.second*reg.width] = reg.maxRegions;
+>     }
+>
+>     // 按距离降序分配：每个格子继承邻居中最高区域的 ID
+>     const int dx[] = {1,-1,0,0};
+>     const int dz[] = {0,0,1,-1};
+>     for (auto& cell : cells) {
+>         int idx = cell.x + cell.z*reg.width;
+>         if (reg.regionIds[idx] != 0) continue; // 已分配的种子
+>
+>         // 查找邻居中已分配的区域
+>         std::map<int, int> neighborRegs; // regionId → 计数
+>         for (int d = 0; d < 4; ++d) {
+>             int nx = cell.x+dx[d], nz = cell.z+dz[d];
+>             if (nx < 0 || nx >= reg.width || nz < 0 || nz >= reg.height) continue;
+>             int nr = reg.regionIds[nx + nz*reg.width];
+>             if (nr > 0) neighborRegs[nr]++;
+>         }
+>
+>         if (!neighborRegs.empty()) {
+>             // 分配给邻居中出现最多的区域
+>             int bestReg = 0, bestCount = 0;
+>             for (auto [rid, cnt] : neighborRegs)
+>                 if (cnt > bestCount) { bestCount = cnt; bestReg = rid; }
+>             reg.regionIds[idx] = bestReg;
+>         }
+>     }
+>
+>     delete[] dist.regionIds;
+>     std::cout << "  Regions (watershed): " << reg.maxRegions << "\n";
+>     return reg;
+> }
+> ```
+>
+> **对比测试**（在 main 中添加）：
+>
+> ```cpp
+> // 在阶段 3 处替换：
+> std::cout << "\n=== Stage 3a: Flood Fill ===\n";
+> HeightfieldRegion regs_ff = buildRegions(hf);
+>
+> std::cout << "\n=== Stage 3b: Watershed ===\n";
+> HeightfieldRegion regs_ws = buildRegionsWatershed(hf);
+>
+> // 可视化对比：打印区域边界
+> auto contours_ff = traceContours(hf, regs_ff, cfg);
+> auto contours_ws = traceContours(hf, regs_ws, cfg);
+> std::cout << "Flood Fill contours: " << contours_ff.size() << "\n";
+> std::cout << "Watershed contours: " << contours_ws.size() << "\n";
+> ```
+>
+> **关键点**：Watershed 的核心优势是"山脊分割"——当两个区域在距离场的高处相遇（两个洼地之间的"山脊"），算法在最高点切割，而不是在随机位置切开。这产生更自然的区域边界（agent 在两个区域之间行走时，路径沿自然的地形凸起走）。Recast 实际实现更复杂：使用"水漫"（water level）迭代而非简单的距离场排序，支持区域合并（太小的区域合并到邻居）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。Recast 的 Watershed 实际实现约 800 行 C 代码（`RecastRegion.cpp`），这里展示的是概念上等效的简化版。
+
 ## 4. 扩展阅读
 
 - **Recast Navigation 源码**: [github.com/recastnavigation/recastnavigation](https://github.com/recastnavigation/recastnavigation) — 阅读 `Recast/Source/RecastRasterization.cpp` 的体素化实现、`RecastRegion.cpp` 的 watershed 算法、`RecastContour.cpp` 的轮廓追踪

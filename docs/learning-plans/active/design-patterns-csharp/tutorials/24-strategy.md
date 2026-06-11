@@ -929,6 +929,381 @@ public class StrategyBenchmark
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：压缩策略
+> ```csharp
+> using System.IO.Compression;
+>
+> // ============================================
+> // 策略接口
+> // ============================================
+> public interface ICompressionStrategy
+> {
+>     void Compress(string sourcePath, string destPath);
+>     void Decompress(string archivePath, string destDir);
+> }
+>
+> // ============================================
+> // ZIP 策略 — 使用 System.IO.Compression.ZipFile
+> // ============================================
+> public class ZipCompression : ICompressionStrategy
+> {
+>     public void Compress(string sourcePath, string destPath)
+>     {
+>         var tempDir = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString());
+>         Directory.CreateDirectory(tempDir);
+>         var destFile = Path.Combine(tempDir, Path.GetFileName(sourcePath));
+>         File.Copy(sourcePath, destFile, overwrite: true);
+>         ZipFile.CreateFromDirectory(tempDir, destPath);
+>         Directory.Delete(tempDir, recursive: true);
+>         Console.WriteLine($"[Zip] Compressed: {sourcePath} → {destPath}");
+>     }
+>
+>     public void Decompress(string archivePath, string destDir)
+>     {
+>         ZipFile.ExtractToDirectory(archivePath, destDir);
+>         Console.WriteLine($"[Zip] Decompressed: {archivePath} → {destDir}");
+>     }
+> }
+>
+> // ============================================
+> // GZip 策略 — 使用 System.IO.Compression.GZipStream
+> // ============================================
+> public class GZipCompression : ICompressionStrategy
+> {
+>     public void Compress(string sourcePath, string destPath)
+>     {
+>         using var sourceStream = File.OpenRead(sourcePath);
+>         using var destStream = File.Create(destPath);
+>         using var gzipStream = new GZipStream(destStream, CompressionMode.Compress);
+>         sourceStream.CopyTo(gzipStream);
+>         Console.WriteLine($"[GZip] Compressed: {sourcePath} → {destPath}");
+>     }
+>
+>     public void Decompress(string archivePath, string destDir)
+>     {
+>         var fileName = Path.GetFileNameWithoutExtension(archivePath);
+>         var destPath = Path.Combine(destDir, fileName);
+>         Directory.CreateDirectory(destDir);
+>         using var sourceStream = File.OpenRead(archivePath);
+>         using var destStream = File.Create(destPath);
+>         using var gzipStream = new GZipStream(sourceStream, CompressionMode.Decompress);
+>         gzipStream.CopyTo(destStream);
+>         Console.WriteLine($"[GZip] Decompressed: {archivePath} → {destPath}");
+>     }
+> }
+>
+> // ============================================
+> // RAR 策略 — 仅接口壳（C# 无内置支持）
+> // ============================================
+> public class RarCompression : ICompressionStrategy
+> {
+>     private readonly string _rarPath;
+>
+>     public RarCompression(string rarPath = "rar")
+>     {
+>         _rarPath = rarPath;
+>     }
+>
+>     public void Compress(string sourcePath, string destPath)
+>     {
+>         var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+>         {
+>             FileName = _rarPath,
+>             Arguments = $"a \"{destPath}\" \"{sourcePath}\"",
+>             RedirectStandardOutput = true,
+>             UseShellExecute = false,
+>             CreateNoWindow = true
+>         });
+>         process?.WaitForExit();
+>         Console.WriteLine($"[RAR] Compressed: {sourcePath} → {destPath} (exit: {process?.ExitCode})");
+>     }
+>
+>     public void Decompress(string archivePath, string destDir)
+>     {
+>         Directory.CreateDirectory(destDir);
+>         var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+>         {
+>             FileName = _rarPath,
+>             Arguments = $"x \"{archivePath}\" \"{destDir}\\\" -y",
+>             RedirectStandardOutput = true,
+>             UseShellExecute = false,
+>             CreateNoWindow = true
+>         });
+>         process?.WaitForExit();
+>         Console.WriteLine($"[RAR] Decompressed: {archivePath} → {destDir} (exit: {process?.ExitCode})");
+>     }
+> }
+>
+> // ============================================
+> // Context: FileCompressor
+> // ============================================
+> public class FileCompressor
+> {
+>     private ICompressionStrategy _strategy;
+>
+>     public FileCompressor(ICompressionStrategy strategy)
+>     {
+>         _strategy = strategy;
+>     }
+>
+>     public void SetStrategy(ICompressionStrategy strategy)
+>     {
+>         _strategy = strategy;
+>     }
+>
+>     public void Compress(string sourcePath, string destPath)
+>         => _strategy.Compress(sourcePath, destPath);
+>
+>     public void Decompress(string archivePath, string destDir)
+>         => _strategy.Decompress(archivePath, destDir);
+> }
+>
+> // ============================================
+> // 测试（注释形式 — 放在 Main 中运行即可）
+> // ============================================
+> // var testFile = "test.txt";
+> // File.WriteAllText(testFile, "Hello, Strategy Pattern! " + new string('x', 1000));
+> //
+> // var strategies = new ICompressionStrategy[]
+> // {
+> //     new ZipCompression(),
+> //     new GZipCompression()
+> // };
+> //
+> // foreach (var s in strategies)
+> // {
+> //     var compressor = new FileCompressor(s);
+> //     var ext = s.GetType().Name.Replace("Compression", "").ToLower();
+> //     var archive = $"output.{ext}";
+> //     var extractDir = Path.Combine(Path.GetTempPath(), $"extracted_{ext}");
+> //
+> //     compressor.Compress(testFile, archive);
+> //     compressor.Decompress(archive, extractDir);
+> //     Console.WriteLine($"Match: {original == extracted}");
+> // }
+> ```
+
+> [!tip]- 练习 2 参考答案：组合策略
+> ```csharp
+> using System.Security.Cryptography;
+> using System.IO.Compression;
+>
+> public interface IDataProcessor
+> {
+>     byte[] Process(byte[] data);
+> }
+>
+> // 子策略 1: GZip 压缩/解压
+> public class CompressionProcessor : IDataProcessor
+> {
+>     private readonly CompressionMode _mode;
+>
+>     public CompressionProcessor(CompressionMode mode) => _mode = mode;
+>
+>     public byte[] Process(byte[] data)
+>     {
+>         using var output = new MemoryStream();
+>         using (var input = new MemoryStream(data))
+>         using (var gzip = new GZipStream(output, _mode, leaveOpen: true))
+>         {
+>             input.CopyTo(gzip);
+>         }
+>         Console.WriteLine($"[Compress] {_mode}: {data.Length} → {output.Length} bytes");
+>         return output.ToArray();
+>     }
+> }
+>
+> // 子策略 2: AES 加密/解密
+> public class EncryptionProcessor : IDataProcessor
+> {
+>     private readonly byte[] _key;
+>     private readonly bool _encrypt;
+>
+>     public EncryptionProcessor(byte[] key, bool encrypt)
+>     {
+>         if (key.Length != 16 && key.Length != 24 && key.Length != 32)
+>             throw new ArgumentException("AES key must be 16, 24, or 32 bytes");
+>         _key = key;
+>         _encrypt = encrypt;
+>     }
+>
+>     public byte[] Process(byte[] data)
+>     {
+>         using var aes = Aes.Create();
+>         aes.Key = _key;
+>
+>         if (_encrypt)
+>         {
+>             aes.GenerateIV();
+>             using var encryptor = aes.CreateEncryptor();
+>             var encrypted = encryptor.TransformFinalBlock(data, 0, data.Length);
+>             var result = new byte[aes.IV.Length + encrypted.Length];
+>             Buffer.BlockCopy(aes.IV, 0, result, 0, aes.IV.Length);
+>             Buffer.BlockCopy(encrypted, 0, result, aes.IV.Length, encrypted.Length);
+>             Console.WriteLine($"[Encrypt] {data.Length} → {result.Length} bytes");
+>             return result;
+>         }
+>         else
+>         {
+>             var iv = new byte[16];
+>             Buffer.BlockCopy(data, 0, iv, 0, 16);
+>             aes.IV = iv;
+>             var cipherText = new byte[data.Length - 16];
+>             Buffer.BlockCopy(data, 16, cipherText, 0, cipherText.Length);
+>             using var decryptor = aes.CreateDecryptor();
+>             var decrypted = decryptor.TransformFinalBlock(cipherText, 0, cipherText.Length);
+>             Console.WriteLine($"[Decrypt] {data.Length} → {decrypted.Length} bytes");
+>             return decrypted;
+>         }
+>     }
+> }
+>
+> // Composite — 正向依次执行
+> public class CompositeProcessor : IDataProcessor
+> {
+>     private readonly List<IDataProcessor> _processors;
+>
+>     public CompositeProcessor(IEnumerable<IDataProcessor> processors)
+>         => _processors = new List<IDataProcessor>(processors);
+>
+>     public byte[] Process(byte[] data)
+>     {
+>         var current = data;
+>         foreach (var p in _processors)
+>             current = p.Process(current);
+>         return current;
+>     }
+> }
+>
+> // ReverseComposite — 反向依次执行
+> public class ReverseCompositeProcessor : IDataProcessor
+> {
+>     private readonly List<IDataProcessor> _processors;
+>
+>     public ReverseCompositeProcessor(IEnumerable<IDataProcessor> processors)
+>         => _processors = new List<IDataProcessor>(processors);
+>
+>     public byte[] Process(byte[] data)
+>     {
+>         var current = data;
+>         for (int i = _processors.Count - 1; i >= 0; i--)
+>             current = _processors[i].Process(current);
+>         return current;
+>     }
+> }
+>
+> // 演示：
+> // byte[] key = Convert.FromBase64String("MTIzNDU2Nzg5MDEyMzQ1Ng==");
+> // var original = Encoding.UTF8.GetBytes("Hello, Composite! " + new string('x', 500));
+> // var forward = new CompositeProcessor(new IDataProcessor[] {
+> //     new CompressionProcessor(CompressionMode.Compress),
+> //     new EncryptionProcessor(key, encrypt: true)
+> // });
+> // var encrypted = forward.Process(original);
+> // var reverse = new ReverseCompositeProcessor(new IDataProcessor[] {
+> //     new CompressionProcessor(CompressionMode.Decompress),
+> //     new EncryptionProcessor(key, encrypt: false)
+> // });
+> // var decrypted = reverse.Process(encrypted);
+> // Console.WriteLine($"Match: {original.SequenceEqual(decrypted)}");
+> ```
+
+> [!tip]- 练习 3 参考答案：性能基准测试
+> ```csharp
+> // ============================================
+> // 准备：三种方式的基础类型
+> // ============================================
+> public enum Algorithm { Add, Multiply, Xor }
+>
+> // A. 接口策略
+> public interface ICalculator { int Compute(int a, int b); }
+> public class AddCalculator : ICalculator
+> { public int Compute(int a, int b) => a + b; }
+> public class MultiplyCalculator : ICalculator
+> { public int Compute(int a, int b) => a * b; }
+> public class XorCalculator : ICalculator
+> { public int Compute(int a, int b) => a ^ b; }
+>
+> // ============================================
+> // BenchmarkDotNet 测试类
+> // ============================================
+> // [SimpleJob(RuntimeMoniker.Net90)]
+> // [MemoryDiagnoser]
+> // public class StrategyBenchmark
+> // {
+> //     private const int Iterations = 10000;
+> //     private static readonly int[] Values = { 5, 3 };
+> //
+> //     // A. 接口策略 — 三个具体实现轮换
+> //     private readonly ICalculator _add = new AddCalculator();
+> //     private readonly ICalculator _mul = new MultiplyCalculator();
+> //     private readonly ICalculator _xor = new XorCalculator();
+> //
+> //     [Benchmark]
+> //     public int InterfaceStrategy()
+> //     {
+> //         int sum = 0;
+> //         var calcs = new[] { _add, _mul, _xor };
+> //         for (int i = 0; i < Iterations; i++)
+> //             sum += calcs[i % 3].Compute(Values[0], Values[1]);
+> //         return sum;
+> //     }
+> //
+> //     // B. 委托策略
+> //     private static readonly Func<int, int, int>[] Delegates =
+> //     {
+> //         (a, b) => a + b,
+> //         (a, b) => a * b,
+> //         (a, b) => a ^ b
+> //     };
+> //
+> //     [Benchmark]
+> //     public int DelegateStrategy()
+> //     {
+> //         int sum = 0;
+> //         for (int i = 0; i < Iterations; i++)
+> //             sum += Delegates[i % 3](Values[0], Values[1]);
+> //         return sum;
+> //     }
+> //
+> //     // C. switch 分支
+> //     [Benchmark]
+> //     public int SwitchBranch()
+> //     {
+> //         int sum = 0;
+> //         for (int i = 0; i < Iterations; i++)
+> //         {
+> //             sum += ((Algorithm)(i % 3)) switch
+> //             {
+> //                 Algorithm.Add => Values[0] + Values[1],
+> //                 Algorithm.Multiply => Values[0] * Values[1],
+> //                 Algorithm.Xor => Values[0] ^ Values[1],
+> //                 _ => 0
+> //             };
+> //         }
+> //         return sum;
+> //     }
+> // }
+> //
+> // // 运行: BenchmarkRunner.Run<StrategyBenchmark>();
+> ```
+>
+> **分析与结论：**
+>
+> 在 2026 年的 .NET 上（.NET 9+，JIT 含 PGO / Tiered Compilation）：
+>
+> - **switch 分支最快**：`switch` 表达式被 JIT 编译为跳转表（jump table），无虚方法分派开销；CPU 分支预测器对周期性跳转表预测极准
+> - **委托次之**：`Func<>` 有间接调用开销（通过委托对象的 `Invoke`），但 Tier1 JIT 可对其做去虚拟化，开销接近直接调用
+> - **接口策略最慢**：接口虚方法分派需两次间接跳转（vtable → 方法）。多态场景（3 种策略轮换）中 Guarded Devirtualization 失效，每次调用都是真正的虚分派
+> - **实际差异很小**：在 10,000 次迭代级别，三者绝对差异通常在微秒级（~几十 μs），对绝大多数业务代码无感知——"可读性和扩展性"远比"虚方法分派开销"重要
+> - **switch 方案的代价**：虽然最快，但违反 OCP——新增算法必须改 switch；只在小规模、永不扩展的场景中适用
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 与本模式相关的其他教程

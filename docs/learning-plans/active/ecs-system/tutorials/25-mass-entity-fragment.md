@@ -416,6 +416,299 @@ struct FMassArchetypeChunk
 3. 记录迁移日志
 验证迁移后实体数量变化：原 Archetype 减少、新 Archetype（仅有 DeadTag）增加。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **定义两种敌方 Fragment 类型，创建两个 Archetype，编写调试 Processor**：
+>
+> ```cpp
+> // === MassEnemyFragments.h ===
+> #pragma once
+> #include "MassEntityTypes.h"
+> #include "MassEnemyFragments.generated.h"
+>
+> // 远程敌人 Fragment
+> USTRUCT()
+> struct FMassRangedEnemyFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     float AttackRange = 800.0f;
+>
+>     UPROPERTY()
+>     float ProjectileSpeed = 600.0f;
+>
+>     UPROPERTY()
+>     int32 AmmoCount = 10;
+> };
+>
+> // 近战敌人 Fragment
+> USTRUCT()
+> struct FMassMeleeEnemyFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     float MeleeRange = 150.0f;
+>
+>     UPROPERTY()
+>     float ComboMultiplier = 1.0f;
+> };
+>
+> // 两种标签用于快速区分类型
+> USTRUCT()
+> struct FMassRangedEnemyTag : public FMassTag { GENERATED_BODY() };
+> USTRUCT()
+> struct FMassMeleeEnemyTag : public FMassTag { GENERATED_BODY() };
+>
+> // === 生成代码 ===
+> void SpawnEnemyEntities(FMassEntityManager& EntityManager)
+> {
+>     // 创建两个不同的 Archetype
+>     FMassArchetypeHandle RangedArchetype = EntityManager.CreateArchetype({
+>         FMassTransformFragment::StaticStruct(),
+>         FMassRangedEnemyFragment::StaticStruct(),
+>         FMassRangedEnemyTag::StaticStruct()
+>     });
+>
+>     FMassArchetypeHandle MeleeArchetype = EntityManager.CreateArchetype({
+>         FMassTransformFragment::StaticStruct(),
+>         FMassMeleeEnemyFragment::StaticStruct(),
+>         FMassMeleeEnemyTag::StaticStruct()
+>     });
+>
+>     TArray<FMassEntityHandle> RangedEntities, MeleeEntities;
+>     EntityManager.BatchCreateEntities(RangedArchetype, 30, RangedEntities);
+>     EntityManager.BatchCreateEntities(MeleeArchetype, 30, MeleeEntities);
+>
+>     UE_LOG(LogTemp, Log, TEXT("Spawned: %d Ranged, %d Melee"),
+>         RangedEntities.Num(), MeleeEntities.Num());
+> }
+>
+> // === UEntityCountDebugProcessor.cpp ===
+> // 查询两种 Tag 分别计数，输出到日志
+> void UEntityCountDebugProcessor::ConfigureQueries()
+> {
+>     RangedQuery.AddTagRequirement<FMassRangedEnemyTag>(EMassFragmentPresence::All);
+>     RangedQuery.RegisterWithProcessor(*this);
+>
+>     MeleeQuery.AddTagRequirement<FMassMeleeEnemyTag>(EMassFragmentPresence::All);
+>     MeleeQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UEntityCountDebugProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     int32 RangedCount = 0, MeleeCount = 0;
+>
+>     RangedQuery.ForEachEntityChunk(EntityManager, Context,
+>         [&RangedCount](FMassExecutionContext& Ctx) {
+>             RangedCount += Ctx.GetNumEntities(); });
+>
+>     MeleeQuery.ForEachEntityChunk(EntityManager, Context,
+>         [&MeleeCount](FMassExecutionContext& Ctx) {
+>             MeleeCount += Ctx.GetNumEntities(); });
+>
+>     UE_LOG(LogTemp, Display, TEXT("Enemy Count - Ranged: %d, Melee: %d"),
+>         RangedCount, MeleeCount);
+> }
+> ```
+> **关键点**：两种敌人类型通过不同的 Tag 组件区分，查询时用 `AddTagRequirement` 精确匹配。Archetype 不同但使用了不同的 Fragment 组合，`BatchCreateEntities` 一次性创建 30 个。
+
+> [!tip]- 练习 2 参考答案
+> **FMassTeamSharedFragment + UTeamBalanceProcessor**：
+>
+> ```cpp
+> // === FMassTeamSharedFragment ===
+> USTRUCT()
+> struct FMassTeamSharedFragment : public FMassSharedFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     int32 TeamId = 0;
+>
+>     UPROPERTY()
+>     FLinearColor TeamColor = FLinearColor::White;
+>
+>     UPROPERTY()
+>     TArray<FMassEntityHandle> TeamMembers;
+> };
+>
+> // === 批量设置 SharedFragment ===
+> void AssignTeamToEntities(FMassEntityManager& EntityManager,
+>     const TArray<FMassEntityHandle>& Entities, int32 TeamId)
+> {
+>     // 准备 SharedFragment 值
+>     FMassArchetypeSharedFragmentValues SharedValues;
+>     FMassSharedFragmentInitializer Init;
+>     auto& TeamFrag = Init.GetMutableFragmentData<FMassTeamSharedFragment>();
+>     TeamFrag.TeamId = TeamId;
+>     TeamFrag.TeamColor = TeamId == 0
+>         ? FLinearColor::Red : FLinearColor::Blue;
+>
+>     // 将实体句柄加入成员列表
+>     TeamFrag.TeamMembers = Entities;
+>
+>     // 批量添加到所有实体
+>     for (const FMassEntityHandle& Entity : Entities)
+>     {
+>         EntityManager.AddSharedFragmentDataToEntity(Entity, Init);
+>     }
+> }
+>
+> // === UTeamBalanceProcessor ===
+> UCLASS()
+> class UTeamBalanceProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UTeamBalanceProcessor();
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     // 查询：带有 DeadTag 且有 TeamSharedFragment 的实体
+>     FMassEntityQuery DeadTeamMemberQuery;
+> };
+>
+> UTeamBalanceProcessor::UTeamBalanceProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Behavior;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UTeamBalanceProcessor::ConfigureQueries()
+> {
+>     DeadTeamMemberQuery.AddTagRequirement<FMassDeadTag>(EMassFragmentPresence::All);
+>     DeadTeamMemberQuery.AddSharedRequirement<FMassTeamSharedFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     DeadTeamMemberQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UTeamBalanceProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     DeadTeamMemberQuery.ForEachEntityChunk(EntityManager, Context,
+>         [&EntityManager](FMassExecutionContext& Context)
+>         {
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 FMassEntityHandle DeadEntity = Context.GetEntity(i);
+>
+>                 // 获取共享的 Team Fragment（注意：SharedFragment 多实体共享同一实例！）
+>                 const FMassTeamSharedFragment& SharedTeam =
+>                     Context.GetConstSharedFragment<FMassTeamSharedFragment>();
+>
+>                 // 从 TeamMembers 中移除死去的实体句柄
+>                 // 注意：SharedFragment 是 const 引用，需要通过 EntityManager 修改
+>                 FMassTeamSharedFragment TeamCopy = SharedTeam; // 复制
+>                 TeamCopy.TeamMembers.Remove(DeadEntity);
+>
+>                 // 注意：修改 SharedFragment 涉及创建新实例并替换引用
+>                 // 实际 UE Mass API 中，需要通过 EntityManager 来更新
+>                 // 这里展示逻辑意图：
+>                 UE_LOG(LogTemp, Log, TEXT("Team %d: removed dead entity, remaining %d members"),
+>                     SharedTeam.TeamId, TeamCopy.TeamMembers.Num());
+>             }
+>         });
+> }
+> ```
+> **关键点**：`FMassSharedFragment` 的所有同 Archetype 实体共享**同一份数据实例**。修改它会影响所有引用该实例的实体。从 `TeamMembers` 中移除死去的 EntityHandle 依赖于 EntityManager 的 API 来更新 SharedFragment 实例（实际的 UE API 中需要通过 `FMassArchetypeSharedFragmentValues` 重建）。
+
+> [!tip]- 练习 3 参考答案
+> **UFragmentMigrationProcessor：定时检测 Health，触发 Archetype 迁移**：
+>
+> ```cpp
+> UCLASS()
+> class UFragmentMigrationProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UFragmentMigrationProcessor();
+>
+>     UPROPERTY(EditAnywhere)
+>     float MigrationInterval = 5.0f; // 每 5 秒检查一次
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery AliveEntitiesQuery;
+>     float AccumulatedTime = 0.0f;
+> };
+>
+> UFragmentMigrationProcessor::UFragmentMigrationProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Behavior;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UFragmentMigrationProcessor::ConfigureQueries()
+> {
+>     // 查询所有活着的实体（有 Stats 且没有 DeadTag 的）
+>     AliveEntitiesQuery.AddRequirement<FMassCharacterStatsFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     AliveEntitiesQuery.AddRequirement<FMassPerceptionFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     AliveEntitiesQuery.AddTagRequirement<FMassDeadTag>(
+>         EMassFragmentPresence::None);
+>     AliveEntitiesQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UFragmentMigrationProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     AccumulatedTime += Context.GetDeltaTimeSeconds();
+>     if (AccumulatedTime < MigrationInterval) return;
+>     AccumulatedTime = 0.0f;
+>
+>     int32 MigrationCount = 0;
+>
+>     AliveEntitiesQuery.ForEachEntityChunk(EntityManager, Context,
+>         [&](FMassExecutionContext& Context)
+>         {
+>             const TArrayView<FMassCharacterStatsFragment> Stats =
+>                 Context.GetFragmentView<FMassCharacterStatsFragment>();
+>
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 if (Stats[i].Health <= 0.0f)
+>                 {
+>                     FMassEntityHandle Entity = Context.GetEntity(i);
+>
+>                     // 步骤 1 & 2：移除旧 Fragment，添加 DeadTag
+>                     Context.Defer().RemoveFragment<FMassPerceptionFragment>(Entity);
+>                     Context.Defer().RemoveFragment<FMassCharacterStatsFragment>(Entity);
+>                     Context.Defer().AddTag<FMassDeadTag>(Entity);
+>
+>                     // 步骤 3：记录日志
+>                     UE_LOG(LogTemp, Verbose, TEXT("Entity migrated to Dead archetype"));
+>                     ++MigrationCount;
+>                 }
+>             }
+>         });
+>
+>     if (MigrationCount > 0)
+>     {
+>         UE_LOG(LogTemp, Log, TEXT("Migration: %d entities moved to Dead archetype"),
+>             MigrationCount);
+>     }
+> }
+> ```
+> **关键点**：
+> 1. **节流检测**：用 `AccumulatedTime` 累计时间，只在达到 `MigrationInterval` 时执行检测逻辑，避免每帧遍历。
+> 2. **Archetype 迁移**：`RemoveFragment` + `AddTag` 会导致 Entity 从原 Archetype 迁移到目标 Archetype。Mass EntityManager 会复制所有共享的 Fragment 数据到新位置。
+> 3. **验证方法**：迁移后，原 Archetype 的实体数减少，包含 `FMassDeadTag`（且无 `FMassCharacterStatsFragment`）的新 Archetype 实体数增加。可通过查询不同 Tag 组合的实体数量来验证。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

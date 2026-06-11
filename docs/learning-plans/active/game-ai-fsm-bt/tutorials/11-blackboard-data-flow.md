@@ -1157,6 +1157,359 @@ unreg()
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **三层作用域 + Shared Blackboard 实现**。基于示例 A 的 `Blackboard` 类扩展。
+>
+> **1. 作用域枚举和链式构造**：
+> ```csharp
+> public enum BlackboardScope { Global, Agent, Tree }
+>
+> public class Blackboard
+> {
+>     private readonly BlackboardScope _scope;
+>     private Blackboard _parent; // fallback 链：Tree → Agent → Global → null
+>     private readonly Dictionary<string, Entry> _entries = new();
+>     // ... Entry 及 RegisterKey/Get/Set 不变
+>
+>     public Blackboard(BlackboardScope scope, Blackboard parent = null)
+>     {
+>         _scope = scope;
+>         _parent = parent;
+>     }
+>
+>     public T Get<T>(BlackboardKey<T> key)
+>     {
+>         if (_entries.TryGetValue(key.Name, out var entry))
+>             return (T)entry.Value;
+>         if (_parent != null)
+>             return _parent.Get(key); // 链式 fallback
+>         throw new KeyNotFoundException(key.Name);
+>     }
+>
+>     public void Set<T>(BlackboardKey<T> key, T value)
+>     {
+>         // 设计选择：写入当前作用域（而非 fallback 链中最近的已注册 key）
+>         // 原因：如果 Set 写回到 Agent 作用域，Tree 作用域无法覆盖 Agent 的值，
+>         // 这违反了作用域隔离的原则。Tree 作用域的 Set 应该只在 Tree 作用域生效。
+>         if (!_entries.TryGetValue(key.Name, out var entry))
+>         {
+>             // 当前作用域未注册此 key → 注册一个新 entry（隔离写）
+>             entry = new Entry { ValueType = typeof(T), IsRegistered = true };
+>             _entries[key.Name] = entry;
+>         }
+>         object old = entry.Value;
+>         if (EqualityComparer<T>.Default.Equals((T)old, value)) return;
+>         entry.Value = value;
+>         OnValueChanged?.Invoke(key.Name, old, value);
+>     }
+> }
+> ```
+> **设计理由**：`Set` 写入当前作用域确保子作用域的修改不污染父作用域。当行为树切换时，只需清除 Tree 作用域的 entries（GC 友好），Agent/Global 作用域保持不变。
+>
+> **2. SharedBlackboard 类**：
+> ```csharp
+> public class SharedBlackboard
+> {
+>     private readonly Blackboard _leaderBB;
+>     private readonly HashSet<string> _sharedKeys;
+>     private readonly List<Blackboard> _memberReadViews = new();
+>
+>     public SharedBlackboard(Blackboard leaderBB, params string[] sharedKeys)
+>     {
+>         _leaderBB = leaderBB;
+>         _sharedKeys = new HashSet<string>(sharedKeys);
+>     }
+>
+>     public void AddMember(Blackboard memberBB)
+>     {
+>         // 为 member 创建一个只读视图：订阅 leader 的 OnValueChanged，
+>         // 当共享 key 变更时，同步到 member 的 Agent 作用域
+>         _leaderBB.OnValueChanged += (key, oldVal, newVal) => {
+>             if (_sharedKeys.Contains(key))
+>                 memberBB.SetDirect(key, newVal); // 绕过 Set 的变更通知（避免递归）
+>         };
+>         _memberReadViews.Add(memberBB);
+>     }
+> }
+> ```
+> **性能考量**：20 个 member 时，一次 `Set` 会触发 20 次回调。如果频率高（每帧多次），优化为**帧末批量通知**——用 `List<(string key, object value)> _pendingUpdates` 收集变更，在 `LateUpdate` 中统一同步所有 member。
+>
+> **3. 单元测试（≥5 个）**：
+> ```csharp
+> [Test] public void ScopeIsolation_TreeWrite_DoesNotPolluteAgent()
+> {   // Tree 作用域写入 key，Agent 作用域的同名 key 值不变
+>     var global = new Blackboard(BlackboardScope.Global);
+>     var agent = new Blackboard(BlackboardScope.Agent, global);
+>     var tree = new Blackboard(BlackboardScope.Tree, agent);
+>     var k = agent.RegisterKey("Health", 100f);
+>     tree.Set(k, 50f); // 写入 Tree 作用域
+>     Assert.AreEqual(50f, tree.Get(k));  // Tree 看到自己的值
+>     Assert.AreEqual(100f, agent.Get(k)); // Agent 值未变
+> }
+> [Test] public void FallbackLookup_TreeReadsAgentWhenNotSet()
+> {   // Tree 未注册 key → fallback 到 Agent
+>     var agent = new Blackboard(BlackboardScope.Agent);
+>     var tree = new Blackboard(BlackboardScope.Tree, agent);
+>     var k = agent.RegisterKey("Ammo", 30);
+>     Assert.AreEqual(30, tree.Get(k)); // 从 Agent 读取
+> }
+> [Test] public void ScopeCleanup_TreeDispose_ParentUnaffected()
+> {   // 清除 Tree → Agent/Global 的 key 仍可用
+>     var agent = new Blackboard(BlackboardScope.Agent);
+>     var tree = new Blackboard(BlackboardScope.Tree, agent);
+>     var k = agent.RegisterKey("Score", 0);
+>     tree.Set(k, 100);
+>     tree = null; GC.Collect(); // 模拟 BT 切换
+>     Assert.AreEqual(0, agent.Get(k)); // Agent 值不变
+> }
+> [Test] public void SharedBB_MemberReceivesLeaderUpdate()
+> {   // Leader 写入共享 key → Member 自动同步
+>     var leaderBB = new Blackboard(BlackboardScope.Agent);
+>     var memberBB = new Blackboard(BlackboardScope.Agent);
+>     var k = leaderBB.RegisterKey("SquadTarget", (object)null);
+>     var shared = new SharedBlackboard(leaderBB, "SquadTarget");
+>     shared.AddMember(memberBB);
+>     var enemy = new GameObject();
+>     leaderBB.Set(k, enemy);
+>     Assert.AreSame(enemy, memberBB.Get(k));
+> }
+> [Test] public void RegisterConflict_ThrowsOnTypeMismatch()
+> {   // 同一 key 注册不同类型应抛异常
+>     var bb = new Blackboard(BlackboardScope.Agent);
+>     bb.RegisterKey("Value", 1.0f);
+>     Assert.Throws<InvalidOperationException>(() => bb.RegisterKey<int>("Value", 5));
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **UE 自定义 Blackboard Key 类型 `EEquipmentState`**。
+>
+> **1. 枚举定义和 KeyType 头文件**：
+> ```cpp
+> // EquipmentStateTypes.h
+> #pragma once
+> #include "EquipmentStateTypes.generated.h"
+>
+> UENUM()
+> enum class EEquipmentState : uint8
+> {
+>     Unequipped UMETA(DisplayName="Unequipped"),
+>     Melee      UMETA(DisplayName="Melee"),
+>     Ranged     UMETA(DisplayName="Ranged"),
+>     Throwable  UMETA(DisplayName="Throwable"),
+> };
+> ```
+>
+> ```cpp
+> // BlackboardKeyType_EquipmentState.h
+> #pragma once
+> #include "BehaviorTree/Blackboard/BlackboardKeyType.h"
+> #include "EquipmentStateTypes.h"
+> #include "BlackboardKeyType_EquipmentState.generated.h"
+>
+> UCLASS(EditInlineNew, meta=(DisplayName="EquipmentState"))
+> class UBlackboardKeyType_EquipmentState : public UBlackboardKeyType
+> {
+>     GENERATED_BODY()
+> public:
+>     UBlackboardKeyType_EquipmentState();
+>     static EEquipmentState GetValue(const uint8* MemoryBlock);
+>     static bool SetValue(uint8* MemoryBlock, EEquipmentState Value);
+>
+>     virtual FString DescribeValue(const uint8* RawData) const override;
+>     virtual bool CompareValues(const uint8* MemoryBlockA, const uint8* MemoryBlockB) const override;
+>     virtual void Clear(uint8* MemoryBlock) const override;
+>     virtual bool IsEmpty(const uint8* MemoryBlock) const override;
+>     virtual bool TestBasicOperation(const uint8* MemoryBlock, EBasicKeyOperation::Type Op) const override;
+>     virtual uint16 GetValueSize() const override { return sizeof(EEquipmentState); }
+> };
+> ```
+>
+> ```cpp
+> // 实现
+> EEquipmentState UBlackboardKeyType_EquipmentState::GetValue(const uint8* MemoryBlock)
+> {
+>     return *reinterpret_cast<const EEquipmentState*>(MemoryBlock);
+> }
+> bool UBlackboardKeyType_EquipmentState::CompareValues(const uint8* A, const uint8* B) const
+> {
+>     return GetValue(A) == GetValue(B);
+> }
+> FString UBlackboardKeyType_EquipmentState::DescribeValue(const uint8* RawData) const
+> {
+>     return StaticEnum<EEquipmentState>()->GetDisplayNameStringByValue(
+>         static_cast<int64>(GetValue(RawData)));
+> }
+> void UBlackboardKeyType_EquipmentState::Clear(uint8* MemoryBlock) const
+> {
+>     SetValue(MemoryBlock, EEquipmentState::Unequipped);
+> }
+> bool UBlackboardKeyType_EquipmentState::IsEmpty(const uint8* MemoryBlock) const
+> {
+>     return GetValue(MemoryBlock) == EEquipmentState::Unequipped;
+> }
+> // TestBasicOperation: 支持相等性比较
+> bool UBlackboardKeyType_EquipmentState::TestBasicOperation(const uint8* MemoryBlock, EBasicKeyOperation::Type Op) const
+> {
+>     return Op == EBasicKeyOperation::Set || Op == EBasicKeyOperation::Equal || Op == EBasicKeyOperation::NotEqual;
+> }
+> ```
+>
+> **2. UBTService_DetectEquipment**：
+> ```cpp
+> void UBTService_DetectEquipment::TickNode(UBehaviorTreeComponent& OwnerComp,
+>     uint8* NodeMemory, float DeltaSeconds)
+> {
+>     auto* BB = OwnerComp.GetBlackboardComponent();
+>     APawn* Pawn = OwnerComp.GetAIOwner()->GetPawn();
+>     // 假设 Pawn 有一个 IEquipmentInterface
+>     IEquipmentInterface* Equip = Cast<IEquipmentInterface>(Pawn);
+>     EEquipmentState State = Equip ? Equip->GetCurrentEquipment() : EEquipmentState::Unequipped;
+>     BB->SetValue<UBlackboardKeyType_EquipmentState>(EquipmentKey.GetSelectedKeyID(), State);
+> }
+> ```
+>
+> **3. UBTDecorator_HasRangedWeapon**：
+> ```cpp
+> bool UBTDecorator_HasRangedWeapon::CalculateRawConditionValue(
+>     UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) const
+> {
+>     auto* BB = OwnerComp.GetBlackboardComponent();
+>     EEquipmentState State = BB->GetValue<UBlackboardKeyType_EquipmentState>(
+>         EquipmentKey.GetSelectedKeyID());
+>     return State == EEquipmentState::Ranged;
+> }
+> // 构造函数中设置 Observer Abort
+> UBTDecorator_HasRangedWeapon::UBTDecorator_HasRangedWeapon()
+> {
+>     bNotifyBecomeRelevant = true;
+>     bNotifyCeaseRelevant = true;
+>     FlowAbortMode = EBTFlowAbortMode::LowerPriority; // 装备远程武器时抢断
+> }
+> ```
+>
+> **4. UBTTask_SwitchToBestWeapon**：
+> ```cpp
+> EBTNodeResult::Type UBTTask_SwitchToBestWeapon::ExecuteTask(
+>     UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
+> {
+>     auto* BB = OwnerComp.GetBlackboardComponent();
+>     EEquipmentState Current = BB->GetValue<UBlackboardKeyType_EquipmentState>(EquipmentKey.GetSelectedKeyID());
+>     // 优先级: Ranged > Melee > Throwable > Unequipped
+>     static const EEquipmentState Priority[] = {
+>         EEquipmentState::Ranged, EEquipmentState::Melee,
+>         EEquipmentState::Throwable, EEquipmentState::Unequipped };
+>     for (auto Target : Priority)
+>     {
+>         if (Target == Current) return EBTNodeResult::Succeeded; // 已是最优
+>         if (CanSwitchTo(Target))
+>         {
+>             DoSwitch(Target);
+>             BB->SetValue<UBlackboardKeyType_EquipmentState>(EquipmentKey.GetSelectedKeyID(), Target);
+>             return EBTNodeResult::Succeeded;
+>         }
+>     }
+>     return EBTNodeResult::Failed;
+> }
+> ```
+>
+> **验证**：在 GameplayDebugger 中观察 `EquipmentState` key 的值变化，当 AI 拾取远程武器时，Service 更新 Blackboard → Decorator(LowerPriority) 触发 abort → 当前 Melee 行为被中断 → 切换到 Ranged 分支。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **完整的 Observer Abort 系统实现**（适用于 Unity C#）：
+>
+> **1. Blackboard 中的 Observer 注册机制**：
+> ```csharp
+> public class Blackboard
+> {
+>     private Dictionary<string, List<Action<string, object, object>>> _observers = new();
+>
+>     public void Observe(string key, Action<string, object, object> callback)
+>     {
+>         if (!_observers.ContainsKey(key)) _observers[key] = new();
+>         _observers[key].Add(callback);
+>     }
+>     public void Unobserve(string key, Action<string, object, object> callback)
+>     {
+>         _observers[key]?.Remove(callback);
+>     }
+>     public void Set<T>(BlackboardKey<T> key, T value)
+>     {
+>         // ... 值变更检测
+>         entry.Value = value;
+>         // 帧内去重：同一帧同一 key 多次写入只触发一次
+>         if (!_notifiedThisFrame.Contains(key.Name))
+>         {
+>             _notifiedThisFrame.Add(key.Name);
+>             // 收集通知到 pending 列表，帧末统一分发
+>             _pendingNotifications.Add((key.Name, oldValue, value));
+>         }
+>     }
+>     // LateUpdate 中处理 pending notifications
+>     public void FlushNotifications()
+>     {
+>         foreach (var (key, oldV, newV) in _pendingNotifications)
+>         {
+>             if (_observers.TryGetValue(key, out var callbacks))
+>                 foreach (var cb in callbacks) cb(key, oldV, newV);
+>         }
+>         _pendingNotifications.Clear();
+>         _notifiedThisFrame.Clear();
+>     }
+> }
+> ```
+>
+> **2. ObservingDecorator 节点**：
+> ```csharp
+> public class ObservingDecorator : BTDecorator
+> {
+>     private Func<bool> _condition;
+>     private bool _lastConditionResult;
+>     private ObserverMode _mode; // Self, LowerPriority, Both
+>     private Blackboard _bb;
+>     private string _observedKey;
+>     private static int _abortDepth = 0;
+>     private const int MaxAbortDepth = 3;
+>
+>     public void OnBecomeRelevant()
+>     {
+>         _lastConditionResult = _condition();
+>         _bb.Observe(_observedKey, OnKeyChanged);
+>     }
+>     public void OnCeaseRelevant()
+>     {
+>         _bb.Unobserve(_observedKey, OnKeyChanged);
+>     }
+>     private void OnKeyChanged(string key, object oldVal, object newVal)
+>     {
+>         // 递归深度限制
+>         if (_abortDepth >= MaxAbortDepth) return;
+>         bool current = _condition();
+>         if (current == _lastConditionResult) return; // 无变化
+>         _lastConditionResult = current;
+>         _abortDepth++;
+>         try
+>         {
+>             if (_mode.HasFlag(ObserverMode.Self) && !current)
+>                 RequestAbort(AbortTarget.Self);
+>             if (_mode.HasFlag(ObserverMode.LowerPriority) && current)
+>                 RequestAbort(AbortTarget.LowerPriority);
+>         }
+>         finally { _abortDepth--; }
+>     }
+> }
+> ```
+>
+> **3. 测试场景验证**：
+> - Agent A 在 Patrol(Running, priority=2)，外部设置 `ThreatLevel = High` → Observer 触发 LowerPriority abort(深度=1) → Patrol 被中断 → Selector 重新评估 → 进入 Flee(priority=1)。
+> - Agent B 在 Flee(Running, priority=1)，外部设置 `ThreatLevel = Low` → Observer 触发 Self abort(深度=1) → Flee 分支中断 → 回退到 Patrol。
+> - **防止无限循环测试**：在 Flee 的 OnEnter 中写入 `ThreatLevel = Medium`（模拟恢复），但 `Medium != Low` 且 `Medium != High`，不触发 Observer 条件状态切换——安全。如果错误地写入 `High`，递归深度限制（MaxAbortDepth=3）会阻止无限循环。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Unreal Engine 官方文档**：[Behavior Tree Overview](https://docs.unrealengine.com/5.3/en-US/behavior-tree-in-unreal-engine/) — 包含 Blackboard 资产管理、Key Selector 使用指南和调试工作流。

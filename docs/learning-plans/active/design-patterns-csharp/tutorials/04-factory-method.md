@@ -753,6 +753,263 @@ public interface IReportGeneratorFactory
 > 使用 `builder.Services.AddKeyedSingleton<IReportGenerator, PdfReportGenerator>("pdf")` 可以避免手动写工厂的 switch/dictionary。但仍需理解工厂方法原理，才能判断何时用 Keyed Services、何时用自定义工厂。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 添加 HTML 格式支持，**不修改任何已有代码**——完全符合 OCP：
+>
+> ```csharp
+> // ═══ 新增 HTML 产品（无需修改 IDocument 接口和已有实现）═══
+> public class HtmlDocument : IDocument
+> {
+>     public string Format => "HTML";
+>     public string Content { get; set; } = string.Empty;
+>
+>     public void Open(string path)
+>         => Console.WriteLine($"[HTML] 打开文档: {path}");
+>
+>     public void Save(string path)
+>         => Console.WriteLine($"[HTML] 保存文档到: {path} (Content: {Content})");
+> }
+>
+> // ═══ 新增 HTML 创建者（无需修改 DocumentCreator 基类）═══
+> public class HtmlCreator : DocumentCreator
+> {
+>     protected override IDocument CreateDocument()
+>     {
+>         Console.WriteLine("  → HtmlCreator 正在创建 HTML 文档...");
+>         return new HtmlDocument();
+>     }
+> }
+>
+> // ═══ Main 中验证 ===========
+> public static void Main()
+> {
+>     // 已有格式仍然工作
+>     ProcessDocument(new PdfCreator(),   "report.pdf");
+>     ProcessDocument(new WordCreator(),  "letter.docx");
+>     ProcessDocument(new ExcelCreator(), "data.xlsx");
+>
+>     // 新增 HTML 格式 — ProcessDocument 无需修改！
+>     ProcessDocument(new HtmlCreator(),  "page.html");
+> }
+> ```
+>
+> **OCP 验证：** 仅新增两个类（`HtmlDocument`、`HtmlCreator`），没有修改 `IDocument`、`DocumentCreator`、`PdfCreator`/`WordCreator`/`ExcelCreator` 或 `ProcessDocument` 中的任何一行代码。这就是"对扩展开放，对修改关闭"的具体体现。
+
+> [!tip]- 练习 2 参考答案
+> 参数化工厂方法，PdfCreator 使用 `Password`，WordCreator 忽略它：
+>
+> ```csharp
+> public class DocumentOptions
+> {
+>     public string PageSize { get; set; } = "A4";
+>     public string? Password { get; set; }
+>     public bool IsLandscape { get; set; }
+> }
+>
+> // ═══ 扩展 IDocument 接口 — 添加参数化创建的配置属性 ═══
+> // （仅新增属性，不破坏已有实现——已有 PDF/Word/Excel 类用默认值）
+> public interface IParameterizedDocument : IDocument
+> {
+>     DocumentOptions Options { get; }
+> }
+>
+> public abstract class ParameterizedDocumentCreator
+> {
+>     protected abstract IDocument CreateDocument(DocumentOptions options);
+>
+>     public IDocument NewDocument(string path, DocumentOptions options)
+>     {
+>         var doc = CreateDocument(options);
+>         Console.WriteLine($"创建了新 {doc.Format} 文档（{options.PageSize}{(options.IsLandscape ? ", 横向" : "")}）");
+>         doc.Open(path);
+>         return doc;
+>     }
+> }
+>
+> // ═══ 支持参数化的 PDF 创建者 ═══
+> public class ParameterizedPdfCreator : ParameterizedDocumentCreator
+> {
+>     protected override IDocument CreateDocument(DocumentOptions options)
+>     {
+>         Console.WriteLine("  → PdfCreator 正在创建 PDF 文档...");
+>         if (options.Password != null)
+>             Console.WriteLine($"  → 已设置文档加密密码: {new string('*', options.Password.Length)}");
+>
+>         return new PdfDocument
+>         {
+>             Content = options.Password != null
+>                 ? $"[加密文档] 页尺寸: {options.PageSize}{(options.IsLandscape ? " (横向)" : "")}"
+>                 : $"页尺寸: {options.PageSize}{(options.IsLandscape ? " (横向)" : "")}"
+>         };
+>     }
+> }
+>
+> // ═══ 支持参数化的 Word 创建者 — 忽略 Password ═══
+> public class ParameterizedWordCreator : ParameterizedDocumentCreator
+> {
+>     protected override IDocument CreateDocument(DocumentOptions options)
+>     {
+>         Console.WriteLine("  → WordCreator 正在创建 Word 文档...");
+>         // Word 有自己的加密机制，忽略 Password 参数
+>         // 开发者可以在构造函数中注入 Word 专属加密配置
+>
+>         return new WordDocument
+>         {
+>             Content = $"页尺寸: {options.PageSize}{(options.IsLandscape ? " (横向)" : "")}"
+>         };
+>     }
+> }
+>
+> // ═══ 使用示例 ═══
+> public static void Main()
+> {
+>     var pdfCreator = new ParameterizedPdfCreator();
+>     var doc1 = pdfCreator.NewDocument("secret.pdf", new DocumentOptions
+>     {
+>         PageSize = "A3",
+>         Password = "s3cr3t",
+>         IsLandscape = true
+>     });
+>     doc1.Save("secret.pdf");
+>     Console.WriteLine();
+>
+>     var wordCreator = new ParameterizedWordCreator();
+>     var doc2 = wordCreator.NewDocument("report.docx", new DocumentOptions
+>     {
+>         PageSize = "Letter",
+>         IsLandscape = false
+>     });
+>     doc2.Save("report.docx");
+> }
+> ```
+>
+> **设计要点：** 使用配置对象 `DocumentOptions` 而非多个独立参数，避免了"不同子类需要不同参数导致抽象方法签名膨胀"的问题。子类可自由选择使用哪些配置字段——WordCreator 忽略 `Password` 是合理的设计决策，因为它有自己的加密体系。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 将工厂方法模式与 .NET DI 容器集成，使用 Keyed Services（.NET 8+）：
+>
+> ```csharp
+> using Microsoft.Extensions.DependencyInjection;
+> using Microsoft.Extensions.Hosting;
+>
+> // ═══ 报告相关类型 ====================
+> public record SalesData(string Region, decimal Revenue, int UnitsSold);
+>
+> public interface IReportGenerator
+> {
+>     string Generate(SalesData data);
+> }
+>
+> public class PdfReportGenerator : IReportGenerator
+> {
+>     public string Generate(SalesData data)
+>         => $"[PDF Report] {data.Region}: ¥{data.Revenue:N2}, {data.UnitsSold} units";
+> }
+>
+> public class ExcelReportGenerator : IReportGenerator
+> {
+>     public string Generate(SalesData data)
+>         => $"[Excel Report] {data.Region}: ¥{data.Revenue:N2}, {data.UnitsSold} units";
+> }
+>
+> public class HtmlReportGenerator : IReportGenerator
+> {
+>     public string Generate(SalesData data)
+>         => $"<h1>{data.Region}</h1><p>Revenue: ¥{data.Revenue:N2}</p>";
+> }
+>
+> // ═══ 工厂接口与实现 ====================
+> public interface IReportGeneratorFactory
+> {
+>     IReportGenerator Create(string format);
+> }
+>
+> /// <summary>
+> /// 工厂实现 — 使用 Keyed Services 消除 switch 分支
+> /// </summary>
+> public class ReportGeneratorFactory : IReportGeneratorFactory
+> {
+>     private readonly IServiceProvider _serviceProvider;
+>
+>     public ReportGeneratorFactory(IServiceProvider serviceProvider)
+>         => _serviceProvider = serviceProvider;
+>
+>     public IReportGenerator Create(string format)
+>     {
+>         // .NET 8+ Keyed Services：通过 key 从容器获取
+>         return _serviceProvider.GetRequiredKeyedService<IReportGenerator>(format.ToLowerInvariant());
+>     }
+> }
+>
+> // ═══ 使用工厂的服务 ====================
+> public class SalesReportService
+> {
+>     private readonly IReportGeneratorFactory _factory;
+>
+>     public SalesReportService(IReportGeneratorFactory factory)
+>         => _factory = factory;
+>
+>     public string GenerateReport(string format, SalesData data)
+>     {
+>         var generator = _factory.Create(format);
+>         return generator.Generate(data);
+>     }
+> }
+>
+> // ═══ Program.cs — DI 注册 ====================
+> // using Microsoft.Extensions.Hosting;
+>
+> // var builder = Host.CreateApplicationBuilder(args);
+>
+> // // 使用 Keyed Services 注册（.NET 8+）
+> // builder.Services.AddKeyedSingleton<IReportGenerator, PdfReportGenerator>("pdf");
+> // builder.Services.AddKeyedSingleton<IReportGenerator, ExcelReportGenerator>("excel");
+> // builder.Services.AddKeyedSingleton<IReportGenerator, HtmlReportGenerator>("html");
+>
+> // // 注册工厂
+> // builder.Services.AddSingleton<IReportGeneratorFactory, ReportGeneratorFactory>();
+> // builder.Services.AddSingleton<SalesReportService>();
+>
+> // var host = builder.Build();
+>
+> // // 使用
+> // var service = host.Services.GetRequiredService<SalesReportService>();
+> // var result = service.GenerateReport("pdf", new SalesData("华东", 1250000m, 3400));
+> // Console.WriteLine(result);
+>
+> // ═══ 如果不用 Keyed Services（.NET 6/7 兼容方案）═══
+> // 备选方案：注入 IEnumerable<IReportGenerator> 用字典映射
+>
+> public class LegacyReportGeneratorFactory : IReportGeneratorFactory
+> {
+>     private readonly Dictionary<string, IReportGenerator> _generators;
+>
+>     public LegacyReportGeneratorFactory(IEnumerable<IReportGenerator> generators)
+>     {
+>         // 使用属性或类型名做映射
+>         _generators = generators.ToDictionary(
+>             g => g.GetType().Name.Replace("ReportGenerator", "").ToLowerInvariant());
+>     }
+>
+>     public IReportGenerator Create(string format)
+>     {
+>         if (_generators.TryGetValue(format.ToLowerInvariant(), out var generator))
+>             return generator;
+>         throw new ArgumentException($"Unknown report format: {format}");
+>     }
+> }
+> ```
+>
+> **设计要点：**
+> - **Keyed Services（.NET 8+）** 是最简洁的方案：一行 `AddKeyedSingleton` 注册，一行 `GetRequiredKeyedService` 获取
+> - **IEnumerable 方案（.NET 6/7）** 兼容旧版本，但依赖命名约定做映射
+> - 工厂本身也是通过 DI 解析的，实现了"工厂的工厂"
+> - 新增报告格式只需注册新的 Keyed Service，工厂代码无需修改（OCP）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

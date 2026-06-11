@@ -342,6 +342,221 @@ Color GetExploredColor(int dist, int maxDist)
 
 提示：维护一个 `std::vector<std::list<Point>> buckets(max_cost)`，按 `dist % max_cost` 索引。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **统计优先队列的 push/pop/stale-skip 次数：** 在 Dijkstra 函数中添加三个计数器，由调用方传入（或使用输出参数）。
+>
+> ```cpp
+> struct DijkstraStats {
+>     int pushes = 0;
+>     int pops = 0;
+>     int skipped = 0;  // 过时条目跳过次数
+> };
+>
+> auto dijkstra_with_stats(const std::vector<std::vector<int>>& cost_map,
+>              Point start, Point goal,
+>              std::vector<std::vector<int>>& out_dist,
+>              std::vector<std::vector<Point>>& out_parent,
+>              std::vector<Point>& out_search_order,
+>              DijkstraStats& stats)  // 新增参数
+>     -> std::vector<Point>
+> {
+>     // ... 初始化代码不变 ...
+>
+>     while (!pq.empty()) {
+>         State cur = pq.top(); pq.pop();
+>         stats.pops++;  // 每次 pop 计数
+>         int d = cur.dist, x = cur.x, y = cur.y;
+>
+>         if (d > out_dist[x][y]) {
+>             stats.skipped++;  // 过时条目，跳过
+>             continue;
+>         }
+>
+>         // ... 搜索逻辑 ...
+>
+>         for (int dir = 0; dir < 4; ++dir) {
+>             // ... 邻居检查 ...
+>             int new_dist = out_dist[x][y] + cell_cost;
+>             if (new_dist < out_dist[nx][ny]) {
+>                 out_dist[nx][ny] = new_dist;
+>                 out_parent[nx][ny] = {x, y};
+>                 pq.push({new_dist, nx, ny});
+>                 stats.pushes++;  // 每次 push 计数
+>             }
+>         }
+>     }
+>     // ...
+> }
+> ```
+>
+> **不同地形分布下的变化规律：**
+>
+> - **均匀代价（全是 ROAD=1）：** Dijkstra 退化为 BFS，每个节点只被 push 一次（入队同时确定最短距离），`skipped` ≈ 0。push 数 ≈ 访问节点数。
+> - **代价差异大（道路+沼泽混合）：** 同一节点可能多次入队——先通过沼泽的短步数路径先到但代价高，后来通过绕道路的更长步数但更便宜的路径"修正"距离，产生过时条目。`skipped` 升高。
+> - **代价种类越多、差异越大：** push 数远大于访问节点数，`skipped/pops` 比率升高。极端情况下（如地形代价 1~100），一个节点可能被更新数十次。
+> - **实践中：** 如果 `skipped/pops > 0.5`，说明大量时间花在无效处理上，考虑使用支持 decrease-key 的优先队列（如 `boost::d_ary_heap`）。
+
+> [!tip]- 练习 2 参考答案
+> **ASCII 热力图：将 `dist` 值映射到密度字符**，形成等代价轮廓线。
+>
+> ```cpp
+> void print_heatmap(const std::vector<std::string>& char_grid,
+>                    const std::vector<std::vector<int>>& dist,
+>                    const std::vector<Point>& path,
+>                    Point start, Point goal)
+> {
+>     int rows = static_cast<int>(char_grid.size());
+>     int cols = static_cast<int>(char_grid[0].size());
+>     const int INF = std::numeric_limits<int>::max();
+>
+>     // 密度字符数组（从稀疏到密集）
+>     const char shades[] = " .:-=+*#%@";
+>     const int num_shades = 10;
+>
+>     // 标记路径
+>     std::vector<std::vector<bool>> on_path(rows, std::vector<bool>(cols, false));
+>     for (auto p : path) on_path[p.x][p.y] = true;
+>
+>     // 找到已访问节点的距离范围
+>     int min_dist = INF, max_dist = 0;
+>     for (int x = 0; x < rows; ++x)
+>         for (int y = 0; y < cols; ++y)
+>             if (dist[x][y] != INF) {
+>                 min_dist = std::min(min_dist, dist[x][y]);
+>                 max_dist = std::max(max_dist, dist[x][y]);
+>             }
+>
+>     if (min_dist == INF) return; // 没有访问任何节点
+>
+>     std::cout << "\n等代价轮廓热力图 (dist 范围: " << min_dist << "-" << max_dist << ")\n";
+>     std::cout << "密度: " << shades << "\n\n";
+>
+>     for (int x = 0; x < rows; ++x) {
+>         for (int y = 0; y < cols; ++y) {
+>             if (x == start.x && y == start.y) {
+>                 std::cout << "S";
+>             } else if (x == goal.x && y == goal.y) {
+>                 std::cout << "G";
+>             } else if (on_path[x][y]) {
+>                 std::cout << "*";
+>             } else if (char_grid[x][y] == '#') {
+>                 std::cout << "█";  // 墙用实心方块
+>             } else if (dist[x][y] != INF) {
+>                 // 线性映射到 shade 索引
+>                 int range = max_dist - min_dist;
+>                 int idx = (range == 0) ? 0
+>                     : (dist[x][y] - min_dist) * (num_shades - 1) / range;
+>                 std::cout << shades[idx];
+>             } else {
+>                 std::cout << " "; // 未探索
+>             }
+>         }
+>         std::cout << "\n";
+>     }
+> }
+> ```
+>
+> **观察要点：** Dijkstra 的波前形状不是圆形——在代价低的区域（道路 `.`，代价=1）扩散更远，在代价高的区域（沼泽 `~`，代价=10）扩散慢。热力图中同等密度的字符形成**等代价轮廓线**（isotropic in cost space）。这与 BFS 的同心圆式扩散形成对比：Dijkstra 的波前会"沿着道路快速延伸"，然后向两侧的高代价区域缓慢渗透。
+
+> [!tip]- 练习 3 参考答案（挑战）
+> **Dial's Algorithm：** 当边权值为小整数（如 1~C，C≈10）时，用桶数组代替优先队列。核心思想：dist 值单调递增，用 `dist % (C+1)` 做循环桶索引。
+>
+> ```cpp
+> #include <list>
+> #include <climits>
+>
+> auto dials_algorithm(const std::vector<std::vector<int>>& cost_map,
+>                      Point start, Point goal,
+>                      std::vector<Point>& out_search_order)
+>     -> std::vector<Point>
+> {
+>     int rows = static_cast<int>(cost_map.size());
+>     int cols = static_cast<int>(cost_map[0].size());
+>     const int INF = std::numeric_limits<int>::max();
+>
+>     // 找到最大边代价，确定桶数量
+>     int max_cost = 0;
+>     for (int x = 0; x < rows; ++x)
+>         for (int y = 0; y < cols; ++y)
+>             if (cost_map[x][y] > 0 && cost_map[x][y] > max_cost)
+>                 max_cost = cost_map[x][y];
+>
+>     // 桶数量 = max_cost + 1（最坏情况每次松弛前进 max_cost 距离）
+>     // 使用双缓冲：buckets[0..B-1] 存放当前"窗口"内的节点
+>     const int B = max_cost + 1;
+>     std::vector<std::list<Point>> buckets(B);
+>
+>     std::vector<std::vector<int>> dist(rows, std::vector<int>(cols, INF));
+>     std::vector<std::vector<Point>> parent(rows, std::vector<Point>(cols, {-1, -1}));
+>
+>     dist[start.x][start.y] = 0;
+>     buckets[0].push_back(start);
+>
+>     int current_dist = 0;
+>
+>     while (true) {
+>         // 找到第一个非空桶
+>         int b = current_dist % B;
+>         while (buckets[b].empty()) {
+>             current_dist++;
+>             b = current_dist % B;
+>             // 如果扫描完整轮仍为空，说明所有可达节点已处理完
+>             if (current_dist > INF / 2) goto done;
+>         }
+>
+>         Point v = buckets[b].front();
+>         buckets[b].pop_front();
+>         int x = v.x, y = v.y;
+>
+>         if (dist[x][y] < current_dist) continue; // 过时条目
+>
+>         out_search_order.push_back(v);
+>         if (x == goal.x && y == goal.y) break;
+>
+>         for (int dir = 0; dir < 4; ++dir) {
+>             int nx = x + DX[dir], ny = y + DY[dir];
+>             if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) continue;
+>             int cell_cost = cost_map[nx][ny];
+>             if (cell_cost < 0) continue; // WALL
+>
+>             int new_dist = dist[x][y] + cell_cost;
+>             if (new_dist < dist[nx][ny]) {
+>                 dist[nx][ny] = new_dist;
+>                 parent[nx][ny] = {x, y};
+>                 buckets[new_dist % B].push_back({nx, ny});
+>             }
+>         }
+>     }
+>
+> done:
+>     // 回溯路径
+>     std::vector<Point> path;
+>     if (dist[goal.x][goal.y] == INF) return path;
+>     for (Point p = goal; p.x != -1; p = parent[p.x][p.y])
+>         path.push_back(p);
+>     std::reverse(path.begin(), path.end());
+>     return path;
+> }
+> ```
+>
+> **性能对比关键点：**
+>
+> | 方面 | `std::priority_queue` | Dial's Algorithm |
+> |------|----------------------|------------------|
+> | 插入 | O(log N) | O(1)（直接插入桶头/尾） |
+> | 取最小 | O(log N) | O(1) 摊销 |
+> | 总复杂度 | O((V+E) log V) | O(V * C + E) 或 O(V+E) 当 C 为常数 |
+> | 额外开销 | 堆的 rebalance、内存分配 | 桶数组可能稀疏 |
+> | 适用 | 任意正权 | 仅小整数权（C ≤ 100 时效果最好） |
+> | 典型地形代价场景 | 可行但 suboptimal | **设计目标** |
+>
+> **实测建议：** 对于地形代价 1~10 的典型游戏地图（如本教程的地形），Dial's Algorithm 比 priority_queue 快 2~5 倍。在地图更大（1000x1000）且代价种类少的场景下优势更明显。代价范围扩大（如包括代价=100 的岩浆地形）后桶数量增加、内存局部性变差，优势缩小。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **E. W. Dijkstra, "A Note on Two Problems in Connexion with Graphs" (1959)** — 原始论文，仅 3 页，极其精炼

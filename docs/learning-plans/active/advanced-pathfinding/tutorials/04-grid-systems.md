@@ -604,6 +604,302 @@ public class HexMapRenderer : MonoBehaviour
 ### 练习 3: 三角形网格寻路（挑战）
 三角形网格（每个格子有 3 个邻居，但根据方向可能是 3-12 个不等距邻居）。设计坐标系统和邻居枚举。提示：将等边三角形视为六边形的 1/6 或方格的对角线剖分。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **模板化 A\*：** 用 C++20 concept 约束 Grid 类型必须提供的接口，使 A\* 实现对 Grid4/Grid8/HexGrid 通用。
+>
+> ```cpp
+> #include <concepts>
+> #include <functional>
+>
+> // ============================================================
+> // Grid 概念定义（C++20 concepts）
+> // ============================================================
+> template<typename G>
+> concept GridConcept = requires(const G& grid, int x, int y, int x2, int y2) {
+>     // 必须提供这些成员
+>     { grid.rows }    -> std::convertible_to<int>;
+>     { grid.cols }    -> std::convertible_to<int>;
+>     { grid.in_bounds(x, y) } -> std::convertible_to<bool>;
+>     { grid.at(x, y).walkable } -> std::convertible_to<bool>;
+>     { grid.at(x, y).cost }    -> std::convertible_to<double>;
+>     // 邻居迭代: callback(nx, ny, step_cost) 被调用
+>     grid.for_each_neighbor(x, y, std::function<void(int,int,double)>{});
+>     // 启发函数（静态或成员）
+>     { G::heuristic(x, y, x2, y2) } -> std::convertible_to<double>;
+> };
+>
+> // ============================================================
+> // 通用 A*（模板化）
+> // ============================================================
+> template<GridConcept Grid>
+> struct GenericSearchResult {
+>     std::vector<std::pair<int,int>> path;
+>     int nodes_explored = 0;
+>     double total_cost = 0.0;
+>     bool success = false;
+> };
+>
+> template<GridConcept Grid>
+> GenericSearchResult<Grid> generic_astar(
+>     const Grid& grid, int sx, int sy, int gx, int gy)
+> {
+>     int rows = grid.rows, cols = grid.cols;
+>     const double INF = std::numeric_limits<double>::infinity();
+>
+>     // g_cost 和 parent 用坐标索引
+>     std::vector<std::vector<double>> g_cost(rows, std::vector<double>(cols, INF));
+>     using ParentPair = std::pair<int,int>;
+>     std::vector<std::vector<ParentPair>> parent(rows,
+>         std::vector<ParentPair>(cols, {-1, -1}));
+>     std::vector<std::vector<bool>> closed(rows, std::vector<bool>(cols, false));
+>
+>     // f = g + h 优先队列
+>     struct State {
+>         double f, g; int x, y;
+>         bool operator<(const State& o) const { return f > o.f; }
+>     };
+>     std::priority_queue<State> open;
+>
+>     g_cost[sx][sy] = 0.0;
+>     double h0 = Grid::heuristic(sx, sy, gx, gy);
+>     open.push({h0, 0.0, sx, sy});
+>
+>     GenericSearchResult<Grid> result{};
+>
+>     while (!open.empty()) {
+>         State cur = open.top(); open.pop();
+>         int x = cur.x, y = cur.y;
+>         if (closed[x][y]) continue;
+>         closed[x][y] = true;
+>         result.nodes_explored++;
+>
+>         if (x == gx && y == gy) {
+>             result.success = true;
+>             result.total_cost = cur.g;
+>             for (auto p = ParentPair{gx, gy}; p.first != -1; ) {
+>                 result.path.push_back(p);
+>                 p = parent[p.first][p.second];
+>             }
+>             std::reverse(result.path.begin(), result.path.end());
+>             break;
+>         }
+>
+>         // 关键：通过 concept 约束的 for_each_neighbor 接口
+>         grid.for_each_neighbor(x, y,
+>             [&](int nx, int ny, double step_cost) {
+>                 double new_g = g_cost[x][y] + step_cost;
+>                 if (new_g < g_cost[nx][ny]) {
+>                     g_cost[nx][ny] = new_g;
+>                     parent[nx][ny] = {x, y};
+>                     double f = new_g + Grid::heuristic(nx, ny, gx, gy);
+>                     open.push({f, new_g, nx, ny});
+>                 }
+>             });
+>     }
+>     return result;
+> }
+>
+> // ============================================================
+> // 验证：三个实例化
+> // ============================================================
+> void test_template_astar() {
+>     Grid4 g4(10, 10);
+>     auto r4 = generic_astar(g4, 0, 0, 9, 9);
+>     std::cout << "Grid4 A*: success=" << r4.success
+>               << " explored=" << r4.nodes_explored
+>               << " cost=" << r4.total_cost << "\n";
+>
+>     Grid8 g8(10, 10);
+>     auto r8 = generic_astar(g8, 0, 0, 9, 9);
+>     std::cout << "Grid8 A*: success=" << r8.success
+>               << " explored=" << r8.nodes_explored
+>               << " cost=" << r8.total_cost << "\n";
+>
+>     HexGrid hx(10, 10);
+>     auto rh = generic_astar(hx, 0, 0, 9, 9);
+>     std::cout << "HexGrid A*: success=" << rh.success
+>               << " explored=" << rh.nodes_explored
+>               << " cost=" << rh.total_cost << "\n";
+> }
+> ```
+>
+> **设计要点：**
+> - Grid4/Grid8/HexGrid 已有 `for_each_neighbor` 和 `heuristic` —— 它们天然满足 concept 约束。
+> - `for_each_neighbor` 的 callback 签名统一为 `(nx, ny, step_cost)`，不暴露内部坐标语义，寻路算法不必知道是六边形还是方格。
+> - 如果使用 C++17 而非 C++20，可以用 SFINAE + `std::enable_if` 或 `if constexpr` + traits 模板实现相同的约束效果。
+
+> [!tip]- 练习 2 参考答案
+> **六边形 Bresenham 线算法（立方坐标版）：** 在起点和终点之间线性插值，每一步对立方坐标做 `cube_round`，去重后输出经过的六边形序列。
+>
+> ```cpp
+> #include <vector>
+> #include <cmath>
+> #include <algorithm>
+>
+> // 将浮点立方坐标四舍五入到最近的六边形
+> Point3i cube_round(double q, double r, double s) {
+>     int rq = static_cast<int>(std::round(q));
+>     int rr = static_cast<int>(std::round(r));
+>     int rs = static_cast<int>(std::round(s));
+>
+>     double dq = std::abs(rq - q);
+>     double dr = std::abs(rr - r);
+>     double ds = std::abs(rs - s);
+>
+>     // 修正：确保 q + r + s = 0
+>     if (dq > dr && dq > ds)
+>         rq = -rr - rs;
+>     else if (dr > ds)
+>         rr = -rq - rs;
+>     // else rs stays
+>
+>     return {rq, rr, rs};
+> }
+>
+> // 六边形直线绘制（视线 / 射程判定）
+> std::vector<Point3i> hex_line(Point3i start, Point3i end) {
+>     // 立方距离 = 线段经过的六边形数量
+>     int N = std::max({std::abs(start.q - end.q),
+>                       std::abs(start.r - end.r),
+>                       std::abs(start.s - end.s)});
+>
+>     std::vector<Point3i> results;
+>     results.reserve(N + 1);
+>
+>     // 在 N+1 个均匀间隔的点上插值
+>     for (int i = 0; i <= N; ++i) {
+>         double t = (N == 0) ? 0.0 : static_cast<double>(i) / N;
+>         double q = start.q + (end.q - start.q) * t;
+>         double r = start.r + (end.r - start.r) * t;
+>         double s = start.s + (end.s - start.s) * t;
+>         Point3i pt = cube_round(q, r, s);
+>
+>         // 去除连续重复（插值可能在同一六边形停留）
+>         if (results.empty() || !(results.back().q == pt.q &&
+>                                   results.back().r == pt.r &&
+>                                   results.back().s == pt.s))
+>             results.push_back(pt);
+>     }
+>     return results;
+> }
+>
+> // 从轴向坐标调用（无需手动转立方）
+> std::vector<std::pair<int,int>> hex_line_axial(
+>     int q1, int r1, int q2, int r2)
+> {
+>     auto start = HexGrid::axial_to_cube(q1, r1);
+>     auto end   = HexGrid::axial_to_cube(q2, r2);
+>     auto cubes = hex_line(start, end);
+>
+>     std::vector<std::pair<int,int>> axials;
+>     for (auto& c : cubes)
+>         axials.emplace_back(c.q, c.r);
+>     return axials;
+> }
+>
+> // 视线检查：线段经过的所有六边形都可通行？
+> bool hex_has_los(const HexGrid& grid,
+>                  int q1, int r1, int q2, int r2) {
+>     auto cells = hex_line_axial(q1, r1, q2, r2);
+>     // 起点和终点本身不检查（攻击者/目标在自己的格子里）
+>     for (size_t i = 1; i + 1 < cells.size(); ++i) {
+>         auto [q, r] = cells[i];
+>         if (!grid.at(q, r).walkable) return false; // 被阻挡
+>     }
+>     return true;
+> }
+> ```
+>
+> **算法原理：** 六边形 Bresenham 的核心假设——从六边形 A 到 B 的直线在 N 个均匀间隔点上做 `cube_round`。这和方格 Bresenham 的"追踪误差累积"等效但更简洁——立方坐标自带六边形对齐。`cube_round` 的修正逻辑保证约束 `q+r+s=0` 不被浮点误差打破。
+
+> [!tip]- 练习 3 参考答案（挑战）
+> **三角形网格的设计思路：**
+>
+> **方案 A：六边形剖分**
+> 将等边三角形视为六边形的 1/6（每个六边形由 6 个三角形组成）。使用 (hex_q, hex_r, tri_index) 三元组——前两者定位六边形，tri_index ∈ [0,5] 定位三角形。邻居规则：
+> - tri_index 相邻的两个三角形（同一六边形内）：2 个邻居
+> - 如果 tri_index 是朝向六边形边界的那个三角形 → 越界邻居在相邻六边形中：1-2 个额外邻居
+> - 总计 3 个邻居（等边三角形铺满平面）
+>
+> **方案 B：方格对角线剖分**
+> 将每个方格沿对角线分割为 2 个三角形。坐标 = (x, y, orientation) 其中 orientation ∈ {0, 1} 表示左下/右上三角形。每个三角形有 3 个邻接边：
+> - 直角边（两条）：分别通向相邻方格的三角形
+> - 斜边：通向同一方格内的另一个三角形
+>
+> ```cpp
+> // 方案 B 的实现（方格对角线剖分）
+> struct TriCoord { int x, y, half; }; // half=0: 左下, half=1: 右上
+>
+> class TriGrid {
+> public:
+>     int rows, cols;
+>     std::vector<std::vector<std::array<Cell, 2>>> cells; // 每个方格两个三角形
+>
+>     TriGrid(int r, int c) : rows(r), cols(c),
+>         cells(r, std::vector<std::array<Cell, 2>>(c)) {}
+>
+>     bool in_bounds(int x, int y) const {
+>         return x >= 0 && x < rows && y >= 0 && y < cols;
+>     }
+>
+>     Cell& at(int x, int y, int half) { return cells[x][y][half]; }
+>
+>     // 三角形邻居枚举（每个三角形恰好 3 个邻居）
+>     void for_each_neighbor(int x, int y, int half,
+>         std::function<void(int nx, int ny, int n_half, double cost)> cb) const
+>     {
+>         if (half == 0) {
+>             // 左下三角形：三条边是 — 上边, | 右边, / 斜边
+>             // 上边 → (x-1, y, 1) 或边界外
+>             if (in_bounds(x-1, y))
+>                 cb(x-1, y, 1, at(x-1, y, 1).cost);
+>             // 右边 → (x, y+1, 0) 或 (x, y+1, 1) 取决于接壤
+>             if (in_bounds(x, y+1))
+>                 cb(x, y+1, 1, at(x, y+1, 1).cost);
+>             // 斜边 → 同方格内的右上三角形
+>             cb(x, y, 1, at(x, y, 1).cost);
+>         } else {
+>             // 右上三角形：三条边是 / 斜边, — 下边, | 左边
+>             // 斜边 → 同方格内的左下三角形
+>             cb(x, y, 0, at(x, y, 0).cost);
+>             // 下边
+>             if (in_bounds(x+1, y))
+>                 cb(x+1, y, 0, at(x+1, y, 0).cost);
+>             // 左边
+>             if (in_bounds(x, y-1))
+>                 cb(x, y-1, 0, at(x, y-1, 0).cost);
+>         }
+>     }
+>
+>     // 启发函数：三角形中心坐标的欧几里得距离
+>     static double heuristic(int x1, int y1, int h1, int x2, int y2, int h2) {
+>         // 三角形中心：half=0 在方格的左下 1/3 处，half=1 在右上 2/3 处
+>         auto center = [](int x, int y, int h) -> std::pair<double,double> {
+>             double cx = x + (h == 0 ? 1.0/3 : 2.0/3);
+>             double cy = y + (h == 0 ? 1.0/3 : 2.0/3);
+>             return {cx, cy};
+>         };
+>         auto [cx1, cy1] = center(x1, y1, h1);
+>         auto [cx2, cy2] = center(x2, y2, h2);
+>         return std::sqrt((cx1-cx2)*(cx1-cx2) + (cy1-cy2)*(cy1-cy2));
+>     }
+> };
+> ```
+>
+> **设计考量：**
+>
+> | 方案 | 优点 | 缺点 |
+> |------|------|------|
+> | 六边形剖分 | 所有三角形形状相同（等边） | 坐标系统复杂，需要 hex + sub-index |
+> | 方格剖分 | 坐标简单，与现有方格系统兼容 | 三角形是直角等腰（非等边），移动代价不均 |
+>
+> **实际游戏中的三角形网格：** 极少直接用于寻路——更多用作 NavMesh 的底层图元（Delaunay 三角剖分）。三角形寻路的特点是移动方向不受网格约束（可以在任意角度穿越三角形），但邻居枚举比方格/六边形复杂得多。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Red Blob Games: Hexagonal Grids** — 关于六边形网格的权威参考，涵盖所有坐标系统、算法和可视化

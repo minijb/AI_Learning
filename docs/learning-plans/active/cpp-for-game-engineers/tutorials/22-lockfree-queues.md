@@ -664,6 +664,366 @@ public:
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <chrono>
+> #include <iostream>
+> #include <atomic>
+> #include <thread>
+> #include <string>
+> #include <deque>
+> #include <mutex>
+>
+> // 复用教程中的 SPSCQueue 和 MutexDequeQueue
+> // (此处假定已定义——完整代码见 2.1 和 2.4 节）
+>
+> template<typename T>
+> class MutexDequeQueue {
+>     std::deque<T> deque_;
+>     std::mutex mtx_;
+> public:
+>     void push(T val) {
+>         std::lock_guard lk(mtx_);
+>         deque_.push_back(std::move(val));
+>     }
+>     bool pop(T& val) {
+>         std::lock_guard lk(mtx_);
+>         if (deque_.empty()) return false;
+>         val = std::move(deque_.front());
+>         deque_.pop_front();
+>         return true;
+>     }
+> };
+>
+> // ===== Benchmark 模板 =====
+> template<typename Queue>
+> double bench_spsc(int num_items) {
+>     Queue q;
+>     std::atomic<bool> start{false};
+>     std::atomic<long long> checksum{0};
+>
+>     std::thread producer([&] {
+>         while (!start.load(std::memory_order_acquire));
+>         for (int i = 0; i < num_items; ++i) {
+>             while (!q.push(i)) {} // spin until success
+>         }
+>     });
+>
+>     std::thread consumer([&] {
+>         long long sum = 0;
+>         int received = 0;
+>         while (!start.load(std::memory_order_acquire));
+>         while (received < num_items) {
+>             int val;
+>             if (q.pop(val)) {
+>                 sum += val;
+>                 ++received;
+>             }
+>         }
+>         checksum.store(sum, std::memory_order_release);
+>     });
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     start.store(true, std::memory_order_release);
+>     producer.join();
+>     consumer.join();
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>
+>     // 验证正确性
+>     long long expected = static_cast<long long>(num_items - 1) * num_items / 2;
+>     if (checksum.load() != expected) {
+>         std::cerr << "CHECKSUM MISMATCH!\n";
+>     }
+>     return std::chrono::duration<double, std::milli>(t1 - t0).count();
+> }
+>
+> int main() {
+>     constexpr int N = 1'000'000;
+>
+>     std::cout << "=== SPSC vs Mutex+Deque Benchmark ===\n\n";
+>
+>     // 测试 1: int 类型
+>     std::cout << "--- int (1M items) ---\n";
+>     double t_spsc_int = bench_spsc<SPSCQueue<int, 1024>>(N);
+>     double t_mtx_int  = bench_spsc<MutexDequeQueue<int>>(N);
+>     std::cout << "SPSC:        " << t_spsc_int << " ms\n";
+>     std::cout << "Mutex+Deque: " << t_mtx_int << " ms\n";
+>     std::cout << "Speedup:     " << t_mtx_int / t_spsc_int << "x\n\n";
+>
+>     // 测试 2: std::string (64 字节）
+>     // 需要特化——string 不能直接用 int 的 push/pop
+>     std::cout << "--- std::string(64B, 1M items) ---\n";
+>     // 此处略去 string 版本 benchmark 模板（结构与 int 版相同）
+>     // 只需将 Queue 模板参数改为 SPSCQueue<std::string, 1024>
+>     // 和 MutexDequeQueue<std::string>
+>
+>     return 0;
+> }
+> ```
+>
+> **差异分析**：
+> - `int` 差异主要来自锁开销（atomic + futex/临界区 vs 无锁 CAS）
+>   - SPSC: push 约 2 条 atomic 操作 + 1 次内存写入；pop 同理
+>   - Mutex+Deque: push 需获取锁（原子操作+可能的系统调用）+ deque 扩容的堆分配
+> - `std::string` 差异更大：
+>   - SPSC: string 的短字符串优化（SSO）使 ≤15 字节的 string 无堆分配，64 字节触发堆分配但每次 move 只是指针交换
+>   - Mutex+Deque: `push_back(std::move(val))` 仍触发 deque 内部节点的堆分配，且锁持有期间可能阻塞其他操作
+> - `perf stat` 测量：
+>   - SPSC 的 cache-misses 通常低 3-10x（数据在同一个缓存行上，无锁竞争导致的缓存行弹跳少）
+>   - SPSC 的 branch-misses 也低（无锁版本的分支预测更稳定——循环中的 CAS 失败路径极少触发）
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <atomic>
+> #include <array>
+> #include <thread>
+> #include <chrono>
+> #include <iostream>
+>
+> // 无 padding 版本：head_ 和 tail_ 紧密相邻
+> template<typename T, size_t Capacity>
+> class SPSCQueue_NoPad {
+>     static_assert((Capacity & (Capacity - 1)) == 0);
+>
+>     struct Slot { T data; };
+>     // 注意：没有 alignas(64)，head_ 和 tail_ 相邻！
+>     std::atomic<size_t> head_{0};
+>     std::atomic<size_t> tail_{0};
+>     std::array<Slot, Capacity> buffer_;
+>
+> public:
+>     bool push(const T& item) {
+>         size_t t = tail_.load(std::memory_order_relaxed);
+>         size_t next = t + 1;
+>         if (next - head_.load(std::memory_order_acquire) > Capacity)
+>             return false;
+>         buffer_[t & (Capacity - 1)].data = item;
+>         tail_.store(next, std::memory_order_release);
+>         return true;
+>     }
+>
+>     bool pop(T& item) {
+>         size_t h = head_.load(std::memory_order_relaxed);
+>         if (h == tail_.load(std::memory_order_acquire))
+>             return false;
+>         item = buffer_[h & (Capacity - 1)].data;
+>         head_.store(h + 1, std::memory_order_release);
+>         return true;
+>     }
+> };
+>
+> // 有 padding 版本（教程中的 SPSCQueue——带 alignas(64)）
+> // SPSCQueue_Padded 即教程的 SPSCQueue，此处省略重复定义
+>
+> template<typename Queue>
+> double bench_throughput(int num_items) {
+>     Queue q;
+>     std::atomic<bool> start{false};
+>     volatile long long checksum = 0;  // volatile 防优化
+>
+>     std::thread producer([&] {
+>         while (!start.load(std::memory_order_acquire));
+>         for (int i = 0; i < num_items; ++i)
+>             while (!q.push(i)) {}
+>     });
+>
+>     std::thread consumer([&] {
+>         int received = 0;
+>         while (!start.load(std::memory_order_acquire));
+>         while (received < num_items) {
+>             int val;
+>             if (q.pop(val)) ++received;
+>         }
+>     });
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     start.store(true, std::memory_order_release);
+>     producer.join();
+>     consumer.join();
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>
+>     return std::chrono::duration<double, std::milli>(t1 - t0).count();
+> }
+>
+> int main() {
+>     constexpr int N = 10'000'000;
+>
+>     // 应在双核系统上运行以获得明显差异
+>     double t_nopad = bench_throughput<SPSCQueue_NoPad<int, 1024>>(N);
+>     double t_pad   = bench_throughput<SPSCQueue<int, 1024>>(N);
+>
+>     std::cout << "=== Cache Line Padding Impact ===\n";
+>     std::cout << "No padding: " << t_nopad << " ms\n";
+>     std::cout << "Padded:     " << t_pad << " ms\n";
+>     std::cout << "Slowdown without padding: "
+>               << ((t_nopad / t_pad) - 1.0) * 100 << "%\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **伪共享解释**：
+> - 无 padding 时，`head_` 和 `tail_` 在同一缓存行（64 字节）
+> - 生产者写 `tail_` → 该缓存行在生产者核心标记为 Modified
+> - 消费者写 `head_` → 同一缓存行需要从生产者核心 Invalidate + 传输到消费者核心
+> - 即便 head 和 tail 是独立变量，它们共享一个缓存行 → 每次写入都使对方核心的缓存行失效
+> - 预期差异：无 padding 版本慢 20-50%（取决于核心拓扑）
+> - 检测工具：Linux `perf c2c` 显示 HITM（Hit Modified）计数；Windows Performance Toolkit 的 Contention 视图
+
+> [!tip]- 练习 3 参考答案（挑战）
+> ```cpp
+> #include <atomic>
+> #include <array>
+> #include <vector>
+> #include <memory>
+> #include <cstring>
+> #include <chrono>
+> #include <iostream>
+> #include <thread>
+>
+> // ===== 渲染命令定义 =====
+> struct RenderCommand {
+>     enum Type : uint8_t { DrawMesh, SetMaterial, SetTransform, Nop } type = Nop;
+>     union {
+>         struct { unsigned mesh_id; unsigned material_id; } draw;
+>         struct { unsigned material_id; } material;
+>         struct { float matrix[16]; } transform;
+>     };
+> };
+>
+> // ===== 简化 SPSC 队列（无锁，用作内部队列） =====
+> template<typename T, size_t Capacity>
+> class SPSCQueue_Simple {
+>     static_assert((Capacity & (Capacity - 1)) == 0);
+>     struct alignas(64) { std::atomic<size_t> head{0}; };
+>     struct alignas(64) { std::atomic<size_t> tail{0}; };
+>     T buffer_[Capacity];
+> public:
+>     bool push(const T& item) {
+>         size_t t = tail_.load(std::memory_order_relaxed);
+>         if (t - head_.load(std::memory_order_acquire) >= Capacity)
+>             return false;
+>         buffer_[t & (Capacity - 1)] = item;
+>         tail_.store(t + 1, std::memory_order_release);
+>         return true;
+>     }
+>     bool pop(T& item) {
+>         size_t h = head_.load(std::memory_order_relaxed);
+>         if (h == tail_.load(std::memory_order_acquire))
+>             return false;
+>         item = buffer_[h & (Capacity - 1)];
+>         head_.store(h + 1, std::memory_order_release);
+>         return true;
+>     }
+>     bool empty() const {
+>         return head_.load(std::memory_order_acquire) ==
+>                tail_.load(std::memory_order_acquire);
+>     }
+> };
+>
+> // ===== 三层优先级 MPSC 渲染命令队列 =====
+> class PriorityRenderQueue {
+> public:
+>     static constexpr size_t BATCH_SIZE = 64;
+>     static constexpr size_t Q_CAPACITY = 1024;
+>
+>     // 生产者（游戏线程）调用
+>     void submit(RenderCommand cmd, int priority) {
+>         // priority: 0=高, 1=中, 2=低
+>         if (priority < 0 || priority > 2) priority = 2;
+>         queues_[priority].push(cmd);
+>     }
+>
+>     // 消费者（渲染线程）调用：drain 最多 BATCH_SIZE 个命令
+>     size_t drain(std::vector<RenderCommand>& out) {
+>         out.clear();
+>         out.reserve(BATCH_SIZE);
+>
+>         // 总是优先 drain 高优先级队列
+>         for (int prio = 0; prio < 3 && out.size() < BATCH_SIZE; ++prio) {
+>             RenderCommand cmd;
+>             while (out.size() < BATCH_SIZE && queues_[prio].pop(cmd)) {
+>                 out.push_back(cmd);
+>             }
+>         }
+>         return out.size();
+>     }
+>
+>     // 检查是否全空
+>     bool all_empty() const {
+>         return queues_[0].empty() && queues_[1].empty() && queues_[2].empty();
+>     }
+>
+> private:
+>     // 高/中/低 三个内部 SPSC 队列（单个生产者到单个消费者）
+>     SPSCQueue_Simple<RenderCommand, Q_CAPACITY> queues_[3];
+> };
+>
+> // ===== Benchmark: 优先级混合 vs 单队列延迟分布 =====
+> void bench_priority_latency() {
+>     PriorityRenderQueue pq;
+>     SPSCQueue_Simple<RenderCommand, 1024> single_q;
+>
+>     std::atomic<bool> start{false};
+>     std::atomic<size_t> high_latency_sum{0}, low_latency_sum{0};
+>     std::atomic<int> total_submitted{0};
+>
+>     constexpr int NUM_FRAMES = 1000;
+>     constexpr int CMDS_PER_FRAME = 64;
+>
+>     // 生产者线程
+>     std::thread producer([&] {
+>         while (!start.load(std::memory_order_acquire));
+>         for (int frame = 0; frame < NUM_FRAMES; ++frame) {
+>             // 每帧混合提交：20 高优先 + 30 中优先 + 14 低优先
+>             for (int i = 0; i < 20; ++i)
+>                 pq.submit(RenderCommand{DrawMesh, {0, 0}}, 0);
+>             for (int i = 0; i < 30; ++i)
+>                 pq.submit(RenderCommand{SetMaterial, {1}}, 1);
+>             for (int i = 0; i < 14; ++i)
+>                 pq.submit(RenderCommand{SetTransform, {}}, 2);
+>             total_submitted.fetch_add(64);
+>         }
+>     });
+>
+>     // 消费者线程
+>     std::thread consumer([&] {
+>         while (!start.load(std::memory_order_acquire));
+>         size_t processed = 0;
+>         std::vector<RenderCommand> batch;
+>
+>         while (processed < NUM_FRAMES * CMDS_PER_FRAME) {
+>             size_t n = pq.drain(batch);
+>             if (n > 0) {
+>                 // 模拟提交 GPU（此处简单累加）
+>                 processed += n;
+>             }
+>         }
+>     });
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     start.store(true, std::memory_order_release);
+>     producer.join();
+>     consumer.join();
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>
+>     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+>     std::cout << "Priority queue: " << NUM_FRAMES << " frames in " << ms << " ms\n";
+>     std::cout << "Average: " << (ms / NUM_FRAMES) << " ms/frame\n";
+> }
+> ```
+>
+> **设计要点**：
+> - 三个独立 SPSC 队列使不同优先级的命令互不阻塞——即使低优先级队列满，高优先级命令仍可入队
+> - 批处理（`BATCH_SIZE=64`）减少 CPU-GPU 同步点：64 个命令合并为一次 `vkQueueSubmit`/`ID3D12CommandQueue::ExecuteCommandLists`
+> - 延迟分布：高优先级命令总是先被 drain，保证交互渲染命令（如 UI）的低延迟
+> - 扩展：可引入时间戳——命令入队时记录时间，出队时计算实际延迟，按优先级分别统计 p50/p99
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读]** *C++ Concurrency in Action (2nd ed.)* — Anthony Williams，第 7 章 "Lock-free concurrent data structures"

@@ -128,6 +128,96 @@ npm install -g typescript-language-server typescript
 3. 应用 code action 修复
 4. 验证修复后诊断清零
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在多文件的 TypeScript 项目中执行符号导航：
+>
+> ```text
+> 1. "列出当前文件的所有导出符号"
+>    → OMP 调用 lsp: action="symbols" 获取文件级符号表
+>    → 返回函数、类、接口、类型别名的列表，含名称和位置
+>
+> 2. "跳转到 main 函数的定义"
+>    → OMP 调用 lsp: action="definition"
+>    → 返回定义所在的文件和精确行列号
+>    → OMP 然后用 read 打开该位置展示定义
+>
+> 3. "查找 parseConfig 函数的所有调用点"
+>    → OMP 调用 lsp: action="references"
+>    → 返回前 50 个引用位置（文件 + 行列号）
+>    → 包含：import 语句中的引用、直接调用、类型引用等
+>
+> 4. "追踪从 app.ts 的 main() 到 database.ts 的 connect() 的调用链"
+>    → OMP 会迭代使用 lsp definition 和 references
+>    → 从 main → 中间调用 → 中间调用 → ... → connect()
+>    → 每一步确认后继续下一跳
+> ```
+>
+> **思考题答案：** LSP 符号导航 vs 文本搜索的关键区别：LSP 理解作用域。`lsp references` 只会返回真正指向同一符号的引用（不会误报同名但不同作用域的变量），而 `search "main"` 会匹配注释、字符串、不同作用域的同名符号。
+
+> [!tip]- 练习 2 参考答案
+> 安全重命名实践：
+>
+> ```text
+> 1. 假设 src/utils.ts 中有一个命名不规范的工具函数：
+>    export function calc_tax(amount: number) { ... }
+>
+> 2. "用 LSP 把 calc_tax 重命名为 calculateTax"
+>    → OMP 调用 lsp: action="rename" newName="calculateTax"
+>    → LSP 自动更新：
+>      - src/utils.ts 中的定义
+>      - 所有 import { calc_tax } from "./utils" → calculateTax
+>      - 所有调用点 calc_tax(...) → calculateTax(...)
+>      - 类型引用 type CalcFn = typeof calc_tax → calculateTax
+>
+> 3. 验证：search "calc_tax" → 不应返回任何结果
+>
+> 4. 对比实验 — 如果用 search + edit 手动重命名：
+>    → search "calc_tax" 会匹配所有包含该字符串的行
+>    → 包括：注释中的 "// calc_tax is used for..." 
+>    → 包括：其他文件中的局部变量 calc_tax（完全不同作用域）
+>    → 包括：字符串字面量 "calc_tax"
+>    → LSP 不会误伤——它只重命名真正的符号引用
+> ```
+>
+> **关键理解：** LSP rename 的"安全"体现在语义层面——它基于编译器的符号解析结果做重命名，而不是文本替换。这在以下场景尤其重要：不同模块中有同名但无关的符号、字符串中包含函数名、注释中引用了旧名称。
+
+> [!tip]- 练习 3 参考答案
+> 诊断驱动修复：
+>
+> ```text
+> 1. 制造类型错误：
+>    // src/example.ts
+>    function greet(name: string): string {
+>      return name.length;  // 正常
+>    }
+>    greet(42);  // 类型错误：number 不能赋给 string
+>
+> 2. "检查 src/example.ts 的诊断信息"
+>    → OMP 调用 lsp: action="diagnostics" paths=["src/example.ts"]
+>    → 返回：
+>      [ERROR] Line 5: Argument of type 'number' is not assignable 
+>               to parameter of type 'string'. (ts:2345)
+>
+> 3. "应用 code action 修复这个类型错误"
+>    → OMP 调用 lsp: action="code_actions" 获取可用的快速修复
+>    → 可能的 code actions：
+>      - 将 42 改为字符串 "42"
+>      - 修改 greet 的参数类型为 number | string
+>      - 添加类型断言 greet(42 as unknown as string)
+>    → OMP 选择最合适的修复方案（通常最简单的一个）
+>
+> 4. "再次检查诊断，确认错误已清零"
+>    → OMP 重新调用 lsp diagnostics
+>    → 预期：无新的类型错误
+> ```
+>
+> **思考题答案：** LSP diagnostics 提供的是"编译器/类型检查器视角"的错误，比运行时错误更早发现。Code actions 将这些诊断映射到修复方案——但修复方案的质量取决于 LSP 服务器的实现。TypeScript 的 code actions 通常很可靠；其他语言可能参差不齐。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

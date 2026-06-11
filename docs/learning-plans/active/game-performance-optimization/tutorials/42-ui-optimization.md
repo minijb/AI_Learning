@@ -774,6 +774,101 @@ private:
    - Draw Call 数量
 5. 记录哪个方案在哪种场景下更有优势
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Canvas 拆分实验记录与原理分析：**
+>
+> 1. **场景构建**：单 Canvas 下包含 10 个静态 Image、5 个 Button、3 个 Slider、1 个旋转图标（60fps）。
+>
+> 2. **单 Canvas 测量**：
+>    - 旋转图标每帧修改 `transform.rotation` → 触发 Dirty Layout 标记
+>    - Dirty 标记向上传播到 Canvas 根 → Canvas 标记整个子树为 Dirty
+>    - `Canvas.BuildBatch` 重建所有 19 个元素的顶点 Mesh
+>    - **预期**：`Canvas.BuildBatch ≈ 0.4-0.8ms`（19 个元素 × 每帧重建）
+>
+> 3. **拆分 Canvas 后**：
+>    - Canvas A（静态）：10 个 Image + 5 个 Button + 3 个 Slider = 18 个静态元素
+>    - Canvas B（动态）：1 个旋转图标
+>    - 旋转图标修改 transform → 仅 Canvas B 标记 Dirty → 仅重建 1 个元素
+>    - **预期**：`Canvas.BuildBatch (Canvas B) ≈ 0.01-0.05ms`，Canvas A 完全不重建
+>
+> 4. **为什么拆分 Canvas 能减少重建时间？**
+>    - **Dirty Flag 传播范围**：uGUI 的 Canvas 是 Dirty 传播的边界。一个 Canvas 内的任何元素变化会沿 `RectTransform` 层级向上传播到 Canvas 根，然后整个 Canvas 被标记为需要重建。不同 Canvas 之间互不干扰。
+>    - 单 Canvas：19 个元素的顶点每帧全部重新生成（即使 18 个从未变化）
+>    - 拆分 Canvas：1 个元素的顶点每帧生成一次，18 个静态元素仅在初始化时生成一次
+>    - **核心教训**：优化的不是"减少元素数"，而是"减少被标记为 Dirty 的元素数"
+>
+> **Profiler 确认方法**：
+> ```
+> Window → Analysis → Profiler → CPU Usage → Canvas → Canvas.BuildBatch
+> 查看每个 Canvas 名称对应的耗时
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **TMP 中文字体 Atlas 配置步骤：**
+>
+> 1. **创建 Font Asset**：
+>    - `Window → TextMeshPro → Font Asset Creator`
+>    - Source Font：选择一个支持中文的 `.ttf`/`.otf` 字体（如思源黑体、微软雅黑）
+>    - Character Set：选择 `Custom Characters` 或 `Extended ASCII` + 手动添加
+>    - Atlas Resolution：**2048×2048**（最大支持 4096）
+>    - 点击 `Generate Font Atlas`
+>
+> 2. **容纳性判断**：
+>    - 2048×2048 Atlas 大约能容纳 **4000-6000** 个字符（取决于字体细节和 SDF 采样设置）
+>    - 国标 GB2312 包含 6763 个汉字 → **一张 2048 Atlas 通常装不下**
+>    - Font Asset Creator 生成后查看 `Atlas Population` 进度条——如果不满 100%，说明字符溢出
+>
+> 3. **Fallback Font 链配置**（推荐方案）：
+>    - 主字体（常用 3500 字）→ 生成到 2048 Atlas
+>    - 在 `TMP_FontAsset` 的 Inspector 中：`Fallback Font Assets` → 添加备用字体
+>    - 备用字体包含剩余 3263 个罕见字
+>    - TMP 遇到主字体不存在的字符时自动 Fallback → 无运行时 Atlas 重建
+>
+> 4. **Multi-Atlas 模式**（备选）：
+>    - 在 Font Asset 的 `Generation Settings` 中启用 `Multi Atlas Textures`
+>    - 主 Atlas + 溢出 Atlas → 一个 Font Asset 对应多张纹理
+>    - 缺点：增加 Draw Call（切换 Atlas = 切换纹理）
+>
+> 5. **200 个 TMP 标签测试**：
+>    - **首次显示**：如果所有字符都在 Atlas 中 → 0ms 额外开销；如果缺字触发 Atlas Rebuild → 100-500ms 卡顿（重新光栅化所有字符到 SDF）
+>    - **动态更新**：每次 `text = "新内容"` → 检查字符是否在 Atlas → 是则仅更新顶点（~0.01ms）；否则触发 Rebuild
+>    - Canvas 重建时间与字符数成正比，TextMeshPro 的每个字符是一个 Quad（4 顶点），200 个字符 ≈ 800 顶点，重建通常 <0.1ms
+
+> [!tip]- 练习 3 参考答案（可选）
+> **uGUI vs UI Toolkit 对比实验：**
+>
+> | 指标 | uGUI (GameObject) | UI Toolkit (UXML) | 胜者 |
+> |------|-------------------|-------------------|------|
+> | 初始加载时间 (HUD) | ~5-15ms（实例化 GameObject） | ~20-50ms（解析 UXML+USS，构建 Visual Tree） | uGUI |
+> | 每帧布局/重建时间 | ~0.5-3ms（取决于 Dirty 元素） | ~0.1-1ms（Yoga Layout 更高效，保留模式） | UI Toolkit |
+> | 内存占用 (HUD) | ~5-15MB（每个 GameObject + Component） | ~2-8MB（VisualElement 是轻量 C# 对象） | UI Toolkit |
+> | Draw Call 数量 | 每个 Canvas ≥1 DC（多个 Atlas = 多个 DC） | **整个 UI 1 个 DC**（渲染到 RenderTexture） | UI Toolkit |
+> | 样式管理 | 每个组件独立设置 → 散乱 | USS 集中管理（类 CSS）→ 清晰 | UI Toolkit |
+> | 动画 CPU 开销 | 每帧修改 Transform → Layout Rebuild | `transition` 属性 → GPU 端，零 CPU | UI Toolkit |
+> | 调试工具 | Scene View + Inspector | UI Builder + UI Debugger（更强） | UI Toolkit |
+>
+> **场景适用性**：
+> - **uGUI 更适合**：
+>   - 快速原型（拖拽即用，无需学习 UXML/USS）
+>   - 简单的 HUD/菜单（元素 < 100，更新频率低）
+>   - 需要与 3D 世界交互的 UI（World Space Canvas）
+>
+> - **UI Toolkit 更适合**：
+>   - 复杂的编辑器工具/面板
+>   - 大量 UI 元素的场景（>500 个）
+>   - 频繁更新的动态 UI（领导板、背包网格）
+>   - 需要品牌一致样式的大型项目
+>
+> **迁移注意事项**：
+> - UI Toolkit 不支持 World Space（仅 Screen Space），世界空间 UI 仍需 uGUI
+> - uGUI 的 `ContentSizeFitter` + `LayoutGroup` 组合在 UI Toolkit 中被 Flexbox 替代，但行为细节不同，需要测试
+> - UI Toolkit 的 `ScrollView` 自带虚拟化（只渲染可见项），这是 uGUI `ScrollRect` 不具备的杀手特性
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

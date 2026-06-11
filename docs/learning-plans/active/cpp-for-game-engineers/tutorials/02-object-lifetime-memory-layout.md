@@ -499,6 +499,212 @@ struct D { char a[3]; int b; char c; };
 
 编写多线程基准测试（8 个线程，每个自增自己的计数器 1000 万次），测量两者的耗时差异。解释观察到的性能差异与 **false sharing** 的关系。提示：使用 `std::hardware_destructive_interference_size`（C++17）。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：结构体内存布局
+> ````cpp
+> // layout_exercise.cpp — 验证结构体内存布局
+> // 编译: g++ -std=c++20 -O0 layout_exercise.cpp -o layout_exercise && ./layout_exercise
+>
+> #include <iostream>
+> #include <cstddef>   // offsetof
+> #include <iomanip>
+>
+> struct A { char a; short b; int c; };
+> struct B { char a; long long b; char c; short d; };
+> struct C { double a; bool b; int c; bool d; };
+> struct D { char a[3]; int b; char c; };
+>
+> // 验证 sizeof
+> static_assert(sizeof(A) == 8,  "A: char(1) + pad(1) + short(2) + int(4) = 8");
+> static_assert(sizeof(B) == 16, "B: char(1) + pad(7) + long long(8) + char(1) + short(2) + pad(2) = 16 (if 8-byte aligned)");
+> static_assert(sizeof(C) == 24, "C: double(8) + bool(1) + pad(3) + int(4) + bool(1) + pad(7) = 24");
+> static_assert(sizeof(D) == 8,  "D: char[3](3) + pad(1) + int(4) + char(1) = 8");
+>
+> int main() {
+>     std::cout << "=== Memory Layout Verification ===\n\n";
+>
+>     std::cout << "struct A { char a; short b; int c; }:\n";
+>     std::cout << "  sizeof: " << sizeof(A) << " bytes\n";
+>     std::cout << "  offsetof(a): " << offsetof(A, a) << '\n';
+>     std::cout << "  offsetof(b): " << offsetof(A, b) << '\n';
+>     std::cout << "  offsetof(c): " << offsetof(A, c) << '\n';
+>     std::cout << "  Layout: [a:1] [pad:1] [b:2] [c:4]\n";
+>     std::cout << "  Reason: short 需要 2-byte 对齐 → b 从 offset 2 开始\n";
+>     std::cout << "          int 需要 4-byte 对齐 → c 从 offset 4 开始\n\n";
+>
+>     std::cout << "struct B { char a; long long b; char c; short d; }:\n";
+>     std::cout << "  sizeof: " << sizeof(B) << " bytes\n";
+>     std::cout << "  offsetof(a): " << offsetof(B, a) << '\n';
+>     std::cout << "  offsetof(b): " << offsetof(B, b) << '\n';
+>     std::cout << "  offsetof(c): " << offsetof(B, c) << '\n';
+>     std::cout << "  offsetof(d): " << offsetof(B, d) << '\n';
+>     std::cout << "  Layout: [a:1] [pad:7] [b:8] [c:1] [d:2] [pad:?]\n";
+>     std::cout << "  Reason: long long 需要 8-byte 对齐 → b 从 offset 8 开始\n";
+>     std::cout << "          d(short) 需要 2-byte 对齐且总大小须为 8 的倍数\n\n";
+>
+>     std::cout << "struct C { double a; bool b; int c; bool d; }:\n";
+>     std::cout << "  sizeof: " << sizeof(C) << " bytes\n";
+>     std::cout << "  offsetof(a): " << offsetof(C, a) << '\n';
+>     std::cout << "  offsetof(b): " << offsetof(C, b) << '\n';
+>     std::cout << "  offsetof(c): " << offsetof(C, c) << '\n';
+>     std::cout << "  offsetof(d): " << offsetof(C, d) << '\n';
+>     std::cout << "  Layout: [a:8] [b:1] [pad:3] [c:4] [d:1] [pad:7]\n";
+>     std::cout << "  Reason: int 需要 4-byte 对齐 → c 从 offset 12 开始\n";
+>     std::cout << "          总大小须为 8(double 的对齐) 的倍数 → 24\n\n";
+>
+>     std::cout << "struct D { char a[3]; int b; char c; }:\n";
+>     std::cout << "  sizeof: " << sizeof(D) << " bytes\n";
+>     std::cout << "  offsetof(a): " << offsetof(D, a) << '\n';
+>     std::cout << "  offsetof(b): " << offsetof(D, b) << '\n';
+>     std::cout << "  offsetof(c): " << offsetof(D, c) << '\n';
+>     std::cout << "  Layout: [a[3]:3] [pad:1] [b:4] [c:1]\n";
+>     std::cout << "  Reason: int 需要 4-byte 对齐 → b 从 offset 4 开始\n\n";
+>
+>     std::cout << "=== All static_asserts passed ===\n";
+>     return 0;
+> }
+> ````
+
+> [!tip]- 练习 2 参考答案：类型检查工具
+> ```cpp
+> // describe_type.cpp — 泛型类型属性检查器
+> // 编译: g++ -std=c++20 -O2 describe_type.cpp -o describe_type && ./describe_type
+>
+> #include <iostream>
+> #include <string>
+> #include <memory>
+> #include <vector>
+> #include <type_traits>
+> #include <iomanip>
+>
+> template<typename T>
+> void describe_type(const char* name) {
+>     std::cout << "| `" << name << "` | "
+>               << sizeof(T) << " | "
+>               << alignof(T) << " | "
+>               << (std::is_trivial_v<T>           ? "✅" : "❌") << " | "
+>               << (std::is_trivially_copyable_v<T> ? "✅" : "❌") << " | "
+>               << (std::is_standard_layout_v<T>    ? "✅" : "❌") << " | "
+>               << (std::is_aggregate_v<T>           ? "✅" : "❌") << " | "
+>               << (std::is_polymorphic_v<T>         ? "✅" : "❌") << " | ";
+>
+>     if constexpr (std::is_class_v<T>) {
+>         std::cout << (std::is_abstract_v<T> ? "✅" : "❌") << " | "
+>                   << (std::is_final_v<T>    ? "✅" : "❌");
+>     } else {
+>         std::cout << "— | —";
+>     }
+>     std::cout << " |\n";
+> }
+>
+> struct Vec3 { float x, y, z; };
+> struct VirtualBase { virtual ~VirtualBase() = default; };
+> struct FinalClass final {};
+> struct AggregateInit { int a; double b; std::string c; };
+>
+> int main() {
+>     std::cout << "| Type | sizeof | alignof | trivial | triv_copy | std_layout | aggregate | polymorphic | abstract | final |\n";
+>     std::cout << "|------|--------|---------|---------|-----------|------------|-----------|-------------|----------|-------|\n";
+>
+>     describe_type<int>("int");
+>     describe_type<double>("double");
+>     describe_type<char>("char");
+>     describe_type<Vec3>("Vec3");
+>     describe_type<std::string>("std::string");
+>     describe_type<std::unique_ptr<int>>("std::unique_ptr<int>");
+>     describe_type<std::vector<int>>("std::vector<int>");
+>     describe_type<VirtualBase>("VirtualBase");
+>     describe_type<FinalClass>("FinalClass");
+>     describe_type<AggregateInit>("AggregateInit");
+>
+>     std::cout << "\nObservations:\n";
+>     std::cout << "- 基础类型 (int/double) 都是 trivial + trivially_copyable + standard_layout\n";
+>     std::cout << "- std::string 管理堆内存 → 非 trivial\n";
+>     std::cout << "- std::unique_ptr 有析构 → 非 trivial，但有 standard_layout\n";
+>     std::cout << "- 有虚函数的类 → polymorphic = true\n";
+>     std::cout << "- AggregateInit 有 std::string 成员 → 仍是 aggregate (C++17)\n";
+>     return 0;
+> }
+> ```
+
+> [!info]- 练习 3 思考题参考答案：缓存行对齐与 False Sharing
+> ```cpp
+> // cacheline_bench.cpp — false sharing 性能影响
+> // 编译: g++ -std=c++20 -O2 -pthread cacheline_bench.cpp -o cacheline_bench && ./cacheline_bench
+>
+> #include <iostream>
+> #include <atomic>
+> #include <thread>
+> #include <vector>
+> #include <chrono>
+> #include <new>       // std::hardware_destructive_interference_size
+>
+> using namespace std::chrono;
+>
+> constexpr int kThreads = 8;
+> constexpr int kIterations = 10'000'000;
+>
+> // 版本 A：紧密排列 — 所有计数器在同一缓存行
+> struct TightCounters {
+>     std::atomic<int64_t> counters[kThreads]{};
+> };
+>
+> // 版本 B：缓存行隔离 — 每个计数器独占一个缓存行
+> struct alignas(64) PaddedCounter {
+>     std::atomic<int64_t> value{};
+> };
+> struct SpreadCounters {
+>     PaddedCounter counters[kThreads];
+> };
+>
+> template<typename C>
+> double benchmark(const char* label) {
+>     C c;
+>     std::vector<std::thread> threads;
+>     auto start = high_resolution_clock::now();
+>
+>     for (int i = 0; i < kThreads; ++i) {
+>         threads.emplace_back([&c, i]() {
+>             for (int n = 0; n < kIterations; ++n) {
+>                 c.counters[i].fetch_add(1, std::memory_order_relaxed);
+>             }
+>         });
+>     }
+>     for (auto& t : threads) t.join();
+>
+>     auto elapsed = duration_cast<microseconds>(high_resolution_clock::now() - start).count();
+>     double ms = elapsed / 1000.0;
+>     std::cout << "  " << label << ": " << ms << " ms\n";
+>
+>     // 验证结果
+>     int64_t sum = 0;
+>     for (int i = 0; i < kThreads; ++i) sum += c.counters[i].load();
+>     std::cout << "    (sum = " << sum << ")\n";
+>     return ms;
+> }
+>
+> int main() {
+>     std::cout << "=== Cache Line / False Sharing Benchmark ===\n";
+>     std::cout << "Threads: " << kThreads
+>               << ", Iterations: " << kIterations << "\n\n";
+>
+>     double tight = benchmark<TightCounters>("Tight (same cache line)");
+>     double spread = benchmark<SpreadCounters>("Spread (padded)");
+>
+>     std::cout << "\nSpeedup: " << tight / spread << "x\n";
+>     std::cout << "\nExplanation:\n";
+>     std::cout << "  紧密排列: 8 个原子变量共享 1 条缓存行。\n";
+>     std::cout << "  一个核心写入时，其他核心的缓存行被 invalidate → 缓存一致性协议开销。\n";
+>     std::cout << "  隔离排列: 每个变量独占 1 条缓存行 (64 bytes)。\n";
+>     std::cout << "  各核心独立写自己的缓存行 → 无 false sharing → 显著更快。\n";
+>     return 0;
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了编译和测试，或分析得出了合理结论，就是正确的。
 ---
 
 ## 4. 扩展阅读

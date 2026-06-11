@@ -633,6 +633,225 @@ class LockFreeStack {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <atomic>
+> #include <thread>
+> #include <vector>
+> #include <cassert>
+> 
+> class AtomicCounter {
+>     std::atomic<int64_t> value_{0};
+> 
+> public:
+>     void increment() {
+>         // relaxed 足够：仅保证原子性，不需要和其他变量建立顺序
+>         value_.fetch_add(1, std::memory_order_relaxed);
+>     }
+> 
+>     void decrement() {
+>         value_.fetch_sub(1, std::memory_order_relaxed);
+>     }
+> 
+>     int64_t get() const {
+>         return value_.load(std::memory_order_relaxed);
+>     }
+> };
+> 
+> int main() {
+>     constexpr int kThreads = 10;
+>     constexpr int kPerThread = 100'000;
+>     AtomicCounter counter;
+> 
+>     std::vector<std::thread> threads;
+>     for (int t = 0; t < kThreads; ++t) {
+>         threads.emplace_back([&counter] {
+>             for (int i = 0; i < kPerThread; ++i)
+>                 counter.increment();
+>         });
+>     }
+>     for (auto& t : threads) t.join();
+> 
+>     assert(counter.get() == int64_t(kThreads) * kPerThread);
+> }
+> ```
+>
+> **关键设计决策**：
+> - 使用 `relaxed` 内存序：纯计数器只需原子性，不需要顺序保证
+> - `fetch_add` 和 `fetch_sub` 返回旧值——如果需要新值，用返回值 + n
+> - `int64_t` 确保大范围计数不溢出
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <atomic>
+> #include <thread>
+> #include <vector>
+> #include <iostream>
+> #include <chrono>
+> 
+> class SpinLock {
+>     std::atomic_flag locked_ = ATOMIC_FLAG_INIT;
+> 
+> public:
+>     void lock() {
+>         // acquire: lock 之后的读写不能重排到此 test_and_set 之前
+>         while (locked_.test_and_set(std::memory_order_acquire)) {
+>             // 自旋等待——可加入 _mm_pause() 或 std::this_thread::yield()
+>         }
+>     }
+> 
+>     void unlock() {
+>         // release: lock 之前的写入对后续 acquire 可见
+>         locked_.clear(std::memory_order_release);
+>     }
+> };
+> 
+> int main() {
+>     constexpr int kThreads = 10;
+>     constexpr int kPerThread = 100'000;
+> 
+>     SpinLock spinlock;
+>     int counter = 0;  // 非原子，由自旋锁保护
+> 
+>     auto start = std::chrono::high_resolution_clock::now();
+> 
+>     std::vector<std::thread> threads;
+>     for (int t = 0; t < kThreads; ++t) {
+>         threads.emplace_back([&] {
+>             for (int i = 0; i < kPerThread; ++i) {
+>                 spinlock.lock();
+>                 ++counter;
+>                 spinlock.unlock();
+>             }
+>         });
+>     }
+>     for (auto& t : threads) t.join();
+> 
+>     auto elapsed = std::chrono::high_resolution_clock::now() - start;
+>     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+> 
+>     std::cout << "SpinLock result: " << counter
+>               << " (expected " << kThreads * kPerThread << ")"
+>               << ", time: " << ms << "ms\n";
+> }
+> ```
+> 
+> **对比 std::mutex 的性能对比代码**：
+> 
+> ```cpp
+> // 将 SpinLock 替换为 std::mutex，其余代码不变：
+> std::mutex mtx;
+> // ...
+> mtx.lock();
+> ++counter;
+> mtx.unlock();
+> ```
+> 
+> **关键洞见**：
+> - spinlock 在**低竞争**下通常更快（避免系统调用）
+> - mutex 在**高竞争**下更优（等待者被挂起，不浪费 CPU）
+> - `test_and_set` 的 acquire 语义确保进入临界区后能看到之前 release 写的结果
+> - 生产代码中可在循环中加入 `_mm_pause()`（x86）减少功耗
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> #include <atomic>
+> #include <memory>
+> #include <thread>
+> #include <vector>
+> #include <cassert>
+> 
+> template<typename T>
+> class LockFreeStack {
+>     struct Node {
+>         T data;
+>         Node* next;
+>         Node(const T& val) : data(val), next(nullptr) {}
+>     };
+>     std::atomic<Node*> head_{nullptr};
+> 
+> public:
+>     void push(const T& value) {
+>         Node* new_node = new Node(value);
+>         new_node->next = head_.load(std::memory_order_relaxed);
+> 
+>         while (!head_.compare_exchange_weak(
+>                     new_node->next, new_node,
+>                     std::memory_order_release,
+>                     std::memory_order_relaxed)) {
+>             // CAS 失败 → new_node->next 已被更新为当前 head，循环再试
+>         }
+>     }
+> 
+>     std::shared_ptr<T> pop() {
+>         Node* old_head = head_.load(std::memory_order_acquire);
+> 
+>         do {
+>             if (old_head == nullptr) return nullptr;
+>         } while (!head_.compare_exchange_weak(
+>                     old_head, old_head->next,
+>                     std::memory_order_acquire,
+>                     std::memory_order_relaxed));
+> 
+>         auto result = std::make_shared<T>(std::move(old_head->data));
+>         delete old_head;  // ⚠️ 简化版：存在 ABA 问题
+>         return result;
+>     }
+> 
+>     bool empty() const {
+>         return head_.load(std::memory_order_relaxed) == nullptr;
+>     }
+> };
+> 
+> int main() {
+>     LockFreeStack<int> stack;
+>     constexpr int kThreads = 4;
+>     constexpr int kPerThread = 1000;
+> 
+>     std::vector<std::thread> producers;
+>     for (int t = 0; t < kThreads; ++t) {
+>         producers.emplace_back([&stack, t] {
+>             for (int i = 0; i < kPerThread; ++i)
+>                 stack.push(t * kPerThread + i);
+>         });
+>     }
+>     for (auto& t : producers) t.join();
+> 
+>     int pop_count = 0;
+>     std::vector<std::thread> consumers;
+>     for (int t = 0; t < kThreads; ++t) {
+>         consumers.emplace_back([&stack, &pop_count] {
+>             for (int i = 0; i < kPerThread; ++i) {
+>                 auto val = stack.pop();
+>                 if (val) ++pop_count;
+>                 else --i;  // 被其他线程抢先，重试
+>             }
+>         });
+>     }
+>     for (auto& t : consumers) t.join();
+> 
+>     assert(pop_count == kThreads * kPerThread);
+>     assert(stack.empty());
+> }
+> ```
+> 
+> **内存序设计分析**：
+> 
+> | 操作 | 成功序 | 失败序 | 原因 |
+> |------|--------|--------|------|
+> | push CAS | `release` | `relaxed` | push 修改了数据，需对 pop 可见 |
+> | pop CAS | `acquire` | `relaxed` | pop 读取数据，需看到 push 的结果 |
+> | head load (pop 前) | `acquire` | — | 与上一个成功的 push/release 配对 |
+> 
+> **ABA 问题说明**：本实现通过 CAS 循环避免了基础竞态，但线程 B 在执行 A→B→A（pop A, pop B, push 新节点到 A 的地址）后，线程 A 的 CAS 可能误以为 head 没变。修复方案：
+> - **Tagged pointer**：高位存储版本号（需 double-width CAS）
+> - **Hazard Pointer**：延迟释放直到无线程引用该节点
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 常见陷阱
 
 ### 4.1 ABA 问题

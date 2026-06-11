@@ -517,6 +517,419 @@ Behavior Group 执行顺序:
 
 实现完整的事件链，验证每个 Signal Processor 的处理逻辑正确执行。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **UFlockingProcessor：群体聚拢（Cohesion）行为**：
+>
+> ```cpp
+> // === UFlockingProcessor.h ===
+> UCLASS()
+> class UFlockingProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UFlockingProcessor();
+>
+>     UPROPERTY(EditAnywhere, Category = "Flocking")
+>     float CohesionWeight = 100.0f;   // 聚拢力强度
+>
+>     UPROPERTY(EditAnywhere, Category = "Flocking")
+>     float MaxSteeringForce = 200.0f; // 最大 Steering 力
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery FlockingQuery;
+> };
+>
+> // === UFlockingProcessor.cpp ===
+> UFlockingProcessor::UFlockingProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     // 在 Movement 之前执行，为 MovementProcessor 准备 Steering 数据
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Movement;
+>     ExecutionOrder.ExecuteBefore.Add(
+>         UCrowdMovementProcessor::StaticClass()->GetFName());
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UFlockingProcessor::ConfigureQueries()
+> {
+>     FlockingQuery.AddRequirement<FCrowdTransformFragment>(
+>         EMassFragmentAccess::ReadOnly);   // 读取位置（只读）
+>     FlockingQuery.AddRequirement<FCrowdVelocityFragment>(
+>         EMassFragmentAccess::ReadOnly);   // 读取速度（只读）
+>     FlockingQuery.AddRequirement<FCrowdSteeringFragment>(
+>         EMassFragmentAccess::ReadWrite);  // 写入 Steering
+>     FlockingQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UFlockingProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     // 第一遍：收集所有实体的位置，计算群体平均位置
+>     FVector AveragePosition = FVector::ZeroVector;
+>     int32 TotalCount = 0;
+>
+>     FlockingQuery.ForEachEntityChunk(EntityManager, Context,
+>         [&](FMassExecutionContext& Context)
+>         {
+>             const TArrayView<FCrowdTransformFragment> Transforms =
+>                 Context.GetFragmentView<FCrowdTransformFragment>();
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 AveragePosition += Transforms[i].Location;
+>                 ++TotalCount;
+>             }
+>         });
+>
+>     if (TotalCount == 0) return;
+>     AveragePosition /= TotalCount; // 群体中心
+>
+>     // 第二遍：为每个实体计算指向中心的 Steering 力
+>     FlockingQuery.ForEachEntityChunk(EntityManager, Context,
+>         [&](FMassExecutionContext& Context)
+>         {
+>             const TArrayView<FCrowdTransformFragment> Transforms =
+>                 Context.GetFragmentView<FCrowdTransformFragment>();
+>             TArrayView<FCrowdSteeringFragment> Steerings =
+>                 Context.GetMutableFragmentView<FCrowdSteeringFragment>();
+>
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 // 指向群体中心的方向
+>                 FVector DesiredDirection =
+>                     (AveragePosition - Transforms[i].Location).GetSafeNormal();
+>
+>                 // 计算 Steering 力：目标速度 - 当前速度
+>                 FVector SteeringForce = DesiredDirection * CohesionWeight;
+>
+>                 // 限制最大 Steering 力
+>                 if (SteeringForce.Size() > MaxSteeringForce)
+>                 {
+>                     SteeringForce = SteeringForce.GetSafeNormal() * MaxSteeringForce;
+>                 }
+>
+>                 Steerings[i].SteeringForce += SteeringForce;
+>             }
+>         });
+> }
+> ```
+> **关键点**：
+> - 两次遍历：第一次计算群体中心（O(N)），第二次计算 Steering 力（O(N)）——总 O(N) 而非 O(N²)。
+> - Steering 力是**累加**到已有 `SteeringForce` 字段上的（`+=`），而不是覆盖——这样多个行为 Processor（分离、对齐、聚拢）可以叠加。
+> - `ConfigureQueries` 中 `FCrowdTransformFragment` 声明为 `ReadOnly`，允许与其他读取同一 Fragment 的 Processor 并行。
+
+> [!tip]- 练习 2 参考答案
+> **UHealthRegenerationProcessor + UDamageProcessor：并行冲突与解决方案**：
+>
+> ```cpp
+> // === UHealthRegenerationProcessor: 每秒恢复生命 ===
+> UCLASS()
+> class UHealthRegenerationProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UHealthRegenerationProcessor();
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery RegenerationQuery;
+> };
+>
+> // 方案 A：放入不同 Group 避免冲突
+> UHealthRegenerationProcessor::UHealthRegenerationProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     // 放入单独 Group：Behavior Group → 与其他 Movement Group Processor
+>     // 读写不同 Fragment 组合时可以并行
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Behavior;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UHealthRegenerationProcessor::ConfigureQueries()
+> {
+>     RegenerationQuery.AddRequirement<FMassCharacterStatsFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     // 排除死去的实体
+>     RegenerationQuery.AddTagRequirement<FMassDeadTag>(
+>         EMassFragmentPresence::None);
+>     RegenerationQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UHealthRegenerationProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     RegenerationQuery.ForEachEntityChunk(EntityManager, Context,
+>         [](FMassExecutionContext& Context)
+>         {
+>             const float DeltaTime = Context.GetDeltaTimeSeconds();
+>             TArrayView<FMassCharacterStatsFragment> Stats =
+>                 Context.GetMutableFragmentView<FMassCharacterStatsFragment>();
+>
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 Stats[i].Health = FMath::Min(
+>                     Stats[i].Health + 5.0f * DeltaTime,
+>                     Stats[i].MaxHealth);
+>             }
+>         });
+> }
+>
+> // === UDamageProcessor: 碰撞检测并扣血 ===
+> UCLASS()
+> class UDamageProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UDamageProcessor();
+>
+>     UPROPERTY(EditAnywhere)
+>     float DamageAmount = 10.0f;
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery DamageQuery;
+> };
+>
+> UDamageProcessor::UDamageProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     // 方案 A：放入 Behavior Group（可在 Behavior 阶段与其他 Group 并行）
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Behavior;
+>
+>     // 方案 B：若两个都在同一 Group，用 ExecuteBefore/After 序列化：
+>     // ExecutionOrder.ExecuteAfter.Add(
+>     //     UHealthRegenerationProcessor::StaticClass()->GetFName());
+>
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UDamageProcessor::ConfigureQueries()
+> {
+>     DamageQuery.AddRequirement<FMassCharacterStatsFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     DamageQuery.AddTagRequirement<FMassDeadTag>(
+>         EMassFragmentPresence::None);
+>     DamageQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UDamageProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     DamageQuery.ForEachEntityChunk(EntityManager, Context,
+>         [this](FMassExecutionContext& Context)
+>         {
+>             TArrayView<FMassCharacterStatsFragment> Stats =
+>                 Context.GetMutableFragmentView<FMassCharacterStatsFragment>();
+>
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 // 简化：直接扣血（实际应做碰撞检测）
+>                 Stats[i].Health -= DamageAmount * Context.GetDeltaTimeSeconds();
+>
+>                 if (Stats[i].Health <= 0.0f)
+>                 {
+>                     Context.Defer().AddTag<FMassDeadTag>(Context.GetEntity(i));
+>                 }
+>             }
+>         });
+> }
+> ```
+> **并行冲突解释**：如果两个 Processor 放在同一 Group 且都声明 `ReadWrite` 对 `FMassCharacterStatsFragment`，Mass 的 Dependency Solver 会检测到冲突并**序列化它们**（实际上可能报错或自动排序）。方案 A（不同 Group）允许它们在不同线程上并行运行（只要它们在不同的 Group 中且不共享 ReadWrite Fragment）。方案 B（ExecuteAfter）是显式告诉框架"先执行 A 再执行 B"。
+> **推荐方案 A**：将不同职责的 Processor 放入不同 Group，最大化并行度。
+
+> [!tip]- 练习 3 参考答案
+> **自定义 Signal 链：FMassHitSignal → FMassDamageSignal → FMassDeathSignal**：
+>
+> ```cpp
+> // === 定义 Signal Fragment ===
+> USTRUCT()
+> struct FMassHitSignal : public FMassSignal { GENERATED_BODY() };
+> USTRUCT()
+> struct FMassDamageSignal : public FMassSignal { GENERATED_BODY() };
+> USTRUCT()
+> struct FMassDeathSignal : public FMassSignal { GENERATED_BODY() };
+>
+> // 战斗相关 Fragment
+> USTRUCT()
+> struct FMassCombatStateFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>     UPROPERTY() float AttackCooldown = 0.0f;
+>     UPROPERTY() float HitReactionTime = 0.0f;
+> };
+>
+> // === UAttackProcessor: 检测攻击命中，发送 HitSignal ===
+> UCLASS()
+> class UAttackProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UAttackProcessor();
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery AttackQuery;
+> };
+>
+> UAttackProcessor::UAttackProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Behavior;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UAttackProcessor::ConfigureQueries()
+> {
+>     AttackQuery.AddRequirement<FMassCharacterStatsFragment>(EMassFragmentAccess::ReadOnly);
+>     AttackQuery.AddTagRequirement<FMassDeadTag>(EMassFragmentPresence::None);
+>     AttackQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UAttackProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     AttackQuery.ForEachEntityChunk(EntityManager, Context,
+>         [](FMassExecutionContext& Context)
+>         {
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 // 简化：假设所有实体都在攻击范围内
+>                 // 实际应做距离检测来确定是否命中
+>                 bool bHit = FMath::RandBool(); // 示例：50% 概率命中
+>                 if (bHit)
+>                 {
+>                     // 发送 HitSignal——通过 Defer() 添加 Signal Fragment
+>                     Context.Defer().AddSignal<FMassHitSignal>(Context.GetEntity(i));
+>                 }
+>             }
+>         });
+> }
+>
+> // === UHitReactionProcessor: Signal Processor，监听 FMassHitSignal ===
+> UCLASS()
+> class UHitReactionProcessor : public UMassSignalProcessorBase<FMassHitSignal>
+> {
+>     GENERATED_BODY()
+> public:
+>     UHitReactionProcessor();
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void SignalEntities(FMassEntityManager& EntityManager,
+>         FMassExecutionContext& Context,
+>         FMassSignalContext& SignalContext) override;
+> private:
+>     FMassEntityQuery HitReactionQuery;
+> };
+>
+> UHitReactionProcessor::UHitReactionProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Behavior;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UHitReactionProcessor::ConfigureQueries()
+> {
+>     HitReactionQuery.AddRequirement<FMassAnimationFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     HitReactionQuery.AddRequirement<FMassCombatStateFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     HitReactionQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UHitReactionProcessor::SignalEntities(FMassEntityManager& EntityManager,
+>     FMassExecutionContext& Context,
+>     FMassSignalContext& SignalContext)
+> {
+>     HitReactionQuery.ForEachEntityChunk(EntityManager, Context,
+>         [](FMassExecutionContext& Context)
+>         {
+>             TArrayView<FMassAnimationFragment> Animations =
+>                 Context.GetMutableFragmentView<FMassAnimationFragment>();
+>             TArrayView<FMassCombatStateFragment> CombatStates =
+>                 Context.GetMutableFragmentView<FMassCombatStateFragment>();
+>
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 // 设置受击动画状态
+>                 Animations[i].AnimationState = 5; // Hit Reaction
+>                 CombatStates[i].HitReactionTime = 0.3f;
+>
+>                 // 添加眩晕 Tag
+>                 Context.Defer().AddTag<FMassStunnedTag>(Context.GetEntity(i));
+>
+>                 // 发送 DamageSignal 到下一个 Processor
+>                 Context.Defer().AddSignal<FMassDamageSignal>(Context.GetEntity(i));
+>             }
+>         });
+> }
+>
+> // === UDamageProcessor (Signal): 监听 FMassDamageSignal，扣血 ===
+> UCLASS()
+> class UDamageResponseProcessor : public UMassSignalProcessorBase<FMassDamageSignal>
+> {
+>     GENERATED_BODY()
+> public:
+>     UDamageResponseProcessor();
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void SignalEntities(FMassEntityManager& EntityManager,
+>         FMassExecutionContext& Context,
+>         FMassSignalContext& SignalContext) override;
+> private:
+>     FMassEntityQuery DamageQuery;
+> };
+>
+> void UDamageResponseProcessor::SignalEntities(FMassEntityManager& EntityManager,
+>     FMassExecutionContext& Context,
+>     FMassSignalContext& SignalContext)
+> {
+>     DamageQuery.ForEachEntityChunk(EntityManager, Context,
+>         [](FMassExecutionContext& Context)
+>         {
+>             TArrayView<FMassCharacterStatsFragment> Stats =
+>                 Context.GetMutableFragmentView<FMassCharacterStatsFragment>();
+>
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 Stats[i].Health -= 20.0f; // 固定伤害
+>
+>                 if (Stats[i].Health <= 0.0f)
+>                 {
+>                     // 发送 DeathSignal
+>                     Context.Defer().AddSignal<FMassDeathSignal>(Context.GetEntity(i));
+>                 }
+>             }
+>         });
+> }
+> ```
+> **事件链流程**：
+> ```
+> AttackProcessor               → 命中检测 → 发送 FMassHitSignal
+> HitReactionProcessor (Signal) → 受击反应 → 设置动画、添加眩晕 → 发送 FMassDamageSignal
+> DamageResponseProcessor (Signal) → 扣血    → 判断死亡 → 发送 FMassDeathSignal
+> DeathProcessor (Signal)       → 死亡处理 → 添加 DeadTag、清理
+> ```
+> **关键点**：
+> - Signal Fragment 在被处理**之后**由框架自动移除，不需要手动清理。
+> - Signal 链中下一步的 Signal 必须通过 `Defer().AddSignal()` 添加——不能在当前 Execute 中即时触发。
+> - Signal Processor 仅在实体**拥有**对应 Signal Fragment 时才会被调度，避免了轮询检查。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

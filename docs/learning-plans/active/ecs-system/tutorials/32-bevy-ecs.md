@@ -647,6 +647,477 @@ impl GameWorld {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```rust
+> use bevy::prelude::*;
+> use rand::Rng;
+>
+> #[derive(Component)]
+> struct Position { x: f32, y: f32 }
+>
+> #[derive(Component)]
+> struct Velocity { dx: f32, dy: f32 }
+>
+> // 缓存资源——存储上一帧的平均位置和是否需要重算
+> // 如果没有任何实体 Changed<Position>，则复用缓存
+> #[derive(Resource, Default)]
+> struct AveragePositionCache {
+>     avg_x: f32,
+>     avg_y: f32,
+>     entity_count: usize,
+>     dirty: bool,  // true = 本帧有实体移动，需要重算
+> }
+>
+> fn spawn_entities(mut commands: Commands) {
+>     let mut rng = rand::thread_rng();
+>     for _ in 0..100 {
+>         commands.spawn((
+>             Position {
+>                 x: rng.gen_range(-500.0..500.0),
+>                 y: rng.gen_range(-500.0..500.0),
+>             },
+>             Velocity {
+>                 dx: rng.gen_range(-10.0..10.0),
+>                 dy: rng.gen_range(-10.0..10.0),
+>             },
+>         ));
+>     }
+> }
+>
+> fn movement(
+>     mut query: Query<(&mut Position, &Velocity)>,
+>     time: Res<Time>,
+> ) {
+>     let dt = time.delta_seconds();
+>     for (mut pos, vel) in query.iter_mut() {
+>         pos.x += vel.dx * dt;
+>         pos.y += vel.dy * dt;
+>     }
+> }
+>
+> // ── 核心优化：仅在 Changed<Position> 时重算平均位置 ──
+> // 步骤 1：标记缓存为 dirty（如果任何 Position 被修改）
+> fn detect_changes(
+>     changed_query: Query<(), Changed<Position>>,
+>     mut cache: ResMut<AveragePositionCache>,
+> ) {
+>     // 即使只有 1 个实体移动，也要重算——Changed 查询本身是 O(1)（仅检查 Archetype 级别的 change tick）
+>     if changed_query.iter().count() > 0 {
+>         cache.dirty = true;
+>     }
+> }
+>
+> // 步骤 2：如果 dirty，重新计算平均值；否则跳过
+> fn compute_average(
+>     query: Query<&Position>,
+>     mut cache: ResMut<AveragePositionCache>,
+> ) {
+>     if !cache.dirty {
+>         // 无任何实体移动——直接复用缓存
+>         println!("(cached) Average: ({:.1}, {:.1})",
+>             cache.avg_x, cache.avg_y);
+>         return;
+>     }
+>
+>     let count = query.iter().count();
+>     if count == 0 { return; }
+>
+>     let (mut sum_x, mut sum_y) = (0.0f32, 0.0f32);
+>     for pos in query.iter() {
+>         sum_x += pos.x;
+>         sum_y += pos.y;
+>     }
+>
+>     cache.avg_x = sum_x / count as f32;
+>     cache.avg_y = sum_y / count as f32;
+>     cache.entity_count = count;
+>     cache.dirty = false;
+>
+>     println!("(recomputed) Average: ({:.1}, {:.1}) over {} entities",
+>         cache.avg_x, cache.avg_y, count);
+> }
+>
+> fn main() {
+>     App::new()
+>         .add_plugins(MinimalPlugins)
+>         .init_resource::<AveragePositionCache>()
+>         .add_systems(Startup, spawn_entities)
+>         .add_systems(Update, (
+>             movement,
+>             // 必须先 detect_changes 再 compute_average
+>             detect_changes,
+>             compute_average.after(detect_changes),
+>         ).chain())
+>         .run();
+> }
+> ```
+>
+> **Changed<Position> 的优化原理：**
+> - Bevy 为每个 Archetype 维护 "change tick"——当该 Archetype 中任何 `Position` 被写入时，tick 递增
+> - `Changed<Position>` 查询只返回 change tick 大于上次查询 tick 的实体——无需逐个比较数据
+> - 如果一整帧没有任何实体移动，`detect_changes` 的 `iter().count()` 返回 0 → `dirty` 保持 false → `compute_average` 跳过 O(N) 求和
+> - 注意：这里仍然遍历了一次 `all_positions` 来求和——真正避免的是**每帧都 O(N)**，而在静止帧完全跳过
+> - 进阶优化：如果只有个别实体移动，可以增量更新平均值（`avg_new = (avg_old * N_old + delta) / N_new`）而非全量重算
+
+> [!tip]- 练习 2 参考答案
+> ```rust
+> use bevy::prelude::*;
+> use rand::Rng;
+>
+> // ── 组件 ──────────────────────────────────────
+> #[derive(Component)] struct Player;
+> #[derive(Component)] struct Enemy;
+> #[derive(Component)] struct Bullet { damage: i32 }
+> #[derive(Component)] struct Position { x: f32, y: f32 }
+> #[derive(Component)] struct Velocity { dx: f32, dy: f32 }
+> #[derive(Component)] struct Health { hp: i32 }
+> #[derive(Component)] struct Collider { radius: f32 }
+>
+> // ── 事件 ──────────────────────────────────────
+> #[derive(Event)]
+> struct DamageEvent {
+>     target: Entity,
+>     amount: i32,
+>     source: Entity,
+> }
+>
+> #[derive(Event)]
+> struct BulletHitEvent {
+>     bullet: Entity,
+>     enemy: Entity,
+>     damage: i32,
+> }
+>
+> // ── 发射子弹（按空格）──
+> fn player_shoot(
+>     mut commands: Commands,
+>     keyboard: Res<ButtonInput<KeyCode>>,
+>     player_query: Query<&Position, With<Player>>,
+>     // 用 Local 缓存发射冷却，防止每帧连续发射
+>     mut cooldown: Local<f32>,
+>     time: Res<Time>,
+> ) {
+>     *cooldown -= time.delta_seconds();
+>     if *cooldown > 0.0 { return; }
+>
+>     if keyboard.just_pressed(KeyCode::Space) {
+>         if let Ok(player_pos) = player_query.get_single() {
+>             commands.spawn((
+>                 Bullet { damage: 15 },
+>                 Position {
+>                     x: player_pos.x + 30.0, // 从玩家前方发射
+>                     y: player_pos.y,
+>                 },
+>                 Velocity { dx: 400.0, dy: 0.0 },
+>                 Collider { radius: 5.0 },
+>             ));
+>             *cooldown = 0.3; // 300ms 冷却
+>             println!("🔫 Bullet fired!");
+>         }
+>     }
+> }
+>
+> // ── 子弹碰撞检测（子弹 vs 敌人）──
+> fn bullet_collision(
+>     bullets: Query<(Entity, &Position, &Bullet, &Collider)>,
+>     enemies: Query<(Entity, &Position, &Collider), With<Enemy>>,
+>     mut hit_events: EventWriter<BulletHitEvent>,
+> ) {
+>     for (b_entity, b_pos, bullet, b_col) in bullets.iter() {
+>         for (e_entity, e_pos, e_col) in enemies.iter() {
+>             let dx = b_pos.x - e_pos.x;
+>             let dy = b_pos.y - e_pos.y;
+>             let dist_sq = dx * dx + dy * dy;
+>             let min_dist = b_col.radius + e_col.radius;
+>
+>             if dist_sq < min_dist * min_dist {
+>                 // 委托事件处理伤害和销毁
+>                 hit_events.send(BulletHitEvent {
+>                     bullet: b_entity,
+>                     enemy: e_entity,
+>                     damage: bullet.damage,
+>                 });
+>                 break; // 一颗子弹只命中一个敌人
+>             }
+>         }
+>     }
+> }
+>
+> // ── 处理子弹命中事件：造成伤害 + 销毁子弹 ──
+> fn handle_bullet_hits(
+>     mut commands: Commands,
+>     mut hit_events: EventReader<BulletHitEvent>,
+>     mut health_query: Query<&mut Health>,
+>     mut damage_events: EventWriter<DamageEvent>,
+> ) {
+>     for event in hit_events.read() {
+>         // 销毁子弹
+>         commands.entity(event.bullet).despawn();
+>
+>         // 造成伤害
+>         if let Ok(mut health) = health_query.get_mut(event.enemy) {
+>             health.hp -= event.damage;
+>             println!("💥 Enemy {:?} took {} damage! HP: {}",
+>                 event.enemy, event.damage, health.hp);
+>
+>             // 发送伤害事件（供 UI/HUD 系统消费）
+>             damage_events.send(DamageEvent {
+>                 target: event.enemy,
+>                 amount: event.damage,
+>                 source: event.bullet,
+>             });
+>
+>             // 死亡检查
+>             if health.hp <= 0 {
+>                 commands.entity(event.enemy).despawn();
+>                 println!("💀 Enemy {:?} destroyed!", event.enemy);
+>             }
+>         }
+>     }
+> }
+>
+> // ── 玩家-敌人碰撞 ──
+> fn player_enemy_collision(
+>     player_query: Query<&Position, (With<Player>, With<Collider>)>,
+>     enemy_query: Query<(Entity, &Position, &Collider), With<Enemy>>,
+>     mut damage_events: EventWriter<DamageEvent>,
+> ) {
+>     if let Ok(p_pos) = player_query.get_single() {
+>         for (e_entity, e_pos, e_col) in enemy_query.iter() {
+>             let dx = p_pos.x - e_pos.x;
+>             let dy = p_pos.y - e_pos.y;
+>             if dx * dx + dy * dy < e_col.radius * e_col.radius {
+>                 damage_events.send(DamageEvent {
+>                     target: e_entity,
+>                     amount: 5, // 身体碰撞伤害
+>                     source: Entity::PLACEHOLDER,
+>                 });
+>             }
+>         }
+>     }
+> }
+>
+> // ── 显示伤害事件 ──
+> fn log_damage(mut events: EventReader<DamageEvent>) {
+>     for ev in events.read() {
+>         println!("📊 Damage: {:?} received {} damage",
+>             ev.target, ev.amount);
+>     }
+> }
+> ```
+>
+> **Events 解耦的核心价值：**
+> - `bullet_collision` 系统只负责检测碰撞 → 发送 `BulletHitEvent`
+> - `handle_bullet_hits` 系统只负责处理命中 → 修改 HP、销毁实体、发送 `DamageEvent`
+> - 添加新的碰撞反应（如粒子特效系统、音效系统）只需新增一个读取 `BulletHitEvent` 的系统，**无需修改碰撞检测代码**
+> - Events 是双缓冲的——在帧 N 写入的事件，在帧 N+1（或同一帧内的后续 System）读取，避免 World 借用冲突
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```rust
+> use bevy::prelude::*;
+> use std::time::Duration;
+>
+> // ── 时序控制：SystemSet 分层 ──
+> #[derive(SystemSet, Debug, Hash, PartialEq, Eq, Clone)]
+> enum GameLogicSet {
+>     BuffApplication,   // 应用 Buff 效果（添加/移除修饰器）
+>     Movement,          // 移动系统（受 SpeedModifier 影响）
+>     BuffExpiration,    // 过期 Buff 清理
+> }
+>
+> // ── 组件 ──────────────────────────────────────
+> #[derive(Component)] struct Position { x: f32, y: f32 }
+>
+> // 速度修饰器——Buff 系统动态添加和移除这个组件
+> #[derive(Component)]
+> struct SpeedModifier {
+>     multiplier: f32,   // 1.5 = 加速 50%，0.5 = 减速 50%
+>     source: BuffType,
+> }
+>
+> // Buff 组件——挂载在实体上，表示该实体正在受到某种 Buff
+> #[derive(Component)]
+> struct Buff {
+>     buff_type: BuffType,
+>     duration: f32,         // 剩余时间（秒）
+>     original_duration: f32, // 原始时长（用于显示）
+> }
+>
+> #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+> enum BuffType {
+>     SpeedBoost,   // 加速 50%
+>     Slow,         // 减速 50%
+> }
+>
+> // ── 事件 ──────────────────────────────────────
+> #[derive(Event)]
+> struct BuffExpiredEvent {
+>     entity: Entity,
+>     buff_type: BuffType,
+> }
+>
+> // ── 系统：应用 Buff 效果（在 BuffApplication 阶段执行）──
+> fn apply_buffs(
+>     // 查询所有有 Buff 但还没有 SpeedModifier 的实体
+>     query: Query<(Entity, &Buff), Without<SpeedModifier>>,
+>     mut commands: Commands,
+> ) {
+>     for (entity, buff) in query.iter() {
+>         let modifier = match buff.buff_type {
+>             BuffType::SpeedBoost => SpeedModifier {
+>                 multiplier: 1.5,
+>                 source: BuffType::SpeedBoost,
+>             },
+>             BuffType::Slow => SpeedModifier {
+>                 multiplier: 0.5,
+>                 source: BuffType::Slow,
+>             },
+>         };
+>         commands.entity(entity).insert(modifier);
+>         println!("✅ Applied {:?} buff to {:?}",
+>             buff.buff_type, entity);
+>     }
+> }
+>
+> // ── 系统：移动（在 Movement 阶段执行，使用 SpeedModifier）──
+> fn movement(
+>     mut query: Query<(&mut Position, Option<&SpeedModifier>)>,
+>     time: Res<Time>,
+> ) {
+>     let dt = time.delta_seconds();
+>     let base_speed = 100.0;
+>
+>     for (mut pos, modifier) in query.iter_mut() {
+>         let mult = modifier.map_or(1.0, |m| m.multiplier);
+>         pos.x += base_speed * mult * dt;
+>         pos.y += base_speed * mult * 0.1 * dt; // 微弱漂移
+>     }
+> }
+>
+> // ── 系统：衰减 Buff 持续时间 + 检测过期 ──
+> fn tick_buffs(
+>     time: Res<Time>,
+>     mut query: Query<(Entity, &mut Buff)>,
+>     mut commands: Commands,
+>     mut expired_events: EventWriter<BuffExpiredEvent>,
+> ) {
+>     let dt = time.delta_seconds();
+>     for (entity, mut buff) in query.iter_mut() {
+>         buff.duration -= dt;
+>         if buff.duration <= 0.0 {
+>             // Buff 过期：移除 Buff 组件
+>             commands.entity(entity).remove::<Buff>();
+>             // 发送过期事件——由 BuffExpiration 阶段处理
+>             expired_events.send(BuffExpiredEvent {
+>                 entity,
+>                 buff_type: buff.buff_type,
+>             });
+>             println!("⏰ Buff {:?} expired on {:?}",
+>                 buff.buff_type, entity);
+>         }
+>     }
+> }
+>
+> // ── 使用 RemovedComponents 检测 Buff 被移除 ──
+> // RemovedComponents<T> 在 Bevy 0.14+ 中更名为 RemovedComponents
+> fn on_buff_removed(
+>     mut commands: Commands,
+>     mut removed: RemovedComponents<Buff>,
+>     // 需要知道移除了哪种 Buff 的 SpeedModifier 也要移除
+>     speed_query: Query<&SpeedModifier>,
+>     mut expired_events: EventReader<BuffExpiredEvent>,
+> ) {
+>     // 方法 1：通过 RemovedComponents 检测（不需要事件）
+>     for entity in removed.read() {
+>         if let Ok(modifier) = speed_query.get(entity) {
+>             let buff_type = modifier.source;
+>             commands.entity(entity).remove::<SpeedModifier>();
+>             println!("🧹 Cleaned up {:?} SpeedModifier from {:?}",
+>                 buff_type, entity);
+>         }
+>     }
+>
+>     // 方法 2：通过事件检测（在 BuffExpiration 阶段）
+>     for event in expired_events.read() {
+>         // 双重保险：如果还有 SpeedModifier 残留则清理
+>         if let Ok(modifier) = speed_query.get(event.entity) {
+>             if modifier.source == event.buff_type {
+>                 commands.entity(event.entity)
+>                     .remove::<SpeedModifier>();
+>                 println!("🧹 (via event) Cleaned up {:?} from {:?}",
+>                     event.buff_type, event.entity);
+>             }
+>         }
+>     }
+> }
+>
+> // ── 施放 Buff 的测试系统（按数字键）──
+> fn test_buff_input(
+>     mut commands: Commands,
+>     keyboard: Res<ButtonInput<KeyCode>>,
+>     query: Query<Entity>, // 对存在的第一个实体施放
+> ) {
+>     if keyboard.just_pressed(KeyCode::Digit1) {
+>         if let Some(entity) = query.iter().next() {
+>             commands.entity(entity).insert(Buff {
+>                 buff_type: BuffType::SpeedBoost,
+>                 duration: 5.0,
+>                 original_duration: 5.0,
+>             });
+>             println!("⚡ SpeedBoost applied!");
+>         }
+>     }
+>     if keyboard.just_pressed(KeyCode::Digit2) {
+>         if let Some(entity) = query.iter().next() {
+>             commands.entity(entity).insert(Buff {
+>                 buff_type: BuffType::Slow,
+>                 duration: 3.0,
+>                 original_duration: 3.0,
+>             });
+>             println!("🐌 Slow applied!");
+>         }
+>     }
+> }
+>
+> fn main() {
+>     App::new()
+>         .add_plugins(MinimalPlugins)
+>         .add_event::<BuffExpiredEvent>()
+>         // ═══ SystemSet 顺序保证 ───
+>         .configure_sets(Update, (
+>             GameLogicSet::BuffApplication,
+>             GameLogicSet::Movement
+>                 .after(GameLogicSet::BuffApplication),
+>             GameLogicSet::BuffExpiration
+>                 .after(GameLogicSet::Movement),
+>         ))
+>         // ═══ 系统注册 ═══
+>         .add_systems(Startup, |mut commands: Commands| {
+>             commands.spawn(Position { x: 0.0, y: 0.0 });
+>         })
+>         .add_systems(Update, (
+>             apply_buffs.in_set(GameLogicSet::BuffApplication),
+>             tick_buffs, // 可以在任何阶段（不影响 Set 顺序）
+>             movement.in_set(GameLogicSet::Movement),
+>             on_buff_removed.in_set(GameLogicSet::BuffExpiration),
+>             test_buff_input,
+>         ))
+>         .run();
+> }
+> ```
+>
+> **SystemSet 时序关键点：**
+>
+> 1. **`BuffApplication` 先于 `Movement`**：确保当帧添加的 `SpeedModifier` 能立即影响移动计算
+> 2. **`Movement` 先于 `BuffExpiration`**：过期的 Buff 速度修饰器在移动完成后再移除，不影响当帧移动
+> 3. **`RemovedComponents<Buff>` 是 Bevy 内置机制**：每次 `Buff` 组件被移除时自动记录，下一帧可读取——比手动发事件更可靠（不依赖开发者记得发事件）
+> 4. 如果用多个 `BuffType` 叠加（如同时有 SpeedBoost+Slow），需要将 `SpeedModifier` 改为乘法叠加（`multiplier *= 1.5 * 0.5`），或者用 `Vec<SpeedModifier>` 存储多个修饰器
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - [Bevy Book](https://bevyengine.org/learn/book/) — 官方教程

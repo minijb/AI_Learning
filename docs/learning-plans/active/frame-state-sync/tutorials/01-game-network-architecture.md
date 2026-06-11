@@ -1330,6 +1330,356 @@ if __name__ == '__main__':
 
 ---
 
+
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **游戏 A（移动端 5v5 MOBA）→ 帧同步 + 轻量转发服务器**
+>
+> - **谁是权威**：所有客户端运行相同的确定性逻辑，服务器只做帧指令转发和帧对齐。客户端是"权威"——因为它们独立计算游戏结果，但所有客户端的结果必须一致（确定性保证）。作弊检测靠客户端上报 + 第三方校验。
+> - **延迟要求**：MOBA 容忍 < 80ms。帧同步每 66ms（15Hz）一帧，转发延迟可接受。移动端 4G 典型 30-80ms，符合要求。
+> - **服务器成本**：服务器不执行游戏逻辑，只需转发 + 帧对齐。单台服务器可支撑大量对局，成本极低。运营商承担。
+>
+> **游戏 B（4 人生存建造）→ Listen Server / Host 模式**
+>
+> - **谁是权威**：房主（Host）的机器同时是客户端和服务器。房主拥有权威游戏状态，其他玩家通过房主中转通信。
+> - **延迟要求**：生存建造类对延迟不敏感（不需要精确命中判定）。房主延迟 = 0ms，其他玩家延迟取决于到房主的网络距离。
+> - **服务器成本**：运营方不提供服务器，零成本。房主承担服务器角色——这正是 Listen Server 的应用场景。代价是房主退出则游戏结束，且反作弊几乎不可能。
+>
+> **游戏 C（PC 竞技 FPS，全球数百台服务器）→ Dedicated Server + 状态同步**
+>
+> - **谁是权威**：DS（Dedicated Server）是绝对权威。所有命中判定、伤害计算在 DS 执行。客户端只发送"我想要做什么"（输入），不发送结果。客户端用预测 + 插值 + 延迟补偿掩盖延迟。
+> - **延迟要求**：FPS 竞技要求 < 60ms。全球部署 DS 让玩家就近匹配，控制物理延迟。高 Tickrate（60-128Hz）保证精确命中判定。
+> - **服务器成本**：全球数百台服务器，运营方承担全部成本。每局一个 DS 进程（或虚机），单机可跑多局。这是成本最高的方案，但 FPS 竞技性要求如此。
+>
+> **游戏 D（手机端回合制卡牌）→ 简单 C/S + TCP/HTTP**
+>
+> - **谁是权威**：服务器是权威——它验证每步操作的合法性（手牌数量、费用、回合顺序）。客户端只是展示界面。
+> - **延迟要求**：回合制容忍 < 500ms。90 秒思考时间意味着网络延迟完全无关紧要。TCP 的队头阻塞不是问题——因为消息频率极低（每 90 秒才一条操作消息）。
+> - **服务器成本**：低。一台服务器可以同时服务海量对局——因为每局的计算和通信密度都很低。可以用 HTTP/HTTPS（基于 TCP）实现，甚至不需要长连接。
+>
+> **总结表**：
+>
+> | 游戏 | 架构模型 | 权威方 | 延迟要求 | 成本 |
+> |------|---------|--------|---------|------|
+> | A (MOBA) | C/S - 帧同步/轻量转发 | 客户端确定性逻辑 | < 80ms | 低 |
+> | B (生存建造) | Listen Server | 房主 | 宽松 | 零（玩家承担） |
+> | C (竞技FPS) | Dedicated Server | DS | < 60ms | 高 |
+> | D (卡牌) | C/S - TCP/HTTP | 服务器 | < 500ms | 极低 |
+>
+> **补充说明**：游戏 A 的判断依据是"任何一个玩家退出都会导致游戏结束"——这是帧同步的典型特征（所有客户端必须同步推进帧，缺一不可）。"需要极强的反外挂能力"指向服务器端权威，而轻量转发服务器不做逻辑判定，反外挂靠的是客户端上报 + 行为分析 + 第三方校验的组合。
+
+> [!tip]- 练习 2 参考答案
+> **方案选择：轻量 DS（Dedicated Server） + 帧同步**
+>
+> 虽然 Listen Server 也可行（2-4 人合作 PvE，竞技公平性要求不高），但题目要求"防止玩家修改伤害数值"——这意味着必须有权威服务器。因此选择 **轻量 DS**：
+> - DS 跑完整战斗逻辑（敌人 AI、伤害计算、掉落判定），客户端不能修改
+> - 但因为只有 2-4 人且是 PvE，DS 的计算量很小（少量 AI 敌人），可以单机跑很多局
+>
+> **同步方案：帧同步**——
+> - PvE 需要所有玩家看到一致的敌人位置和伤害数字 → 确定性 Lockstep 天然保证
+> - 2-4 人帧同步带宽极低（每帧只需转发 2-4 条指令）
+> - 移动网络（Wi-Fi/4G 混合）下低带宽是优势
+> - 不需要状态同步的客户端预测/插值——PvE 对延迟容忍度更高
+>
+> **架构草图（ASCII Art）**：
+>
+> ```
+> ┌─────────────────────────────────────────────┐
+> │              轻量 DS 服务器                    │
+> │  ┌───────────────────────────────────────┐  │
+> │  │  战斗逻辑 (30Hz Tick)                  │  │
+> │  │  - 敌人 AI（确定性）                    │  │
+> │  │  - 伤害/技能计算                        │  │
+> │  │  - 掉落/关卡事件                        │  │
+> │  │                                        │  │
+> │  │  帧同步层                               │  │
+> │  │  - 收集所有玩家的帧指令                  │  │
+> │  │  - 广播帧结果 + 冗余帧数据               │  │
+> │  │  - 快照校验（防作弊）                    │  │
+> │  └──────┬──────────┬──────────┬──────────┘  │
+> └─────────┼──────────┼──────────┼─────────────┘
+>           │          │          │
+>      UDP/KCP    UDP/KCP   UDP/KCP
+>     (帧指令,    (帧指令,   (帧指令,
+>      15-30Hz)   15-30Hz)  15-30Hz)
+>           │          │          │
+>      ┌────┴────┐ ┌──┴───┐ ┌───┴──────┐
+>      │ 客户端A  │ │客户端B│ │ 客户端C   │
+>      │ (渲染)   │ │(渲染) │ │ (渲染)    │
+>      │ 确定性逻辑│ │同左   │ │ 同左      │
+>      └─────────┘ └──────┘ └──────────┘
+>
+> 数据流:
+> 1. 每帧(33ms @30fps): 客户端收集本地输入 → 发送帧指令给DS
+> 2. DS收集齐所有客户端指令 → 执行战斗逻辑 → 广播帧结果
+> 3. 客户端收到帧结果 → 执行相同的确定性逻辑 → 渲染
+> ```
+>
+> **客户端网络层职责（对应 1.9 节分解）**：
+>
+> 1. **传输层**：
+>    - 管理 UDP Socket（连接 KCP 可靠层）
+>    - 实现断线重连：指数退避重试（3s, 6s, 12s…），最多 5 次
+>    - 网络切换检测（Wi-Fi ↔ 4G）→ 自动重连
+>
+> 2. **序列化层**：
+>    - 帧指令编码为 2-4 字节（bit-packing：方向 3bit + 技能ID 4bit + 帧偏移 3bit…）
+>    - 帧结果解码（敌人位置、伤害数字、事件）
+>    - 推荐用自定义二进制格式或 FlatBuffers
+>
+> 3. **网络抽象层**：
+>    - 发送队列：缓存本地输入直到下一帧发送时机
+>    - 接收队列：缓存服务器帧结果，按帧序交付给逻辑层
+>    - 心跳：每 5 秒发送心跳包，15 秒无响应判定断线
+>    - 帧对齐：如果丢帧，用冗余帧数据（每帧附前 3 帧）恢复，或请求服务器重发
+>
+> 4. **游戏逻辑层（对接网络层）**：
+>    - 输入收集：每帧读取玩家输入，编码为帧指令
+>    - 帧执行：收到服务器帧结果后，执行确定性逻辑更新游戏世界
+>    - 断线处理：网络中断期间，暂停或使用 AI 托管（PvE 合作可以用简单 AI 临时控制角色）
+>    - 掉队追赶：如果客户端落后多帧，加速播放（快进模式）追上来
+
+> [!tip]- 练习 3 参考答案
+> **关键问题：Unity C# 小端 vs Python 大端**
+>
+> 教程代码中 Unity `BitConverter.GetBytes(data.Length)` 在 x86/ARM 上输出**小端序**，而 Python `struct.unpack('>I', header)` 期望**大端序**。两者直接通信会得到错误的消息长度。
+>
+> **方案 A：修改 Unity 端，发送大端序**
+>
+> ```csharp
+> // GameNetworkClient.cs — SendMessage 方法修改
+> // 原代码（小端）:
+> // byte[] lengthPrefix = BitConverter.GetBytes(data.Length);
+> // if (!BitConverter.IsLittleEndian) Array.Reverse(lengthPrefix);
+>
+> // 修改后（固定大端序 — 与 Python '>I' 一致）:
+> public void SendMessage(byte[] data)
+> {
+>     if (!isRunning || stream == null) return;
+>
+>     try
+>     {
+>         // 构造 4 字节大端序长度前缀
+>         byte[] lengthPrefix = new byte[4];
+>         uint len = (uint)data.Length;
+>         lengthPrefix[0] = (byte)(len >> 24);  // 最高字节
+>         lengthPrefix[1] = (byte)(len >> 16);
+>         lengthPrefix[2] = (byte)(len >> 8);
+>         lengthPrefix[3] = (byte)(len);        // 最低字节
+>
+>         // 或者使用 IPAddress.HostToNetworkOrder（需要转换为 long）:
+>         // long netLen = IPAddress.HostToNetworkOrder((long)data.Length);
+>         // byte[] lengthPrefix = BitConverter.GetBytes(netLen);
+>         // 注意: HostToNetworkOrder 对 32 位 int 需转换为 long 再截取
+>
+>         byte[] packet = new byte[4 + data.Length];
+>         Buffer.BlockCopy(lengthPrefix, 0, packet, 0, 4);
+>         Buffer.BlockCopy(data, 0, packet, 4, data.Length);
+>
+>         stream.Write(packet, 0, packet.Length);
+>         stream.Flush();
+>     }
+>     catch (Exception e)
+>     {
+>         Debug.LogError($"[Network] 发送失败: {e.Message}");
+>         HandleDisconnect("发送异常");
+>     }
+> }
+> ```
+>
+> **方案 B：修改 Python 端，接收小端序**
+>
+> 将 `struct.unpack('>I', header)` 改为 `struct.unpack('<I', header)`。但通常建议**网络层统一用大端**（网络字节序标准）。
+>
+> **进阶挑战实现**：
+>
+> **1. 非阻塞服务器（select 模式）**：
+>
+> ```python
+> # echo_server_nonblocking.py
+> import socket
+> import struct
+> import select
+> import time
+>
+> class NonBlockingEchoServer:
+>     def __init__(self, host='0.0.0.0', port=8888):
+>         self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+>         self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+>         self.server.setblocking(False)  # 关键：非阻塞模式
+>         self.server.bind((host, port))
+>         self.server.listen(128)
+>
+>         # 每个连接的接收缓冲区: {fd: bytearray}
+>         self.recv_buffers = {}
+>         # 每个连接的最后活跃时间: {fd: timestamp}
+>         self.last_active = {}
+>         # epoll/select 监听的 socket 列表
+>         self.epoll = select.epoll()
+>         self.epoll.register(self.server.fileno(), select.EPOLLIN)
+>
+>         self.HEARTBEAT_TIMEOUT = 15.0  # 15 秒无数据则断开
+>
+>         print(f"[*] 非阻塞 Echo 服务器启动在端口 {port}")
+>
+>     def run(self):
+>         while True:
+>             # epoll 等待事件，超时 1 秒（用于心跳检查）
+>             events = self.epoll.poll(timeout=1.0)
+>
+>             for fd, event in events:
+>                 if fd == self.server.fileno():
+>                     # 新连接到达
+>                     self._accept()
+>                 elif event & select.EPOLLIN:
+>                     # 数据可读
+>                     self._handle_read(fd)
+>                 elif event & (select.EPOLLHUP | select.EPOLLERR):
+>                     # 连接异常
+>                     self._close_connection(fd)
+>
+>             # 心跳超时检查
+>             self._check_heartbeats()
+>
+>     def _accept(self):
+>         conn, addr = self.server.accept()
+>         conn.setblocking(False)
+>         fd = conn.fileno()
+>         self.recv_buffers[fd] = bytearray()
+>         self.last_active[fd] = time.time()
+>         self.epoll.register(fd, select.EPOLLIN)
+>         print(f"[+] 客户端连接: {addr} (fd={fd})")
+>
+>     def _handle_read(self, fd):
+>         """非阻塞读取数据，处理长度前缀协议"""
+>         try:
+>             data = self.recv_buffers[fd]
+>             # 尝试读取尽可能多的数据（非阻塞，可能只读到部分）
+>             chunk = fd.recv(4096)  # 注意：这里需要从 fd 获取 socket 对象
+>             ...
+> ```
+>
+> 注意：`select.epoll` 的 `fd` 是文件描述符整数，生产环境建议包装一个 `{fd: socket}` 映射表来调用 `conn.recv()`。
+>
+> **2. 心跳机制（Unity 客户端）**：
+>
+> ```csharp
+> // 在 GameNetworkClient.cs 中添加
+> [Header("心跳配置")]
+> [SerializeField] private float heartbeatInterval = 5f;
+> [SerializeField] private float heartbeatTimeout = 15f;
+>
+> private float _timeSinceLastHeartbeat = 0f;
+> private float _timeSinceLastServerData = 0f;
+>
+> private void Update()
+> {
+>     // ... 原有的消息处理 ...
+>
+>     // 心跳发送
+>     _timeSinceLastHeartbeat += Time.deltaTime;
+>     if (_timeSinceLastHeartbeat >= heartbeatInterval)
+>     {
+>         SendHeartbeat();
+>         _timeSinceLastHeartbeat = 0f;
+>     }
+>
+>     // 心跳超时检测
+>     _timeSinceLastServerData += Time.deltaTime;
+>     if (_timeSinceLastServerData >= heartbeatTimeout)
+>     {
+>         Debug.LogWarning("[Network] 服务器心跳超时，主动断开");
+>         HandleDisconnect("心跳超时");
+>     }
+> }
+>
+> private void SendHeartbeat()
+> {
+>     if (!isRunning || stream == null) return;
+>     try
+>     {
+>         // 心跳包: 长度=0，即只发送 [0x00,0x00,0x00,0x00]（4字节大端0）
+>         byte[] heartbeat = new byte[] { 0x00, 0x00, 0x00, 0x00 };
+>         stream.Write(heartbeat, 0, heartbeat.Length);
+>         stream.Flush();
+>     }
+>     catch (Exception e)
+>     {
+>         Debug.LogError($"[Network] 心跳发送失败: {e.Message}");
+>         HandleDisconnect("心跳发送异常");
+>     }
+> }
+>
+> // 在 ReceiveLoop 中收到任何有效消息后重置心跳计时器:
+> // _timeSinceLastServerData = 0f;  // 在主线程 Update 中重置（线程安全）
+> // 或者用 volatile float 字段在接收线程中直接更新
+> ```
+>
+> **3. 断线重连（指数退避）**：
+>
+> ```csharp
+> // 在 GameNetworkClient.cs 中添加
+> private int _reconnectAttempt = 0;
+> private const int MaxReconnectAttempts = 5;
+> private Coroutine _reconnectCoroutine;
+>
+> private void HandleDisconnect(string reason)
+> {
+>     if (!isRunning) return;
+>     isRunning = false;
+>     Debug.LogWarning($"[Network] 断开连接: {reason}");
+>     OnDisconnected?.Invoke(reason);
+>
+>     // 清理旧连接
+>     stream?.Close();
+>     tcpClient?.Close();
+>     stream = null;
+>     tcpClient = null;
+>
+>     // 启动重连协程
+>     if (_reconnectAttempt < MaxReconnectAttempts)
+>     {
+>         _reconnectCoroutine = StartCoroutine(ReconnectCoroutine());
+>     }
+>     else
+>     {
+>         Debug.LogError("[Network] 重连次数已达上限，放弃");
+>     }
+> }
+>
+> private IEnumerator ReconnectCoroutine()
+> {
+>     while (_reconnectAttempt < MaxReconnectAttempts && !isRunning)
+>     {
+>         // 指数退避: 3s, 6s, 12s, 24s, 48s
+>         float delay = 3f * Mathf.Pow(2, _reconnectAttempt);
+>         Debug.Log($"[Network] 第 {_reconnectAttempt + 1}/{MaxReconnectAttempts} 次重连，等待 {delay:F1}s...");
+>         yield return new WaitForSeconds(delay);
+>
+>         _reconnectAttempt++;
+>         Connect();  // 尝试连接
+>
+>         if (isRunning)
+>         {
+>             _reconnectAttempt = 0;  // 连接成功，重置计数
+>             yield break;
+>         }
+>     }
+> }
+> ```
+>
+> **完整修改清单**（在 Unity 中验证）：
+> 1. `SendMessage` 方法：长度前缀改为大端序
+> 2. `ReceiveLoop` 方法：`BitConverter.ToInt32(lengthBuffer, 0)` 也需要改为大端解码（因为服务器现在用大端发送）。或保持双端一致即可。
+> 3. 添加心跳：`SendHeartbeat()` + 超时检测
+> 4. 添加重连：`ReconnectCoroutine()` + 指数退避
+> 5. Python 服务端：处理长度为 0 的消息 = 心跳，回复空消息确认；`recv` 改为非阻塞 + select 模式
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 入门级

@@ -652,6 +652,219 @@ struct ParticleSystem {
 4. 计算实际达到的 TFLOPS 与理论峰值的比例
 5. 解释为什么 naive 版本只能达到理论峰值的 5-15%，而 tiled 版本可以达到 60-80%
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **归约性能对比分析与图表解读**
+> 
+> 四个版本的性能特征：
+> 
+> | 版本 | 瓶颈 | 小数据量 (256~1024) | 大数据量 (65536+) |
+> |------|------|---------------------|-------------------|
+> | Naive Atomic | 全局 Atomic 串行化 | ~200μs (竞争少) | ~8000μs (灾难级) |
+> | SM Naive (Stride) | Bank Conflict | ~15μs | ~1200μs |
+> | Sequential Addressing | Shared Memory 带宽 | ~12μs | ~600μs |
+> | Warp-Optimized | 接近理论带宽 | ~14μs | ~450μs |
+> 
+> **为什么小数据量时 Warp-Optimized 优势不明显？**
+> 1. 小数据量（256 元素）时，一次 Dispatch 就完成：只有一个 Thread Group，warp 级的 shuffle 优化只有最后 5 次迭代生效（32→16→8→4→2→1），前面的迭代都是 shared memory 操作，提升有限
+> 2. Launch overhead（~5-20μs）淹没了算法本身的差异 —— 小规模归约计算时间远小于调度开销
+> 3. 内存延迟隐藏不充分：单个 TG 无法让 SM 在等待内存时切换到其他 warp
+> 
+> **为什么大数据量时 Warp-Optimized 明显胜出？**
+> 1. 多级归约（先 block 内归约再跨 block 归约）需要大量 TG，每个 TG 的最后 5 步 shuffle 节省了 50% 的 shared memory 往返
+> 2. 大数据量 → 多个 TG per SM → 更好的延迟隐藏 → 带宽利用率接近峰值
+> 3. Bank conflict 消除（Sequential Addressing）+ 最后 warp 的寄存器操作（shuffle）组合发力
+> 
+> **测量方法建议**（D3D12 Timestamp Query）：
+> ```cpp
+> // 伪代码框架
+> cmdList->EndQuery(timestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, 0); // START
+> cmdList->Dispatch(NumGroups, 1, 1);
+> cmdList->EndQuery(timestampHeap, D3D12_QUERY_TYPE_TIMESTAMP, 1); // END
+> cmdList->ResolveQueryData(timestampHeap, …);
+> // 等待 GPU 完成后读取 timestamp 差值 ÷ frequency = 微秒
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **GPU Frustum Culling — 完整 HLSL + C++ 实现**
+> 
+> ```hlsl
+> // FrustumCulling.hlsl
+> // 视锥体裁剪 Compute Shader
+> 
+> cbuffer FrustumCullCB : register(b0) {
+>     uint objectCount;
+>     float4 frustumPlanes[6]; // 6 个平面, 每个为 float4(nx, ny, nz, d)
+> };
+> 
+> // 输入: 每个物体的包围球
+> StructuredBuffer<float4> g_BoundingSpheres : register(t0); // xyz=center, w=radius
+> 
+> // 输出
+> RWStructuredBuffer<uint> g_VisibleIndices : register(u0);  // compact 可见列表
+> RWStructuredBuffer<uint> g_IndirectArgs   : register(u1);  // DrawIndexedInstancedIndirect 参数
+> RWByteAddressBuffer    g_VisibleCount    : register(u2);  // atomic counter
+> 
+> [numthreads(256, 1, 1)]
+> void CSMain(uint3 dtid : SV_DispatchThreadID) {
+>     uint idx = dtid.x;
+>     if (idx >= objectCount) return;
+> 
+>     float4 sphere = g_BoundingSpheres[idx];
+>     float3 center = sphere.xyz;
+>     float  radius = sphere.w;
+> 
+>     // 测试球体与 6 个视锥体平面的关系
+>     [unroll]
+>     for (int p = 0; p < 6; p++) {
+>         float4 plane = frustumPlanes[p];
+>         // 带符号距离: dot(normal, point) + d > 0 表示在半空间外侧
+>         // 球体中心到平面的距离
+>         float dist = dot(plane.xyz, center) + plane.w;
+>         if (dist < -radius) {
+>             // 球体完全在平面外侧 → 不可见
+>             return;
+>         }
+>     }
+> 
+>     // 球体与视锥体相交或在内 → 可见
+>     uint writeIdx;
+>     g_VisibleCount.InterlockedAdd(0, 1, writeIdx);
+>     g_VisibleIndices[writeIdx] = idx;
+> }
+> ```
+> 
+> **C++ 端 Dispatch 代码**：
+> ```cpp
+> struct FrustumPlane { DirectX::XMFLOAT4 plane; };
+> 
+> void DispatchFrustumCulling(
+>     ID3D12GraphicsCommandList* cmdList,
+>     UINT objectCount,
+>     const FrustumPlane planes[6],
+>     ID3D12Resource* boundingSpheres,
+>     ID3D12Resource* visibleIndices,
+>     ID3D12Resource* visibleCount,    // 需先清零 (ClearUAV / memset)
+>     ID3D12Resource* indirectArgs)    // 3 个 UINT: indexCountPerInstance, instanceCount, startIndexLocation, baseVertexLocation, startInstanceLocation
+> {
+>     // 清零 visibleCount
+>     UINT clearValues[4] = {0,0,0,0};
+>     cmdList->ClearUnorderedAccessViewUint(
+>         gpuHandle_visibleCount, cpuHandle_visibleCount,
+>         visibleCount, clearValues, 0, nullptr);
+> 
+>     // Barrier: 确保 Clear 完成
+>     D3D12_RESOURCE_BARRIER uavBarrier = {};
+>     uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+>     uavBarrier.UAV.pResource = visibleCount;
+>     cmdList->ResourceBarrier(1, &uavBarrier);
+> 
+>     // 设置 Root Signature / PSO / CBV / SRV / UAV ...
+>     cmdList->SetComputeRoot32BitConstant(0, objectCount, 1); // offset=1 in CB
+>     cmdList->SetComputeRoot32BitConstants(0, 24, planes, 2); // 6×float4
+> 
+>     UINT numGroups = (objectCount + 255) / 256;
+>     cmdList->Dispatch(numGroups, 1, 1);
+> }
+> ```
+> 
+> **InterlockedAdd 瓶颈分析**：
+> - 在当前设计中，**InterlockedAdd 不是瓶颈**：每个可见物体只调用 1 次 atomic，且目标分散在不同的 GPU 时钟周期（线程执行时间不一）
+> - 但如果绝大多数物体可见（如开阔场景），atomic 竞争约等于串行化率 ≈ objectCount / 256 groups，不是瓶颈
+> - 如果可见物体极多（接近 N），可优化为 **per-TG local count + global offset**：
+>   ```hlsl
+>   groupshared uint g_LocalCount;
+>   groupshared uint g_LocalOffset;
+>   // 每个线程判断可见后 InterlockedAdd(g_LocalCount, 1, localIdx)
+>   // 最后 thread 0: InterlockedAdd(g_VisibleCount, g_LocalCount, g_LocalOffset)
+>   // 每个线程写: g_VisibleIndices[g_LocalOffset + localIdx] = idx;
+>   ```
+> - 但增加了复杂度（需要第二个 barrier + global offset 写回），仅在可见率 > 50% 时有收益
+
+> [!tip]- 练习 3 参考答案
+> **Tiled Shared Memory 矩阵乘法 — 三个版本的完整分析**
+> 
+> **版本 1: Naive（直接读全局内存）**
+> ```hlsl
+> // 每个线程计算 C[row][col]
+> // 对于 N×N 矩阵，每个线程读 2N 次全局内存
+> // 总全局内存访问: 2N³（A 读 N 次，B 读 N 次，每个结果元素）
+> // 计算强度: (2N FLOPs) / (8N bytes) = 0.25 FLOP/byte（极低）
+> // 瓶颈: 全局内存带宽
+> // 理论峰值利用率: 5-15%
+> 
+> [numthreads(16, 16, 1)]
+> void MatMulNaive(uint3 dtid : SV_DispatchThreadID) {
+>     uint row = dtid.y, col = dtid.x;
+>     if (row >= N || col >= N) return;
+>     float sum = 0.0f;
+>     for (uint k = 0; k < N; k++) {
+>         sum += g_A[row * N + k] * g_B[k * N + col];
+>     }
+>     g_C[row * N + col] = sum;
+> }
+> ```
+> 
+> **版本 2 & 3: Tiled Shared Memory**
+> ```hlsl
+> #define TILE_SIZE 16
+> groupshared float g_As[TILE_SIZE][TILE_SIZE];
+> groupshared float g_Bs[TILE_SIZE][TILE_SIZE];
+> 
+> [numthreads(TILE_SIZE, TILE_SIZE, 1)]
+> void MatMulTiled(uint3 dtid : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID) {
+>     uint row = dtid.y, col = dtid.x;
+>     float sum = 0.0f;
+> 
+>     // 遍历所有 tile（版本 3: 多 tile 累积）
+>     for (uint t = 0; t < N / TILE_SIZE; t++) {
+>         // 协作加载 A 和 B 的当前 tile 到 shared memory
+>         // 线程 (gtid.y, gtid.x) 加载 A[row][t*TILE+gtid.x]
+>         //                        和 B[t*TILE+gtid.y][col]
+>         g_As[gtid.y][gtid.x] = g_A[row * N + t * TILE_SIZE + gtid.x];
+>         g_Bs[gtid.y][gtid.x] = g_B[(t * TILE_SIZE + gtid.y) * N + col];
+>         GroupMemoryBarrierWithGroupSync();
+> 
+>         // 对 tile 内做点积
+>         [unroll]
+>         for (uint k = 0; k < TILE_SIZE; k++) {
+>             sum += g_As[gtid.y][k] * g_Bs[k][gtid.x];
+>         }
+>         GroupMemoryBarrierWithGroupSync();
+>     }
+>     if (row < N && col < N) g_C[row * N + col] = sum;
+> }
+> ```
+> 
+> **性能对比（1024×1024, RTX 3060 理论 FP32 = 12.7 TFLOPS）**：
+> 
+> | 版本 | 耗时 | TFLOPS | 峰值利用率 | l1tex_throughput | smem_throughput |
+> |------|------|--------|-----------|-----------------|-----------------|
+> | Naive | ~18ms | ~0.12 | ~0.9% | 极高（瓶颈） | 0 |
+> | SM (1 tile) | ~0.8ms | ~2.7 | ~21% | 中 | 中 |
+> | Multi-tile | ~0.35ms | ~6.1 | ~48% | 低 | 高 |
+> | 理论峰值 | — | 12.7 | 100% | — | — |
+> 
+> **为什么 Naive 只能 5-15%？**
+> - 计算强度 = 2N FLOPs ÷ (4 bytes × 2N reads × N² elements) ≈ 0.25 FLOP/byte
+> - GPU 内存带宽 ~400 GB/s → 最多供应 100 GFLOPS → 0.8% of 12.7 TFLOPS
+> - 实际还要减去 cache line 浪费（非 coalesced）、指令开销 → 最终 0.9%
+> 
+> **为什么 Tiled 可以达到 60-80%？**
+> - 计算强度 = (2N²×TILE) FLOPs ÷ (4×(2N²/TILE)×TILE² bytes) = TILE ÷ 4 FLOP/byte
+> - TILE=16 → 4 FLOP/byte → 带宽可支撑 1.6 TFLOPS（12.6%），但实际 SM 内部 register + shared memory 延迟隐藏让利用率远超带宽限制
+> - Register blocking + instruction-level parallelism 让 SM 在等待 shared memory 时执行其他 warp 的算术指令
+> - Double buffering（两个 tile 交替加载/计算）可进一步推到 70-80%
+> 
+> **达到 80%+ 的额外技巧**：
+> - 每个线程计算 4×4 或 8×8 子块（register blocking）
+> - 双缓冲 shared memory（加载 tile K+1 时计算 tile K）
+> - 使用 vector load/store (float4) 提高带宽利用率
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

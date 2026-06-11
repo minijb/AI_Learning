@@ -508,6 +508,178 @@ Mesh Viewer 可以帮助诊断顶点数据问题：
 
 **验收标准**：提供一个像素的完整 Pixel History 截图（或文字记录），包含 ≥5 次写入事件，并能说出每个事件对应场景中的哪个物体。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **第一次帧捕获操作指南：**
+>
+> 1. **启动 RenderDoc GUI**：安装后从开始菜单或命令行启动 `renderdocui.exe`（Windows）或 `renderdoc`（Linux/macOS）。
+>
+> 2. **Launch Application 配置**：
+>    - Executable Path：`C:\Program Files\Epic Games\UE_5.3\Engine\Binaries\Win64\UnrealEditor.exe`（UE5 示例），或任何 3D 应用/游戏
+>    - 如果使用 RenderDoc 自带示例：`C:\Program Files\RenderDoc\Sample.exe`
+>    - 勾选 `Capture Child Processes`（UE 启动时会 fork 子进程）
+>
+> 3. **捕获操作**：
+>    - 点击 `Launch` → 应用启动
+>    - 应用窗口左上角应显示 RenderDoc 的 Overlay（帧计数器 + 捕获状态）
+>    - 按下 **F12**（默认捕获键）→ Overlay 短暂闪烁 → 捕获完成
+>    - 或按 **Print Screen** 键
+>
+> 4. **Event Browser 浏览**：
+>    - 回到 RenderDoc GUI，自动打开捕获的帧
+>    - Event Browser 面板列出所有 GPU 操作，典型入口：
+>      ```
+>      Frame #1 (Vulkan/D3D12)
+>      ├── vkCmdBeginRenderPass (Color Pass)
+>      │   ├── vkCmdBindPipeline
+>      │   ├── vkCmdBindDescriptorSets
+>      │   ├── vkCmdDrawIndexed (2004) ← 第一个实际的 Draw Call
+>      │   ├── vkCmdDrawIndexed (1234)
+>      │   ├── ...
+>      │   └── vkCmdDrawIndexed (512)
+>      ├── vkCmdNextSubpass (Depth Pre-pass)
+>      └── vkCmdEndRenderPass
+>      ```
+>
+> 5. **Texture Viewer 查看结果**：
+>    - 双击任一 `DrawIndexed` / `glDrawElements` Event
+>    - Texture Viewer 显示：该 Draw Call 渲染到 Render Target 的结果
+>    - 右下角显示像素值（RGBA + Depth/Stencil），鼠标悬停可拾取
+>    - 用右键拖动缩放/移动纹理视图
+>
+> **常见问题排查**：
+> - Overlay 不显示 → 确认应用使用了支持的图形 API（Vulkan/DX12/DX11/OpenGL）
+> - 捕获后 Event Browser 为空 → 可能捕获到了 Clear/Compute Pass，切换到非空白帧
+> - F12 无反应 → 检查 RenderDoc 主窗口的 `Tools → Settings → Capture Key`
+
+> [!tip]- 练习 2 参考答案
+> **Top 3 Draw Call 分析模板：**
+>
+> 1. **开启 Timing 功能**：
+>    - 在 `Capture Options`（Launch 界面左下角）中：
+>    - 勾选 `Collect GPU Timers`
+>    - 某些 GPU 可能需要额外勾选 `Use API-specific timers`
+>
+> 2. **Performance Counter Viewer 排序**：
+>    - `Tools → Performance Counter Viewer`
+>    - 列标题点击 `Duration` 降序排列
+>    - 示例 Top 3：
+>
+> **Top 1 — Shadow Map 渲染（5.8ms）**：
+> ```
+> Event: vkCmdDrawIndexed(15234)
+> ├── Texture Viewer: Shadow Map 2048×2044, 仅深度通道
+> ├── Pipeline State → VS/PS: SimpleShadowDepth shader
+> ├── Bound Resources:
+> │   ├── Texture2D (2048×2048) — Output Depth
+> │   └── CBV: ShadowViewProj matrix
+> └── 分析: 2048 Shadow Map × 4 Cascades × 大量几何体 → 
+>     每个 Cascade 遍历场景中所有 Mesh
+>     → 优化建议: r.Shadow.CSM.MaxCascades 2;
+>       r.Shadow.MaxResolution 1024
+> ```
+>
+> **Top 2 — 半透明粒子渲染（4.3ms）**：
+> ```
+> Event: vkCmdDrawIndexed(892) （× 50 个粒子发射器）
+> ├── Texture Viewer: 大量重叠的半透明粒子（粒子火把）
+> ├── Pipeline State: Blend Enable, AlphaBlend
+> ├── Bound Resources: ParticleAtlas (512×512), 每粒子 4 顶点
+> └── 分析: 50 个粒子发射器各自创建独立 Draw Call 
+>     → 优化建议: GPU Particle System 合并粒子到单 Draw Call;
+>       减少半透明粒子数；降低粒子纹理分辨率
+> ```
+>
+> **Top 3 — 全屏后处理 Bloom（3.1ms）**：
+> ```
+> Event: vkCmdDraw(3) — Fullscreen Triangle
+> ├── Texture Viewer: 模糊后的全屏 Bloom 效果
+> ├── Pipeline State:
+> │   ├── PS: BloomDownsample + GaussianBlur (2-pass)
+> │   └── Bound Resources: SceneColor (1920×1080), Down/Up sample RTs
+> └── 分析: 全分辨率 Bloom 对填充率压力大
+>     → 优化建议: r.BloomQuality 3 (降采样到 1/4);
+>       r.Bloom.Cross 0 (禁用复杂十字滤波)
+> ```
+>
+> **验收清单**：
+> - [ ] 每个 Top DC 已识别其渲染的物体/效果
+> - [ ] 每个 Top DC 已列出使用的 Shader 类型
+> - [ ] 每个 Top DC 已列出绑定的主要纹理及分辨率
+> - [ ] 每个 Top DC 有 ≥1 条具体优化建议（非泛泛的"优化 Shader"）
+
+> [!tip]- 练习 3 参考答案
+> **Pixel History Overdraw 分析：**
+>
+> 1. **选择 Overdraw 密集的场景区域**：
+>    - 粒子效果密集区（多个爆炸叠加）
+>    - UI 元素重叠区（半透明面板+文本+图标叠加）
+>    - 场景中的玻璃/水面（多层半透明物体）
+>
+> 2. **Pixel History 操作步骤**：
+>    - 选中完整帧的最后一个 Event（通常是 `vkCmdEndRenderPass` 或 UI Pass）
+>    - Texture Viewer 中右键点击目标像素 → `Pixel History`
+>    - 或使用快捷键 `H` 开启 Pixel History 模式，然后点击像素
+>
+> 3. **Pixel History 记录模板**（粒子爆炸中心点）：
+>    ```
+>    Pixel (1024, 512) — Output: R=0.85 G=0.42 B=0.12 A=1.0
+>
+>    Event #247: Skybox Pass (Clear)
+>      → Depth: 1.0, Color: (0.3,0.5,0.8,1.0) [天空底色]
+>      → Passed Depth/Stencil: Yes (初始化)
+>
+>    Event #312: Opaque Geometry Pass — Ground Plane
+>      → Depth: 0.75, Color: (0.4,0.3,0.2,1.0) [地面]
+>      → Passed Depth: Yes, Wrote Color: Yes
+>
+>    Event #578: Translucent Pass — Smoke Particle 1
+>      → Depth: n/a (ZWrite Off), Color: (0.2,0.2,0.2,0.3)
+>      → Blend: AlphaBlend, Wrote Color: Yes
+>
+>    Event #590: Translucent Pass — Fire Particle 1
+>      → Color: (1.0,0.3,0.0,0.6) [火]
+>      → Wrote Color: Yes (叠加到已有颜色)
+>
+>    Event #595: Translucent Pass — Fire Particle 2
+>      → Color: (0.9,0.5,0.0,0.5) [火]
+>      → Wrote Color: Yes (完全覆盖了 Smoke 在该像素的贡献)
+>
+>    Event #601: Translucent Pass — Ember Spark
+>      → Color: (1.0,0.8,0.2,0.8) [火花]
+>      → Wrote Color: Yes
+>
+>    Event #610: Post Process — Bloom Upsample
+>      → Color: (小幅增亮), Wrote Color: Yes
+>    ```
+>
+> 4. **Overdraw 因子计算**：
+>    ```
+>    实际写入次数 (Wrote Color) = 6 次（Skybox + Ground + Smoke × 1 + Fire × 2 + Ember + PP）
+>    理想写入次数 = 1（只保留最终可见的物体）
+>    Overdraw 因子 = 6 / 1 = 6.0×
+>    ```
+>
+> 5. **浪费写入分析**：
+>    - **Event #578 (Smoke Particle)** 的颜色贡献被后续 Fire 完全覆盖 → **完全浪费**（Blend 运算后 Smoke 的 alpha 被 Fire 遮挡）
+>    - **Event #590 (Fire 1)** 被 #595 (Fire 2) 和 #601 (Ember) 部分叠加 → **部分浪费**（GPU 多做了 2 次 Blend 运算）
+>    - **理想渲染顺序**：先画不透明（Ground）→ 从远到近半透明（Smoke → Fire → Ember）→ 后处理。当前顺序可能不满足深度排序。
+>
+> 6. **修复尝试**：
+>    - 如果引擎允许调整渲染顺序：将 Smoke 移到 Fire 后面（Smoke 通常比火大，应该后渲染）
+>    - 减少粒子层数：降低透明度叠加层次的最大值
+>    - 使用 `discard` 剔除对最终颜色贡献 < 1% 的粒子像素
+>
+> 7. **对比不同像素位置**：
+>    - 粒子边缘像素：Overdraw 因子 ≈ 2-3×（仅少量粒子叠加）
+>    - 粒子中心像素：Overdraw 因子 ≈ 5-10×（多层叠加的核心区域）
+>    - 天空区域：Overdraw 因子 ≈ 1×（仅被 Skybox Clear → 后处理写入）
+>    - 结论：**Overdraw 集中在粒子/NPC/UI 密集区域，场景空旷区几乎无 Overdraw**
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

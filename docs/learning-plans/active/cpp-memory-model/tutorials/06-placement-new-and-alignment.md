@@ -243,6 +243,237 @@ bool is_aligned(void* ptr, size_t alignment);
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <cstdint>
+> #include <cstddef>
+> #include <iostream>
+> #include <new>
+> #include <vector>
+>
+> class TrackedArena {
+>     // 类型擦除的析构函数指针
+>     using DestructorFunc = void(*)(void*);
+>
+>     struct Record {
+>         void*          ptr;
+>         DestructorFunc destroy;
+>     };
+>
+>     alignas(std::max_align_t) char buffer_[4096];
+>     char*       current_;
+>     char*       end_;
+>     std::vector<Record> records_;
+>
+> public:
+>     TrackedArena() : current_(buffer_), end_(buffer_ + sizeof(buffer_)) {}
+>
+>     // 模板分配：分配 n 个 T，对齐到 alignof(T)
+>     template<typename T>
+>     T* allocate(size_t n = 1) {
+>         static_assert(alignof(T) <= alignof(std::max_align_t),
+>                       "Over-aligned types not supported by this arena");
+>
+>         size_t size = n * sizeof(T);
+>         size_t alignment = alignof(T);
+>
+>         void* ptr = current_;
+>         size_t space = end_ - current_;
+>
+>         if (!std::align(alignment, size, ptr, space)) {
+>             throw std::bad_alloc{};
+>         }
+>         current_ = static_cast<char*>(ptr) + size;
+>
+>         // 记录析构函数指针（类型擦除）
+>         records_.push_back({ptr, [](void* p) {
+>             static_cast<T*>(p)->~T();
+>         }});
+>
+>         return static_cast<T*>(ptr);
+>     }
+>
+>     // 析构所有对象并重置 arena
+>     void deallocate_all() {
+>         // 按构造的逆序析构（LIFO）
+>         for (auto it = records_.rbegin(); it != records_.rend(); ++it) {
+>             it->destroy(it->ptr);
+>         }
+>         records_.clear();
+>         current_ = buffer_;
+>     }
+>
+>     void reset() {
+>         // 仅重置指针，不析构（调用者自行管理生命周期）
+>         current_ = buffer_;
+>     }
+> };
+>
+> // 测试
+> struct Widget {
+>     int id;
+>     explicit Widget(int i) : id(i) {
+>         std::cout << "Widget(" << id << ") constructed\n";
+>     }
+>     ~Widget() {
+>         std::cout << "Widget(" << id << ") destroyed\n";
+>     }
+> };
+>
+> int main() {
+>     TrackedArena arena;
+>
+>     auto* i = arena.allocate<int>();
+>     *i = 42;
+>     auto* w = arena.allocate<Widget>(1);
+>     ::new (w) Widget(7);  // placement new 构造（arena 只分配了内存）
+>
+>     std::cout << "int=" << *i << ", widget id=" << w->id << "\n";
+>
+>     arena.deallocate_all();  // 析构 widget，重置 arena
+>     return 0;
+> }
+> ```
+>
+> **设计要点：**
+> - 类型擦除通过 lambda → 函数指针实现，无需虚函数
+> - LIFO 析构顺序确保依赖关系正确（后构造的先析构）
+> - `allocate<T>` 只分配对齐内存，不调用构造函数——原因：`emplace` 风格需要参数转发，简化版保持分离
+> - `std::bad_alloc` 在空间不足时抛出，与标准库行为一致
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <cstdint>
+> #include <cstddef>
+> #include <cassert>
+> #include <iostream>
+>
+> // 判断指针是否按给定对齐值对齐
+> inline bool is_aligned(const void* ptr, std::size_t alignment) {
+>     // alignment 必须是 2 的幂：利用位运算优化
+>     // ptr % alignment == 0  ⇔  (ptr & (alignment - 1)) == 0
+>     auto addr = reinterpret_cast<std::uintptr_t>(ptr);
+>     return (addr & (alignment - 1)) == 0;
+> }
+>
+> // Debug 模式下检查对齐的宏，Release 下无开销
+> #ifdef NDEBUG
+>     #define assert_aligned(ptr, T) ((void)0)
+> #else
+>     #define assert_aligned(ptr, T) \
+>         do { \
+>             if (!is_aligned((ptr), alignof(T))) { \
+>                 std::cerr << "ASSERT FAILED: " << #ptr \
+>                           << " not aligned to " << alignof(T) \
+>                           << " (" << __FILE__ << ":" << __LINE__ << ")\n"; \
+>                 std::abort(); \
+>             } \
+>         } while (0)
+> #endif
+>
+> // 测试
+> struct alignas(32) Aligned32 { int x; };
+>
+> int main() {
+>     int x = 0;
+>     assert_aligned(&x, int);  // OK: int 对齐到 4
+>
+>     alignas(32) char buf[64];
+>     assert_aligned(buf, Aligned32);  // OK: buf 对齐到 32
+>
+>     char* misaligned = buf + 1;
+>     // assert_aligned(misaligned, Aligned32);  // 触发断言失败
+>
+>     std::cout << "is_aligned(buf, 32) = " << is_aligned(buf, 32) << "\n";
+>     std::cout << "is_aligned(buf+1, 32) = " << is_aligned(buf+1, 32) << "\n";
+>     return 0;
+> }
+> ```
+>
+> **关键点：**
+> - `ptr % alignment == 0` 等价于 `(addr & (alignment - 1)) == 0`（仅当 alignment 是 2 的幂时成立，这是所有有效对齐值的特点）——避免了除法指令
+> - `NDEBUG` 是标准 assert 宏使用的宏，`assert()` 在 Release 模式下正是这样消除的
+> - `do { ... } while(0)` 是宏安全的经典模式，防止 if-else 悬挂
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> #include <cstddef>
+> #include <new>
+> #include <utility>
+> #include <stdexcept>
+>
+> template<typename T>
+> class Optional {
+>     alignas(T) unsigned char storage_[sizeof(T)];
+>     bool has_value_ = false;
+>
+> public:
+>     Optional() = default;
+>
+>     ~Optional() {
+>         if (has_value_) {
+>             reinterpret_cast<T*>(storage_)->~T();
+>         }
+>     }
+>
+>     // 不支持拷贝/移动（题目要求）
+>     Optional(const Optional&) = delete;
+>     Optional& operator=(const Optional&) = delete;
+>     Optional(Optional&&) = delete;
+>     Optional& operator=(Optional&&) = delete;
+>
+>     template<typename... Args>
+>     void construct(Args&&... args) {
+>         if (has_value_) {
+>             destroy();  // 覆盖旧值前先析构
+>         }
+>         ::new (storage_) T(std::forward<Args>(args)...);
+>         has_value_ = true;
+>     }
+>
+>     void destroy() {
+>         if (has_value_) {
+>             reinterpret_cast<T*>(storage_)->~T();
+>             has_value_ = false;
+>         }
+>     }
+>
+>     bool has_value() const { return has_value_; }
+>
+>     T& operator*() {
+>         if (!has_value_) throw std::logic_error("Optional has no value");
+>         return *reinterpret_cast<T*>(storage_);
+>     }
+>
+>     T* operator->() {
+>         if (!has_value_) throw std::logic_error("Optional has no value");
+>         return reinterpret_cast<T*>(storage_);
+>     }
+>
+>     const T& operator*() const {
+>         if (!has_value_) throw std::logic_error("Optional has no value");
+>         return *reinterpret_cast<const T*>(storage_);
+>     }
+>
+>     const T* operator->() const {
+>         if (!has_value_) throw std::logic_error("Optional has no value");
+>         return reinterpret_cast<const T*>(storage_);
+>     }
+> };
+> ```
+>
+> **核心实现原理（对标 `std::optional`）：**
+> 1. `alignas(T) unsigned char storage_[sizeof(T)]` 使用 `alignas` 确保存储区满足 `T` 的对齐要求——这是 placement new 工作的前提
+> 2. `construct()` 中的 placement new 在已对齐的 storage 上原地构造 `T`——不分配堆内存
+> 3. `destroy()` 显式调用析构函数——placement new 的对象必须手动析构
+> 4. `has_value_` 跟踪状态（`std::optional` 内部用 `bool` 或用空指针优化）
+> 5. `reinterpret_cast<T*>(storage_)` 是安全地将存储区视为 `T*` 的标准方式（`storage_` 的对齐和大小已经通过 `alignas` 和 `sizeof` 保证）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [cppreference — Placement new](https://en.cppreference.com/w/cpp/language/new#Placement_new)

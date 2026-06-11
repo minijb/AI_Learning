@@ -564,6 +564,234 @@ g++ -std=c++17 -O2 example.cpp -o example && ./example
 3. 如果文件被修改，安全地替换单例（注意：System 不能持有跨帧的配置指针）
 4. 考虑多 System 并行执行时的线程安全问题
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // ========== 多组件 view 实现 ==========
+> // 核心思路：遍历较小的组件集合，在较大的集合中查找交集
+> template<typename T1, typename T2>
+> std::vector<std::tuple<Entity, T1*, T2*>>
+> view() {
+>     auto* storage1 = find_storage<T1>();
+>     auto* storage2 = find_storage<T2>();
+>     if (!storage1 || !storage2) return {};
+>
+>     const auto& indices1 = storage1->entity_indices();
+>     const auto& indices2 = storage2->entity_indices();
+>
+>     std::vector<std::tuple<Entity, T1*, T2*>> result;
+>
+>     if (indices1.size() < indices2.size()) {
+>         // 遍历小的，在大的中查找——减少查找次数
+>         for (size_t i = 0; i < indices1.size(); i++) {
+>             size_t idx = indices1[i];
+>             T2* comp2 = storage2->get(idx);
+>             if (comp2) {
+>                 Entity e = entity_mgr.make_entity(idx);
+>                 // 验证 generation
+>                 if (entity_mgr.valid(e)) {
+>                     result.emplace_back(e, storage1->get(idx), comp2);
+>                 }
+>             }
+>         }
+>     } else {
+>         for (size_t i = 0; i < indices2.size(); i++) {
+>             size_t idx = indices2[i];
+>             T1* comp1 = storage1->get(idx);
+>             if (comp1) {
+>                 Entity e = entity_mgr.make_entity(idx);
+>                 if (entity_mgr.valid(e)) {
+>                     result.emplace_back(e, comp1, storage2->get(idx));
+>                 }
+>             }
+>         }
+>     }
+>     return result;
+> }
+>
+> // ---- EntityManager::make_entity 辅助 ----
+> // Entity make_entity(size_t index) { return {uint32_t(index), generations[index]}; }
+>
+> // ---- 使用示例 ----
+> // for (auto& [entity, pos, vel] : world.view<Position, Velocity>()) {
+> //     pos->x += vel->dx * dt;
+> //     pos->y += vel->dy * dt;
+> // }
+> ```
+>
+> **设计要点**：
+> - **选择较小的集合遍历**：如果 Position 有 5000 个而 Velocity 只有 1000 个，遍历 Velocity 的索引表只需 1000 次查找——而非 5000 次
+> - **generation 验证**：`entity_indices()` 存储的是实体 index，重建 Entity 时需要附上当前 generation，验证 entity 仍然存活
+> - **O(min(N₁, N₂))**：每次 `get(idx)` 是 O(1) 的 sparse set 查找，总时间复杂度远优于 O(N₁ × N₂) 的全对全比较
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // ========== 完善 execute() 函数 ==========
+> void execute() {
+>     while (!pending_commands.empty()) {
+>         Command cmd = pending_commands.front();
+>         pending_commands.pop();
+>
+>         switch (cmd.type) {
+>         case CommandType::Create: {
+>             // 占位实体的 generation 为 0——创建时 get 真正的 generation
+>             Entity real = entity_mgr.create();
+>             // 更新占位引用：原 placeholder entity 现在指向真实槽位
+>             // 注：这里简化处理。真实实现需要维护 placeholder→real 的映射
+>             std::cout << "  [Command] 创建实体 index="
+>                       << real.index << " gen=" << real.generation << "\n";
+>             break;
+>         }
+>         case CommandType::Destroy: {
+>             do_destroy(cmd.entity);
+>             std::cout << "  [Command] 销毁实体 (" << cmd.entity.index
+>                       << "," << cmd.entity.generation << ")\n";
+>             break;
+>         }
+>         case CommandType::AddComponent: {
+>             // 需要为每种可能的组件类型分别处理——用类型注册表
+>             // 简化版：用 if-else 链匹配 typeid
+>             if (cmd.component_type == typeid(Position)) {
+>                 auto data = std::any_cast<Position>(cmd.component_data);
+>                 ensure_storage<Position>().insert(cmd.entity.index, data);
+>             } else if (cmd.component_type == typeid(Velocity)) {
+>                 auto data = std::any_cast<Velocity>(cmd.component_data);
+>                 ensure_storage<Velocity>().insert(cmd.entity.index, data);
+>             } else if (cmd.component_type == typeid(Health)) {
+>                 auto data = std::any_cast<Health>(cmd.component_data);
+>                 ensure_storage<Health>().insert(cmd.entity.index, data);
+>             }
+>             // ... 为每种注册的组件类型添加分支
+>             std::cout << "  [Command] 添加组件到实体 "
+>                       << cmd.entity.index << "\n";
+>             break;
+>         }
+>         case CommandType::RemoveComponent: {
+>             // 通过虚接口 IComponentStorage::remove 统一处理
+>             auto it = storages.find(cmd.component_type);
+>             if (it != storages.end()) {
+>                 it->second->remove(cmd.entity.index);
+>             }
+>             std::cout << "  [Command] 移除组件从实体 "
+>                       << cmd.entity.index << "\n";
+>             break;
+>         }
+>         }
+>     }
+> }
+>
+> // ---- 改进：基于函数指针表的 AddComponent ----
+> // 避免 if-else 链（O(N) 按组件类型数），改用预注册的回调表
+> std::unordered_map<std::type_index,
+>     std::function<void(World&, Entity, const std::any&)>> add_handlers;
+>
+> template<typename T>
+> void register_component_type() {
+>     add_handlers[typeid(T)] = [](World& w, Entity e, const std::any& data) {
+>         auto comp = std::any_cast<T>(data);
+>         w.ensure_storage<T>().insert(e.index, comp);
+>     };
+> }
+>
+> // 在 World 构造时注册所有组件类型：
+> // world.register_component_type<Position>();
+> // world.register_component_type<Velocity>();
+> // world.register_component_type<Health>();
+> ```
+>
+> **关键设计决策**：
+> - `CommandType::AddComponent` 的 `std::any` 携带运行时类型信息——`std::any_cast` 在类型不匹配时抛异常
+> - 改进方案中的函数指针表（`add_handlers`）将类型分发从 O(N) 降到 O(1)，且避免了无穷 if-else 链
+> - `CommandType::Create` 的占位 entity 问题：当前简化实现中，`create()` 在 command_mode 下先创建真实实体（获得 index），但记录为占位。真实 ECS 中，创建命令应**延后创建**——execute 时调用 `entity_mgr.create()`
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // ========== 资源热重载方案 ==========
+>
+> struct GameConfig {
+>     int difficulty = 1;      // 1=简单, 2=普通, 3=困难
+>     int maxEnemies = 50;
+>     float spawnInterval = 3.0f;
+>     bool friendlyFire = false;
+> };
+>
+> class HotReloadManager {
+> public:
+>     HotReloadManager(const std::string& path, float checkInterval = 2.0f)
+>         : config_path(path), check_interval(checkInterval) {}
+>
+>     // 每帧调用：检查文件修改时间，必要时触发重载
+>     void tick(float dt) {
+>         elapsed += dt;
+>         if (elapsed < check_interval) return;  // 不必每帧检查
+>         elapsed -= check_interval;
+>
+>         auto new_mtime = get_file_mtime(config_path);
+>         if (new_mtime > last_mtime) {
+>             last_mtime = new_mtime;
+>             pending_reload = true;  // 标记，不立即替换
+>         }
+>     }
+>
+>     // 在 System 执行间隙调用——此时没有 System 持有配置指针
+>     bool should_reload() const { return pending_reload; }
+>
+>     GameConfig reload() {
+>         pending_reload = false;
+>         // 从磁盘读取并解析新配置
+>         GameConfig new_config;
+>         // new_config = parse_json(read_file(config_path));
+>         return new_config;
+>     }
+>
+> private:
+>     std::string config_path;
+>     float check_interval;
+>     float elapsed = 0;
+>     std::filesystem::file_time_type last_mtime;
+>     bool pending_reload = false;
+> };
+>
+> // ========== World 集成 ==========
+> class World {
+>     // ...
+>     void tick(float dt) {
+>         hot_reload.tick(dt);
+>
+>         for (auto& sys : systems) {
+>             // System 执行前检查：是否需要热重载？
+>             if (hot_reload.should_reload()) {
+>                 // 安全窗口：此时没有 System 持有配置的跨帧引用
+>                 set_singleton<GameConfig>(hot_reload.reload());
+>             }
+>
+>             sys(world, dt);  // System 从 world.get_singleton<GameConfig>() 获取最新配置
+>         }
+>     }
+> };
+>
+> // ========== 线程安全考虑 ==========
+> // 多 System 并行执行时：
+> // 1. 每个 System 每帧临时获取配置指针——不跨帧持有
+> //    ✓  config = world.get_singleton<GameConfig>(); // 栈上临时变量
+> //    ✗  this->cached_config = config;               // 成员变量，跨帧
+> //
+> // 2. 热重载在"屏障点"执行——两个 System batch 之间，没有 System 在运行
+> //    此时替换单例是安全的
+> //
+> // 3. 使用 std::atomic<GameConfig*> 配合 RCU（Read-Copy-Update）：
+> //    读端：auto* cfg = atomic_config.load(std::memory_order_acquire);
+> //    写端：auto* new_cfg = new GameConfig(...);
+> //          atomic_config.store(new_cfg, std::memory_order_release);
+> //          // 旧 cfg 延迟释放（等所有读者完成）
+> ```
+>
+> **核心安全约束**：
+> - System **不能跨帧持有配置指针**——每帧 `get_singleton<T>()` 重新获取。这既是热重载的前提，也是防止 use-after-free 的基础
+> - 热重载在"屏障点"执行——System 执行间隙，确保没有并发读/写冲突
+> - 如果必须支持 System 执行中热重载：用 RCU 模式——配置是 immutable 的 `shared_ptr`，替换时原子交换指针，旧配置在 RCU grace period 后释放
+
 ---
 
 ## 4. 扩展阅读

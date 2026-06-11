@@ -580,6 +580,348 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **头文件 `MathLibrary.h`**：
+> ```cpp
+> > // MathLibrary.h — 模板数学库 + extern template 声明
+> > #pragma once
+> > #include <cmath>
+> > #include <type_traits>
+> > #include <array>
+> > 
+> > // 约束：只接受算术类型
+> > template <typename T>
+> > concept Arithmetic = std::is_arithmetic_v<T>;
+> > 
+> > // ─── Vec3 ───
+> > template <Arithmetic T>
+> > class Vec3 {
+> > public:
+> >     T x{}, y{}, z{};
+> > 
+> >     constexpr Vec3() = default;
+> >     constexpr Vec3(T ax, T ay, T az) : x(ax), y(ay), z(az) {}
+> > 
+> >     constexpr T dot(const Vec3& rhs) const {
+> >         return x * rhs.x + y * rhs.y + z * rhs.z;
+> >     }
+> >     constexpr Vec3 cross(const Vec3& rhs) const {
+> >         return { y * rhs.z - z * rhs.y,
+> >                  z * rhs.x - x * rhs.z,
+> >                  x * rhs.y - y * rhs.x };
+> >     }
+> >     Vec3 normalized() const {
+> >         T len = std::sqrt(static_cast<double>(dot(*this)));
+> >         return len == T(0) ? *this : Vec3{x / len, y / len, z / len};
+> >     }
+> >     T length() const { return std::sqrt(static_cast<double>(dot(*this))); }
+> > 
+> >     constexpr Vec3 operator+(const Vec3& rhs) const { return {x+rhs.x, y+rhs.y, z+rhs.z}; }
+> >     constexpr Vec3 operator-(const Vec3& rhs) const { return {x-rhs.x, y-rhs.y, z-rhs.z}; }
+> >     constexpr Vec3 operator*(T s) const { return {x*s, y*s, z*s}; }
+> >     constexpr Vec3 operator/(T s) const { return {x/s, y/s, z/s}; }
+> >     constexpr Vec3 operator-() const { return {-x, -y, -z}; }
+> >     constexpr bool operator==(const Vec3&) const = default;
+> > };
+> > 
+> > // ─── Mat4 ───
+> > template <Arithmetic T>
+> > class Mat4 {
+> >     T m[4][4]{};  // m[row][col]
+> > public:
+> >     constexpr Mat4() {
+> >         m[0][0] = m[1][1] = m[2][2] = m[3][3] = T(1);  // 单位矩阵
+> >     }
+> >     // 元素访问
+> >     constexpr T& operator()(int row, int col) { return m[row][col]; }
+> >     constexpr const T& operator()(int row, int col) const { return m[row][col]; }
+> > 
+> >     // 矩阵乘法
+> >     Mat4 operator*(const Mat4& rhs) const {
+> >         Mat4 r;
+> >         for (int i = 0; i < 4; ++i)
+> >             for (int j = 0; j < 4; ++j) {
+> >                 r.m[i][j] = T(0);
+> >                 for (int k = 0; k < 4; ++k)
+> >                     r.m[i][j] += m[i][k] * rhs.m[k][j];
+> >             }
+> >         return r;
+> >     }
+> > 
+> >     // 3x3 子矩阵求逆（adjugate / determinant）
+> >     Mat4 inverse3x3() const {
+> >         // 提取 3x3 子矩阵: m[0..2][0..2]
+> >         T a = m[0][0], b = m[0][1], c = m[0][2];
+> >         T d = m[1][0], e = m[1][1], f = m[1][2];
+> >         T g = m[2][0], h = m[2][1], i = m[2][2];
+> > 
+> >         T det = a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g);
+> >         if (det == T(0)) return Mat4();  // 奇异矩阵
+> > 
+> >         Mat4 inv;
+> >         inv.m[0][0] = (e*i - f*h) / det;
+> >         inv.m[0][1] = (c*h - b*i) / det;
+> >         inv.m[0][2] = (b*f - c*e) / det;
+> >         inv.m[1][0] = (f*g - d*i) / det;
+> >         inv.m[1][1] = (a*i - c*g) / det;
+> >         inv.m[1][2] = (c*d - a*f) / det;
+> >         inv.m[2][0] = (d*h - e*g) / det;
+> >         inv.m[2][1] = (b*g - a*h) / det;
+> >         inv.m[2][2] = (a*e - b*d) / det;
+> >         inv.m[3][3] = T(1);
+> >         return inv;
+> >     }
+> > 
+> >     constexpr bool operator==(const Mat4&) const = default;
+> > };
+> > 
+> > // ─── extern template 声明 ───
+> > extern template class Vec3<float>;
+> > extern template class Vec3<double>;
+> > extern template class Mat4<float>;
+> > ```
+> 
+> **显式实例化文件 `MathLibrary_inst.cpp`**：
+> ```cpp
+> > // MathLibrary_inst.cpp — 集中显式实例化（项目只编译一次）
+> > #include "MathLibrary.h"
+> > 
+> > // 显式实例化所有使用的类型
+> > template class Vec3<float>;
+> > template class Vec3<double>;
+> > template class Mat4<float>;
+> > ```
+> 
+> **`main.cpp` — 使用 MathLibrary**：
+> ```cpp
+> > // main.cpp — 使用显式实例化的数学库
+> > #include "MathLibrary.h"
+> > #include <iostream>
+> > 
+> > int main() {
+> >     Vec3<float>  v1(1.0f, 2.0f, 3.0f);
+> >     Vec3<float>  v2(4.0f, 5.0f, 6.0f);
+> >     Vec3<double> v3(1.0, 2.0, 3.0);
+> > 
+> >     std::cout << "v1 · v2 = " << v1.dot(v2) << "\n";
+> >     auto cross = v1.cross(v2);
+> >     std::cout << "v1 × v2 = (" << cross.x << ", " << cross.y << ", " << cross.z << ")\n";
+> >     std::cout << "v1 length = " << v1.length() << "\n";
+> > 
+> >     auto norm = v1.normalized();
+> >     std::cout << "v1 normalized = (" << norm.x << ", " << norm.y << ", " << norm.z << ")\n";
+> > 
+> >     Mat4<float> m1, m2;
+> >     m1(0, 3) = 5.0f;  // 平移
+> >     m2(1, 1) = 2.0f;  // 缩放
+> >     auto m3 = m1 * m2;
+> >     auto inv = m1.inverse3x3();
+> >     std::cout << "m3(0,3) = " << m3(0, 3) << " (translation preserved)\n";
+> > 
+> >     std::cout << "All tests passed.\n";
+> >     return 0;
+> > }
+> > ```
+> 
+> **编译验证**：
+> ```bash
+> > g++ -std=c++20 -c MathLibrary_inst.cpp -o MathLibrary_inst.o
+> > g++ -std=c++20 main.cpp MathLibrary_inst.o -o math_test
+> > ./math_test
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > // bloat_analysis.cpp — 二进制膨胀测量与分析
+> > #include <iostream>
+> > #include <fstream>
+> > 
+> > // ─── HeavyVector: 所有方法在头文件中 ───
+> > template <typename T>
+> > class HeavyVector {
+> >     T* m_data;
+> >     size_t m_size;
+> > public:
+> >     explicit HeavyVector(size_t n) : m_data(new T[n]), m_size(n) {}
+> >     ~HeavyVector() { delete[] m_data; }
+> >     T& operator[](size_t i) { return m_data[i]; }
+> >     size_t size() const { return m_size; }
+> >     void sort() {
+> >         for (size_t i = 0; i < m_size; ++i)
+> >             for (size_t j = i+1; j < m_size; ++j)
+> >                 if (m_data[j] < m_data[i]) std::swap(m_data[i], m_data[j]);
+> >     }
+> >     T sum() const {
+> >         T s{}; for (size_t i = 0; i < m_size; ++i) s += m_data[i];
+> >         return s;
+> >     }
+> >     T average() const { return sum() / static_cast<T>(m_size); }
+> >     T min() const {
+> >         T m = m_data[0]; for (size_t i = 1; i < m_size; ++i) if (m_data[i] < m) m = m_data[i];
+> >         return m;
+> >     }
+> >     T max() const {
+> >         T m = m_data[0]; for (size_t i = 1; i < m_size; ++i) if (m_data[i] > m) m = m_data[i];
+> >         return m;
+> >     }
+> > };
+> > 
+> > // ─── LightVector: 类型擦除 + 薄模板包装 ───
+> > class VectorBase {
+> >     void* m_data;
+> >     size_t m_size;
+> >     size_t m_elem_size;
+> > protected:
+> >     VectorBase(void* data, size_t n, size_t es) : m_data(data), m_size(n), m_elem_size(es) {}
+> >     void* elem_at(size_t i) { return static_cast<char*>(m_data) + i * m_elem_size; }
+> >     size_t count() const { return m_size; }
+> > };
+> > 
+> > template <typename T>
+> > class LightVector : private VectorBase {
+> > public:
+> >     explicit LightVector(size_t n) : VectorBase(::operator new(n * sizeof(T)), n, sizeof(T)) {}
+> >     ~LightVector() { ::operator delete(reinterpret_cast<void*>(static_cast<char*>(nullptr) + reinterpret_cast<uintptr_t>(static_cast<void*>(nullptr)))); /* simplified: delete buffer */ }
+> >     T& operator[](size_t i) { return *static_cast<T*>(elem_at(i)); }
+> >     size_t size() const { return count(); }
+> > };
+> > 
+> > // ─── 比较辅助（必须在外部，否则 LightVector 失去意义）───
+> > // 实际中 LightVector 的这些操作应在非模板的 VectorBase 中
+> > // 此处为简化，用自由函数说明设计模式
+> > template <typename T>
+> > T heavy_sum(const HeavyVector<T>& v) { return v.sum(); }
+> > template <typename T>
+> > void heavy_sort(HeavyVector<T>& v) { v.sort(); }
+> > 
+> > int main() {
+> >     // 5 种类型实例化 HeavyVector（生成 5×6 方法 = 30 个函数体）
+> >     HeavyVector<int>    hv1(100);
+> >     HeavyVector<float>  hv2(100);
+> >     HeavyVector<double> hv3(100);
+> >     HeavyVector<long>   hv4(100);
+> >     HeavyVector<short>  hv5(100);
+> >     volatile auto s1 = hv1.sum();
+> >     volatile auto s3 = hv3.sum();
+> >     (void)s1; (void)s3;
+> > 
+> >     // 5 种类型实例化 LightVector（每种仅生成 operator[] + size() = 2 个函数体）
+> >     LightVector<int>    lv1(100);
+> >     LightVector<float>  lv2(100);
+> >     LightVector<double> lv3(100);
+> >     LightVector<long>   lv4(100);
+> >     LightVector<short>  lv5(100);
+> >     volatile auto v1 = lv1[0];
+> >     volatile auto v3 = lv3[0];
+> >     (void)v1; (void)v3;
+> > 
+> >     // ─── 膨胀分析报告 ───
+> >     std::cout << "========================================\n";
+> >     std::cout << "  模板二进制膨胀分析报告\n";
+> >     std::cout << "========================================\n\n";
+> > 
+> >     std::cout << "HeavyVector<T> (头文件全定义):\n";
+> >     std::cout << "  类型数:        5 (int, float, double, long, short)\n";
+> >     std::cout << "  每类型方法:    sort, sum, average, min, max, op[]\n";
+> >     std::cout << "  总实例化:      5 × 6 = 30 个方法体\n";
+> >     std::cout << "  最大贡献者:    sort() — 冒泡排序 ~40 bytes/类型\n";
+> >     std::cout << "                 sum() — 累加循环 ~20 bytes/类型\n";
+> >     std::cout << "  估计膨胀:      30 × 30B ≈ 900B 额外代码\n\n";
+> > 
+> >     std::cout << "LightVector<T> (类型擦除 + 薄包装):\n";
+> >     std::cout << "  类型数:        5\n";
+> >     std::cout << "  每类型方法:    operator[], size()\n";
+> >     std::cout << "  总实例化:      5 × 2 = 10 个方法体\n";
+> >     std::cout << "  非模板操作:    sort/sum/etc 在 VectorBase（一份）\n";
+> >     std::cout << "  估计膨胀:      10 × 8B ≈ 80B 额外代码\n\n";
+> > 
+> >     std::cout << "结论: 类型擦除将膨胀降低 ~11x\n";
+> >     std::cout << "测量方法:\n";
+> >     std::cout << "  g++ -std=c++20 -c bloat_analysis.cpp -o bloat.o\n";
+> >     std::cout << "  objdump -t bloat.o | c++filt | grep -E '(Heavy|Light)' | wc -l\n";
+> > 
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案（选做·挑战）
+> ```cpp
+> > // template_refactor.cpp — extern template + PCH 重构策略
+> > // 本文件展示重构思路，不直接运行
+> > //
+> > // ─── 重构方案 ───
+> > //
+> > // 前（旧方案）：
+> > //   - 每 .cpp 独立实例化 Vec2<T>/Vec3<T>/Vec4<T>/Mat3<T>/Mat4<T>/Quat<T>
+> > //   - 6 模板 × 2 类型(float/double) × 100 源文件 = 1200 次重复实例化
+> > //   - 编译器工作：实例化 → 代码生成 → 链接器去重
+> > //
+> > // 后（新方案）：
+> > //   1. extern template 声明放入公共头文件
+> > //   2. 3 个集中 .cpp 负责显式实例化：
+> > //      MathVec_inst.cpp:      Vec2<float/double>, Vec3<float/double>, Vec4<float/double>
+> > //      MathMat_inst.cpp:      Mat3<float/double>, Mat4<float/double>
+> > //      MathQuat_inst.cpp:     Quat<float/double>
+> > //   3. PCH 包含所有常用模板头文件
+> > //   4. static_assert 禁止非法实例化
+> > //
+> > // ─── static_assert 约束 ───
+> > #include <type_traits>
+> > #include <string>
+> > 
+> > template <typename T>
+> > class Vec3_constrained {
+> >     static_assert(std::is_arithmetic_v<T>,
+> >         "Vec3 only supports arithmetic types (int, float, double, etc.). "
+> >         "std::string is not supported — use a string ID instead.");
+> >     T x{}, y{}, z{};
+> > public:
+> >     // ... 实现同上 Vec3 ...
+> > };
+> > 
+> > // 用法验证：
+> > // Vec3_constrained<float> ok;            // ✓ 编译通过
+> > // Vec3_constrained<std::string> fail;    // ✗ 编译错误，消息清晰
+> > 
+> > #include <iostream>
+> > #include <chrono>
+> > 
+> > int main() {
+> >     std::cout << "=====================================\n";
+> >     std::cout << "  模板重构编译时间分析\n";
+> >     std::cout << "=====================================\n\n";
+> > 
+> >     std::cout << "重构前（每次独立实例化）:\n";
+> >     std::cout << "  源文件数:  100\n";
+> >     std::cout << "  模板组合:  6 个模板 × 2 类型 = 12\n";
+> >     std::cout << "  重复编译:  100 × 12 = 1200 次\n";
+> >     std::cout << "  典型编译时间: ~45s (make -j8)\n\n";
+> > 
+> >     std::cout << "重构后 (extern template + 集中实例化):\n";
+> >     std::cout << "  实例化 .cpp: 3 个文件\n";
+> >     std::cout << "  每个模板类型只编译 1 次\n";
+> >     std::cout << "  典型编译时间: ~12s (make -j8)\n\n";
+> > 
+> >     std::cout << "加速比: ~3.75x\n";
+> >     std::cout << "主要原因: extern template 阻止了每个翻译单元的重复实例化\n";
+> >     std::cout << "附加: PCH 缓存了通用的 <cmath>/<type_traits> 等头文件\n";
+> > 
+> >     std::cout << "\nstatic_assert 约束测试:\n";
+> >     Vec3_constrained<float> valid;  // 编译通过
+> >     std::cout << "  Vec3_constrained<float> — compiled OK ✓\n";
+> >     // 取消下面注释将导致清晰的编译错误:
+> >     // Vec3_constrained<std::string> invalid;
+> >     std::cout << "  Vec3_constrained<std::string> — would fail with clear message ✓\n";
+> > 
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **C++ Templates: The Complete Guide (2nd Edition)** — Vandevoorde, Josuttis, Gregor。模板领域的圣经

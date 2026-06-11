@@ -1206,6 +1206,588 @@ public class DebugStats : MonoBehaviour {
 2. **运行时动态地图**: 添加"放置/移除障碍物"功能。当障碍物变化时，重新 bake costMap 和 walkable (使用脏矩形增量更新)，让之前计算的所有路径自动过期并重算。实现完整的动态世界反应。
 3. **Benchmark 套件**: 编写自动化性能测试——在不同参数下（地图尺寸、实体数量、障碍物密度）测量每种算法的延迟和吞吐量。生成对比报告（CSV/图表）。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **搭建步骤（关键检查点）：**
+>
+> 1. 创建 Unity 项目，安装包：`com.unity.entities` (1.0+), `com.unity.burst`, `com.unity.mathematics`, `com.unity.collections`
+> 2. 将 `GridTypes.cs`（地形枚举+组件+Blob），`GridAuthoring.cs` + `GridBaker.cs` 放入项目。在 Editor 中配置 20×20 网格。手工设置 `terrainMap` 数组：中心 4 列草地（`Grass`），棋盘格状放 5 个 `Mountain` 障碍，其余为 `Road`。
+> 3. 将 `BurstAStar.cs`（Phase 2 A* 实现），`NavigationSystem.cs`（路由器），`PathVisualizationSystem.cs`，`MovementSystem.cs`（从 29 教程复用）放入项目。
+> 4. 创建测试 GameObject（带 `PathRequestAuthoring` MonoBehaviour 桥接），设置目标为 (18, 18)。
+> 5. 运行：按 Play，应在 Scene 视图中看到绿色路径线绕过 Mountain 障碍物。
+>
+> **验证清单：**
+> - [ ] PathResult 组件在 2 帧内被添加（1 帧收集请求 + 1 帧计算）
+> - [ ] 路径 waypoints 不穿过 `Mountain`（`walkable=false`）
+> - [ ] 路径 waypoints 偏向 `Road`（cost=0.8）而非 `Grass`（cost=1.0）
+> - [ ] PathVisualizationSystem 在 Scene 视图中渲染路径线段
+> - [ ] 实体到达目标后 `PathResult.state` 变为 `Complete`
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> // 验证脚本：检测路由器选择的算法
+> public class AlgorithmSwitchTest : MonoBehaviour {
+>     public GridAuthoring gridAuthoring;
+>     private World _world;
+>
+>     void Start() {
+>         _world = World.DefaultGameObjectInjectionWorld;
+>
+>         // 测试 1: 全部设为草地（均匀代价 1.0）
+>         FillUniformTerrain(TerrainType.Grass);
+>         RebuildGrid();
+>         var result1 = RequestPath(new float3(0,0,0), new float3(19,0,19));
+>         Debug.Log($"Uniform cost → algorithm: {result1.algorithm} "
+>             + $"(expected: JPS, actual: {result1.algorithm})");
+>
+>         // 测试 2: 添加道路（代价 0.8）和森林（代价 2.5）
+>         // 使代价非均匀
+>         int roadStart = gridAuthoring.width / 4;
+>         for (int y = 0; y < gridAuthoring.height; y++)
+>             gridAuthoring.terrainMap[y * gridAuthoring.width + roadStart]
+>                 = TerrainType.Road;
+>         RebuildGrid();
+>         var result2 = RequestPath(new float3(0,0,0), new float3(19,0,19));
+>         Debug.Log($"Non-uniform cost → algorithm: {result2.algorithm} "
+>             + $"(expected: AStar, actual: {result2.algorithm})");
+>     }
+>
+>     void FillUniformTerrain(TerrainType t) {
+>         int cells = gridAuthoring.width * gridAuthoring.height;
+>         gridAuthoring.terrainMap = new TerrainType[cells];
+>         for (int i = 0; i < cells; i++)
+>             gridAuthoring.terrainMap[i] = t;
+>     }
+>
+>     void RebuildGrid() {
+>         // 触发 rebake（在 Editor 中通过 EntityCommandBuffer 重建 GridData）
+>         var em = _world.EntityManager;
+>         em.DestroyEntity(em.CreateEntityQuery(typeof(GridData)).ToEntityArray(
+>             Allocator.Temp));
+>         // 重新 Bake（Editor 模式下需手动触发）
+>         // 在实际项目中，通过 GridBaker 重新生成
+>     }
+>
+>     PathfindingAlgorithm RequestPath(float3 start, float3 goal) {
+>         var em = _world.EntityManager;
+>         var entity = em.CreateEntity(typeof(LocalTransform), typeof(PathRequest));
+>         em.SetComponentData(entity, new LocalTransform {
+>             Position = start, Rotation = quaternion.identity, Scale = 1f });
+>         em.AddComponentData(entity, new PathRequest {
+>             goal = goal, algorithm = PathfindingAlgorithm.AStar,
+>             maxCost = float.MaxValue, priority = 0 });
+>
+>         // 等待系统处理（在 Editor 中手动步进 1 帧）
+>         // ...
+>         if (em.HasComponent<PathResult>(entity)) {
+>             var res = em.GetComponentData<PathResult>(entity);
+>             if (res.blob.IsCreated)
+>                 return res.blob.Value.algorithm;
+>         }
+>         return PathfindingAlgorithm.AStar;
+>     }
+> }
+> ```
+>
+> **验证**：路由器 `SelectAlgorithm` 遍历 `costMap` 检测所有值是否在第一个值的 ±0.001 范围内。均匀代价网格 → JPS（路径可视化颜色为黄色/cyan）；非均匀网格 → A*（路径可视化颜色不同）。JPS 在均匀代价下节点扩展量约为 A* 的 1/5-1/10，路径长度相同。
+
+> [!tip]- 练习 3 参考答案
+> ```csharp
+> // 多实体测试：生成 10 个实体，随机起点和目标
+> public class MultiEntityTest : MonoBehaviour {
+>     public int entityCount = 10;
+>     public GridAuthoring gridAuthoring;
+>     private World _world;
+>     private Entity[] _entities;
+>
+>     void Start() {
+>         _world = World.DefaultGameObjectInjectionWorld;
+>         var em = _world.EntityManager;
+>         var rand = new System.Random(42);
+>         int w = gridAuthoring.width, h = gridAuthoring.height;
+>
+>         _entities = new Entity[entityCount];
+>         for (int i = 0; i < entityCount; i++) {
+>             var e = em.CreateEntity(
+>                 typeof(LocalTransform), typeof(MovementState));
+>             em.SetComponentData(e, new LocalTransform {
+>                 Position = new float3(rand.Next(w), 0, rand.Next(h)),
+>                 Rotation = quaternion.identity, Scale = 1f
+>             });
+>             em.SetComponentData(e, new MovementState {
+>                 maxSpeed = 2f, currentSpeed = 2f,
+>                 arrivalRadius = 0.5f, velocity = float3.zero
+>             });
+>             _entities[i] = e;
+>         }
+>
+>         // 每 3 秒分配新随机目标
+>         StartCoroutine(AssignRandomGoals());
+>     }
+>
+>     IEnumerator AssignRandomGoals() {
+>         var em = _world.EntityManager;
+>         var rand = new System.Random();
+>         int w = gridAuthoring.width, h = gridAuthoring.height;
+>
+>         while (true) {
+>             for (int i = 0; i < entityCount; i++) {
+>                 // 移除旧结果
+>                 if (em.HasComponent<PathResult>(_entities[i])) {
+>                     var old = em.GetComponentData<PathResult>(_entities[i]);
+>                     if (old.blob.IsCreated) old.blob.Dispose();
+>                     em.RemoveComponent<PathResult>(_entities[i]);
+>                 }
+>                 // 添加新请求
+>                 em.AddComponentData(_entities[i], new PathRequest {
+>                     goal = new float3(rand.Next(w), 0, rand.Next(h)),
+>                     algorithm = PathfindingAlgorithm.AStar,
+>                     maxCost = float.MaxValue, priority = 1
+>                 });
+>             }
+>             yield return new WaitForSeconds(3f);
+>         }
+>     }
+>
+>     void OnGUI() {
+>         if (_world == null || !_world.IsCreated) return;
+>         var em = _world.EntityManager;
+>         int arrived = 0;
+>         foreach (var e in _entities) {
+>             if (em.HasComponent<PathResult>(e) &&
+>                 em.GetComponentData<PathResult>(e).state == 1) arrived++;
+>         }
+>         GUI.Label(new Rect(10, 10, 300, 50),
+>             $"Arrived: {arrived}/{entityCount}");
+>     }
+> }
+> ```
+>
+> **验证点**：(1) 10 个实体同时有活跃 PathRequest 时，系统不应抛出异常（如 `NativeArray` 越界）；(2) PathVisualizationSystem 应同时渲染 10 条路径线；(3) 所有实体应在目标到达半径（0.5m）内停下，而非精确到达目标坐标；(4) 实体间没有路径数据混淆（每个实体的 waypoints 应对应自己的目标）。
+
+> [!tip]- 练习 4 参考答案（进阶）
+> ```csharp
+> // Flow Field 集成：50 个实体共享一个方向场
+> public class FlowFieldGroupTest : MonoBehaviour {
+>     public int groupSize = 50;
+>     public float3 groupGoal = new float3(30, 0, 30);
+>     public GridAuthoring gridAuthoring;
+>     private World _world;
+>
+>     void Start() {
+>         _world = World.DefaultGameObjectInjectionWorld;
+>         var em = _world.EntityManager;
+>         var rand = new System.Random(42);
+>         int w = gridAuthoring.width, h = gridAuthoring.height;
+>
+>         // 1. 预计算 Flow Field（一次性，所有实体共享）
+>         var gridData = SystemAPI.GetSingleton<GridData>();
+>         ref var grid = ref gridData.grid.Value;
+>         int2 goalCell = new((int)(groupGoal.x / grid.cellSize),
+>                             (int)(groupGoal.z / grid.cellSize));
+>
+>         FlowFieldBuilder.Build(
+>             grid.costMap, grid.walkable, grid.width, grid.height, goalCell,
+>             out var integrationField, out var flowField);
+>
+>         // 将 Flow Field 存储为 BlobAsset
+>         var bb = new BlobBuilder(Allocator.Temp);
+>         ref var ffBlob = ref bb.ConstructRoot<FlowFieldBlob>();
+>         var dirs = bb.Allocate(ref ffBlob.directions, w * h);
+>         for (int i = 0; i < w * h; i++) dirs[i] = flowField[i];
+>         ffBlob.goalCell = goalCell;
+>         var blobRef = bb.CreateBlobAssetReference<FlowFieldBlob>(Allocator.Persistent);
+>         bb.Dispose();
+>
+>         // 2. 创建 50 个带有 FlowFieldBlob 引用的实体
+>         for (int i = 0; i < groupSize; i++) {
+>             int sx, sy;
+>             do { sx = rand.Next(w); sy = rand.Next(h); }
+>             while (!grid.walkable[sy * w + sx]);
+>
+>             var entity = em.CreateEntity(
+>                 typeof(LocalTransform), typeof(MovementState),
+>                 typeof(SharedFlowField));
+>             em.SetComponentData(entity, new LocalTransform {
+>                 Position = new float3(sx, 0, sy),
+>                 Rotation = quaternion.identity, Scale = 1f
+>             });
+>             em.SetComponentData(entity, new MovementState {
+>                 maxSpeed = 2f + (float)rand.NextDouble(), // 略有差异
+>                 currentSpeed = 0, arrivalRadius = 0.5f
+>             });
+>             em.SetComponentData(entity, new SharedFlowField {
+>                 flowFieldBlob = blobRef
+>             });
+>         }
+>
+>         // 清理临时数组
+>         integrationField.Dispose();
+>         flowField.Dispose();
+>     }
+> }
+>
+> // MovementSystem 扩展：支持 Flow Field 导航
+> // 在 MovementSystem.OnUpdate 中：
+> if (SystemAPI.HasComponent<SharedFlowField>(entity)) {
+>     var sharedFF = SystemAPI.GetComponentRO<SharedFlowField>(entity);
+>     ref var blob = ref sharedFF.ValueRO.flowFieldBlob.Value;
+>     int2 cell = new((int)(pos.x / cellSize), (int)(pos.z / cellSize));
+>     float2 dir = blob.directions[cell.y * gridWidth + cell.x];
+>     move = new float3(dir.x, 0, dir.y) * speed * deltaTime;
+> }
+> ```
+>
+> **性能对比**：50 个独立 A* (每帧 50×~0.5ms) = ~25ms。Flow Field 一次性计算（~0.5ms）+ 50×O(1) 采样 = ~0.5ms。加速约 50×。瓶颈转移：从寻路计算变为 Flow Field 构建——但后者只构建一次（目标不变时）。
+
+> [!tip]- 练习 5 参考答案（进阶）
+> ```csharp
+> // 相向而行 ORCA 测试
+> // 在每个实体的 MovementSystem 后添加 ORCA 调整
+> // 在 MovementState 中存储 preferred velocity，ORCA 输出调整后的 velocity
+>
+> public class HeadOnOrcaTest : MonoBehaviour {
+>     public int agentCountPerSide = 10; // 左右各 10
+>     public float corridorWidth = 10f;
+>     public float corridorLength = 40f;
+>
+>     void Start() {
+>         var em = World.DefaultGameObjectInjectionWorld.EntityManager;
+>
+>         // 左侧 10 个 → 向右走 (从左到右)
+>         for (int i = 0; i < agentCountPerSide; i++) {
+>             float y = UnityEngine.Random.Range(-corridorWidth/2, corridorWidth/2);
+>             var e = em.CreateEntity(typeof(LocalTransform), typeof(MovementState),
+>                 typeof(ORCAAgent));
+>             em.SetComponentData(e, new LocalTransform {
+>                 Position = new float3(0, 0, y),
+>                 Rotation = quaternion.identity, Scale = 1f
+>             });
+>             em.SetComponentData(e, new MovementState {
+>                 maxSpeed = 3f, currentSpeed = 3f, arrivalRadius = 1f
+>             });
+>             em.SetComponentData(e, new ORCAAgent {
+>                 radius = 0.5f, timeHorizon = 2f,
+>                 prefVelocity = new float2(3f, 0) // 向右
+>             });
+>         }
+>
+>         // 右侧 10 个 → 向左走 (从右到左)
+>         for (int i = 0; i < agentCountPerSide; i++) {
+>             float y = UnityEngine.Random.Range(-corridorWidth/2, corridorWidth/2);
+>             var e = em.CreateEntity(typeof(LocalTransform), typeof(MovementState),
+>                 typeof(ORCAAgent));
+>             em.SetComponentData(e, new LocalTransform {
+>                 Position = new float3(corridorLength, 0, y),
+>                 Rotation = quaternion.identity, Scale = 1f
+>             });
+>             em.SetComponentData(e, new MovementState {
+>                 maxSpeed = 3f, currentSpeed = 3f, arrivalRadius = 1f
+>             });
+>             em.SetComponentData(e, new ORCAAgent {
+>                 radius = 0.5f, timeHorizon = 2f,
+>                 prefVelocity = new float2(-3f, 0) // 向左
+>             });
+>         }
+>     }
+> }
+> ```
+>
+> **观察预期**：两组 agent 在走廊中央相遇。ORCA 对称性使它们自发形成双向车道——右侧移动的 agent 向上偏，左侧移动的向下偏（或反之），互相绕过。不应出现穿透（`dist < 0.5+0.5 = 1.0`）。如出现振荡（agent 左右摇摆），增大 `timeHorizon` 到 4s。
+
+> [!tip]- 练习 6 参考答案（进阶）
+> ```csharp
+> // KD-Tree vs 暴力邻居查找性能对比
+> [BurstCompile]
+> public struct OrcaWithKDTreeJob : IJobParallelFor {
+>     [ReadOnly] public NativeArray<KDTree2D.Node> kdNodes;
+>     [ReadOnly] public NativeArray<float2> positions;
+>     // ... 其他输入 ...
+>     public NativeArray<float2> newVelocities;
+>
+>     public void Execute(int i) {
+>         // KNN 查询：在 KD-Tree 中找 k=20 个最近邻居
+>         var neighbors = new NativeArray<int>(20, Allocator.Temp);
+>         var dists = new NativeArray<float>(20, Allocator.Temp);
+>         KDTree2D.KNN(kdNodes, positions, positions[i], 20, neighbors, dists);
+>
+>         // 将 KNN 结果转为 ORCA 邻居信息...
+>         // ORCA 求解...
+>     }
+> }
+>
+> // 暴力版（对比用）
+> [BurstCompile]
+> public struct OrcaBruteForceJob : IJobParallelFor {
+>     public void Execute(int i) {
+>         // 检查所有 N 个 agent 作为邻居
+>         // ORCA 求解...
+>     }
+> }
+> ```
+>
+> **性能对比（100 个 agent）：**
+>
+> | 方法 | 邻居查找 | ORCA 求解 | 总帧时间 |
+> |------|---------|----------|---------|
+> | 暴力 O(N²) | 100×100 = 10K 距离计算 | ~1.5ms | ~2ms |
+> | KD-Tree K=20 | ~100×log(100) ≈ 700 距离计算 | ~0.4ms | ~0.5ms |
+>
+> 加速约 4×。当 N=500 时差异更显著：暴力 125K 次距离检查 (~12ms)，KD-Tree ~4500 次 (~1.5ms)，加速 ~8×。注意：KD-Tree 构建开销（~0.3ms/帧）必须在帧时间中计入。
+
+> [!tip]- 练习 7 参考答案（挑战）
+> ```csharp
+> // 全系统集成测试 —— 200 个实体混合寻路
+> public class FullIntegrationTest : MonoBehaviour {
+>     public GridAuthoring gridAuthoring;
+>     private World _world;
+>
+>     void Start() {
+>         _world = World.DefaultGameObjectInjectionWorld;
+>         var em = _world.EntityManager;
+>         int w = gridAuthoring.width, h = gridAuthoring.height;
+>         var rand = new System.Random(42);
+>
+>         // 组 A: 50 个实体 → Flow Field (目标: 右上角)
+>         var goalFF = new float3(w * 0.8f, 0, h * 0.8f);
+>         CreateFlowFieldGroup(50, goalFF, em, w, h, rand);
+>
+>         // 组 B: 50 个实体 → Flow Field (目标: 左下角)
+>         var goalFF2 = new float3(w * 0.2f, 0, h * 0.2f);
+>         CreateFlowFieldGroup(50, goalFF2, em, w, h, rand);
+>
+>         // 组 C: 100 个实体 → 独立 A*/JPS/Theta* (随机目标)
+>         for (int i = 0; i < 100; i++) {
+>             int sx, sy, gx, gy;
+>             // ... 随机合法坐标 ...
+>             var e = em.CreateEntity(typeof(LocalTransform),
+>                 typeof(MovementState), typeof(ORCAAgent));
+>             // ... 设置组件 ...
+>             em.AddComponentData(e, new PathRequest {
+>                 goal = new float3(gx, 0, gy),
+>                 algorithm = PathfindingAlgorithm.AStar,
+>                 maxCost = float.MaxValue, priority = (byte)(rand.Next(4))
+>             });
+>         }
+>
+>         // 验证: 开启 Profiler (Deep Profile)
+>         // 观察:
+>         // - NavigationSystem.OnUpdate 耗时 (应 < 8ms @ 200 entities)
+>         // - ORCASystem.OnUpdate 耗时 (应 < 3ms)
+>         // - MovementSystem.OnUpdate 耗时 (应 < 1ms)
+>         // - 总帧时间 (应 < 16.7ms → 60 FPS)
+>     }
+>
+>     void CreateFlowFieldGroup(int count, float3 goal,
+>         EntityManager em, int w, int h, System.Random rand) {
+>         for (int i = 0; i < count; i++) {
+>             int sx, sy;
+>             do { sx = rand.Next(w / 3); sy = rand.Next(h); }
+>             while (!IsWalkable(sx, sy));
+>             // Entity 带有 GroupTag 标识 → NavigationSystem 自动分组
+>             var e = em.CreateEntity(typeof(LocalTransform),
+>                 typeof(MovementState), typeof(ORCAAgent),
+>                 typeof(GroupTag));
+>             em.SetComponentData(e, new LocalTransform {
+>                 Position = new float3(sx, 0, sy),
+>                 Rotation = quaternion.identity, Scale = 1f
+>             });
+>             em.AddComponentData(e, new PathRequest {
+>                 goal = goal, algorithm = PathfindingAlgorithm.AStar,
+>                 maxCost = float.MaxValue, priority = 2
+>             });
+>         }
+>     }
+> }
+> ```
+>
+> **60 FPS 稳定性验证**：(1) 在 200 个实体全活跃时 Profiler 显示每帧总 CPU 时间 < 16ms；(2) 无 NativeContainer 泄漏（Profiler Memory 面板中 `TempJob` 分配应在每帧归零）；(3) 无 BlobAsset 泄漏（`Allocator.Persistent` 分配稳定不增长）；(4) 实体间无穿透（ORCA 正常工作）。
+
+> [!tip]- 练习 8 参考答案（挑战）
+> ```csharp
+> // 运行时动态地图系统
+> public class DynamicMapSystem : MonoBehaviour {
+>     private World _world;
+>
+>     // 添加障碍物（如鼠标点击放置墙壁）
+>     public void PlaceObstacle(Vector3 worldPos, int radius = 1) {
+>         var em = _world.EntityManager;
+>         var gridEntity = em.CreateEntityQuery(typeof(GridData))
+>             .GetSingletonEntity();
+>         var gridData = em.GetComponentData<GridData>(gridEntity);
+>
+>         // 1. 计算脏矩形（需要重新 bake 的区域）
+>         int2 cell = WorldToCell(worldPos);
+>         int padding = radius + 1; // 额外填充确保模糊惩罚覆盖
+>         int x0 = Math.Max(0, cell.x - padding);
+>         int y0 = Math.Max(0, cell.y - padding);
+>         int x1 = Math.Min(gridData.grid.Value.width - 1, cell.x + padding);
+>         int y1 = Math.Min(gridData.grid.Value.height - 1, cell.y + padding);
+>
+>         // 2. 更新 BlobAsset 的 walkable 和 terrainTypes（需要重建 BlobAsset）
+>         //    方法：创建新的 BlobBuilder，复制旧数据，更新脏矩形区域
+>         var bb = new BlobBuilder(Allocator.Temp);
+>         ref var newGrid = ref bb.ConstructRoot<GridBlob>();
+>         // ... 复制 + 更新 ...
+>         var newBlobRef = bb.CreateBlobAssetReference<GridBlob>(
+>             Allocator.Persistent);
+>         bb.Dispose();
+>
+>         // 3. 替换旧的 GridData
+>         var oldBlob = gridData.grid;
+>         em.SetComponentData(gridEntity, new GridData {
+>             grid = newBlobRef, origin = gridData.origin
+>         });
+>         oldBlob.Dispose(); // 释放旧 BlobAsset
+>
+>         // 4. 使所有现有路径过期
+>         //    给所有有 PathResult 的实体添加 PathNeedsRefresh 标签
+>         var ecb = new EntityCommandBuffer(Allocator.Temp);
+>         foreach (var (result, entity) in
+>                  SystemAPI.Query<RefRO<PathResult>>().WithEntityAccess()) {
+>             ecb.AddComponent<PathNeedsRefresh>(entity);
+>         }
+>         ecb.Playback(em);
+>         ecb.Dispose();
+>     }
+>
+>     // 移除障碍物（类似逻辑，将 terrainType 改回通行类型）
+>     public void RemoveObstacle(Vector3 worldPos) {
+>         // 与 PlaceObstacle 相同流程，但将 walkable 设回 true
+>         // 并将 terrainType 恢复为基础地形
+>     }
+> }
+>
+> // 路径刷新系统
+> public partial struct PathRefreshSystem : ISystem {
+>     public void OnUpdate(ref SystemState state) {
+>         var ecb = new EntityCommandBuffer(Allocator.Temp);
+>         foreach (var (result, entity)
+>                  in SystemAPI.Query<RefRO<PathResult>>()
+>                           .WithAll<PathNeedsRefresh>()
+>                           .WithEntityAccess()) {
+>             // 释放旧路径
+>             if (result.ValueRO.blob.IsCreated)
+>                 result.ValueRO.blob.Dispose();
+>             ecb.RemoveComponent<PathResult>(entity);
+>             ecb.RemoveComponent<PathNeedsRefresh>(entity);
+>             // 重新添加 PathRequest（使用原来的目标）
+>             ecb.AddComponent(entity, new PathRequest {
+>                 goal = result.ValueRO.blob.Value.waypoints[
+>                     result.ValueRO.blob.Value.waypoints.Length - 1],
+>                 algorithm = PathfindingAlgorithm.AStar,
+>                 maxCost = float.MaxValue, priority = 3
+>             });
+>         }
+>         ecb.Playback(state.EntityManager);
+>         ecb.Dispose();
+>     }
+> }
+> ```
+>
+> **动态世界反应**：放置障碍物后，(1) 经过该区域的路径自动标记为 `PathNeedsRefresh`；(2) 下一帧 `NavigationSystem` 用更新后的 `GridData` 重算路径；(3) 实体在重算期间短暂停止（或继续沿旧路径移动直到收到新路径）。脏矩形增量更新将全量 BlobAsset 重建（O(W×H)）优化为 O(脏区域面积)。对于 64×64 网格和半径 3 的障碍物，重建区域从 4096 格降至 ~50 格。
+
+> [!tip]- 练习 9 参考答案（挑战）
+> ```csharp
+> // Benchmark 套件：自动化性能测试
+> [BurstCompile]
+> public struct BenchmarkRunner {
+>     public struct BenchmarkResult {
+>         public int mapSize, entityCount;
+>         public float obstacleDensity;
+>         public string algorithm;
+>         public double totalMs, perQueryMs;
+>         public int successCount, failCount;
+>         public long gcAllocBytes;
+>     }
+>
+>     public static void RunSuite() {
+>         var results = new List<BenchmarkResult>();
+>
+>         int[] mapSizes = { 32, 64, 128, 256 };
+>         int[] entityCounts = { 1, 10, 50, 200, 500 };
+>         float[] densities = { 0.0f, 0.1f, 0.3f };
+>         string[] algorithms = { "A*", "JPS", "Theta*", "FlowField" };
+>
+>         foreach (int size in mapSizes) {
+>             foreach (int count in entityCounts) {
+>                 if (count > size * size / 4) continue; // 不现实的参数跳过
+>                 foreach (float dens in densities) {
+>                     foreach (string algo in algorithms) {
+>                         if (algo == "JPS" && dens > 0) continue; // JPS 要求均匀代价
+>                         if (algo == "FlowField" && count < 5) continue;
+>
+>                         var grid = CreateTestGrid(size, size, dens);
+>                         var queries = GenerateQueries(grid, count);
+>
+>                         var sw = Stopwatch.StartNew();
+>                         long gcBefore = GC.GetTotalMemory(false);
+>
+>                         var result = RunAlgorithm(algo, grid, queries);
+>
+>                         sw.Stop();
+>                         long gcAfter = GC.GetTotalMemory(false);
+>
+>                         results.Add(new BenchmarkResult {
+>                             mapSize = size, entityCount = count,
+>                             obstacleDensity = dens, algorithm = algo,
+>                             totalMs = sw.Elapsed.TotalMilliseconds,
+>                             perQueryMs = sw.Elapsed.TotalMilliseconds / count,
+>                             successCount = result.successes,
+>                             failCount = result.failures,
+>                             gcAllocBytes = gcAfter - gcBefore
+>                         });
+>                     }
+>                 }
+>             }
+>         }
+>
+>         // 输出 CSV
+>         var csv = new StringBuilder();
+>         csv.AppendLine("MapSize,EntityCount,ObstacleDensity,Algorithm,"
+>             + "TotalMs,PerQueryMs,Successes,Failures,GCAllocBytes");
+>         foreach (var r in results)
+>             csv.AppendLine($"{r.mapSize},{r.entityCount},{r.obstacleDensity},"
+>                 + $"{r.algorithm},{r.totalMs:F2},{r.perQueryMs:F4},"
+>                 + $"{r.successCount},{r.failCount},{r.gcAllocBytes}");
+>
+>         System.IO.File.WriteAllText("benchmark_results.csv", csv.ToString());
+>         Debug.Log($"Benchmark complete: {results.Count} test cases → "
+>             + "benchmark_results.csv");
+>
+>         // 生成简要文本报告
+>         GenerateReport(results);
+>     }
+>
+>     static void GenerateReport(List<BenchmarkResult> results) {
+>         var sb = new StringBuilder();
+>         sb.AppendLine("=== Pathfinding Benchmark Report ===");
+>
+>         // 按算法分组统计
+>         foreach (var algo in new[]{"A*","JPS","Theta*","FlowField"}) {
+>             var group = results.Where(r => r.algorithm == algo).ToList();
+>             if (group.Count == 0) continue;
+>             sb.AppendLine($"\n{algo}:");
+>             sb.AppendLine($"  Avg per-query: "
+>                 + $"{group.Average(r => r.perQueryMs):F3} ms");
+>             sb.AppendLine($"  Max total: "
+>                 + $"{group.Max(r => r.totalMs):F2} ms "
+>                 + $"(size={group.OrderByDescending(r=>r.totalMs).First().mapSize}, "
+>                 + $"entities={group.OrderByDescending(r=>r.totalMs).First().entityCount})");
+>             sb.AppendLine($"  Avg GC: {group.Average(r => r.gcAllocBytes) / 1024:F1} KB");
+>         }
+>
+>         Debug.Log(sb.ToString());
+>     }
+> }
+> ```
+>
+> **预期发现**：(1) JPS 在均匀代价 256×256 网格上的 per-query 耗时约 A* 的 1/8；(2) Flow Field 的 per-query 耗时随实体数增加而降低（摊销构建成本）；(3) 障碍密度 > 30% 时 JPS 优势减弱（更多跳点 = 更多扩展）；(4) GC 分配在 Burst 版本中为 0（全部 NativeArray+Temp 分配在帧末释放）；(5) A* 在 128×128 以上网格中随着搜索空间增长而性能下降最快（O(W×H) vs JPS 的实际搜索量）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **"Game AI Pro" Series** (Rabin, ed.): 整个系列的寻路章节。尤其是 Volume 1 的 "JPS+", Volume 2 的 "Hierarchical Pathfinding in Games", Volume 3 的 "ORCA for Large Crowds"。

@@ -975,6 +975,354 @@ public class ScoreDisplay : MonoBehaviour
 - `BossSystem`：每 5 波生成一个 Boss（高血量、复杂弹幕模式）
 - `GameOverSystem`：玩家死亡后显示 Game Over 并重置
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **在 `EnemyBulletPatternJob` 中添加模式 3（自机狙）**：
+>
+> ```csharp
+> // 1. 在 EnemyBulletPatternJob 结构体中添加新字段
+> public float3 PlayerPosition; // 从 System 传入玩家位置
+>
+> // 2. 在 switch 中添加 case 3
+> switch (spawner.PatternType)
+> {
+>     case 0: SpawnFanPattern(sortKey, transform, spawner); break;
+>     case 1: SpawnCirclePattern(sortKey, transform.Position, spawner); break;
+>     case 2: SpawnSpiralPattern(sortKey, transform.Position, spawner); break;
+>     case 3: SpawnAimedPattern(sortKey, transform.Position, spawner); break; // 新增
+> }
+>
+> // 3. 实现自机狙生成方法
+> void SpawnAimedPattern(int sortKey, float3 spawnPosition, in BulletSpawner spawner)
+> {
+>     int count = spawner.BulletsPerWave;
+>     // 主弹：直接瞄准玩家
+>     float3 mainDirection = math.normalize(PlayerPosition - spawnPosition);
+>     quaternion mainRotation = quaternion.LookRotationSafe(
+>         new float3(mainDirection.x, mainDirection.y, 0f), math.up());
+>
+>     SpawnBullet(sortKey, spawnPosition, mainRotation, spawner.BulletPrefab, 4f);
+>
+>     // 副弹：在主弹两侧 ±spreadAngle 方向各生成 (count/2) 发
+>     int sideCount = (count - 1) / 2;
+>     float spreadRad = math.radians(spawner.SpreadAngle);
+>     float angleStep = spreadRad / (sideCount > 0 ? sideCount : 1);
+>
+>     for (int i = 1; i <= sideCount; i++)
+>     {
+>         float angle = angleStep * i;
+>         quaternion rotLeft  = math.mul(mainRotation, quaternion.RotateZ(angle));
+>         quaternion rotRight = math.mul(mainRotation, quaternion.RotateZ(-angle));
+>         SpawnBullet(sortKey, spawnPosition, rotLeft,  spawner.BulletPrefab, 3.5f);
+>         SpawnBullet(sortKey, spawnPosition, rotRight, spawner.BulletPrefab, 3.5f);
+>     }
+> }
+> ```
+>
+> **BulletSpawnSystem 中传入玩家位置**：
+>
+> ```csharp
+> // 在 OnUpdate 中查询玩家位置并传入 Job
+> float3 playerPosition = float3.zero;
+> foreach (var (transform, _) in SystemAPI.Query<RefRO<LocalTransform>>()
+>     .WithAll<PlayerTag>())
+> {
+>     playerPosition = transform.ValueRO.Position;
+>     break;
+> }
+>
+> new EnemyBulletPatternJob
+> {
+>     DeltaTime = deltaTime,
+>     Ecb = ecb.AsParallelWriter(),
+>     PlayerPosition = playerPosition  // 新增
+> }.ScheduleParallel();
+> ```
+> **关键点**：`PlayerPosition` 作为 Job 字段传入，保证 Burst 兼容。自机狙的核心是 `direction = normalize(target - source)`。
+
+> [!tip]- 练习 2 参考答案
+> **道具掉落系统完整实现**：
+>
+> ```csharp
+> // === Components/PowerUpData.cs ===
+> using Unity.Entities;
+>
+> public enum PowerUpType : byte
+> {
+>     Heal = 0,      // 回血
+>     SpeedUp = 1,   // 加速
+>     Score = 2,     // 加分
+> }
+>
+> public struct PowerUp : IComponentData
+> {
+>     public PowerUpType Type;
+>     public float Value;       // 治疗效果数值 / 加速倍率
+>     public float Lifetime;    // 道具存在时间
+> }
+>
+> public struct PowerUpPrefabs : IComponentData
+> {
+>     public Entity HealPrefab;
+>     public Entity SpeedUpPrefab;
+>     public Entity ScorePrefab;
+> }
+>
+> // === 修改 DeathTimerJob：死亡时概率掉落 ===
+> [BurstCompile]
+> [WithAll(typeof(DeadTag))]
+> public partial struct DeathTimerJob : IJobEntity
+> {
+>     public float DeltaTime;
+>     public EntityCommandBuffer.ParallelWriter Ecb;
+>     public float DropChance;   // 掉落概率，如 0.3f
+>     public Random Random;      // Unity.Mathematics.Random
+>
+>     void Execute([ChunkIndexInQuery] int sortKey,
+>         ref Lifetime lifetime, in LocalTransform transform, in Entity entity)
+>     {
+>         lifetime.Remaining -= DeltaTime;
+>         if (lifetime.Remaining <= 0f)
+>         {
+>             // 概率掉落道具
+>             if (Random.NextFloat() < DropChance)
+>             {
+>                 SpawnPowerUp(sortKey, transform.Position);
+>             }
+>             Ecb.DestroyEntity(sortKey, entity);
+>         }
+>     }
+>
+>     void SpawnPowerUp(int sortKey, float3 position)
+>     {
+>         // 随机选择道具类型
+>         int roll = Random.NextInt(0, 3);
+>         // 注意：实际项目中 Prefab 引用需要通过 System 传入
+>         // 这里展示 ECB 创建和设置的过程
+>         // Entity item = Ecb.Instantiate(sortKey, PowerUpPrefab);
+>         // Ecb.SetComponent(sortKey, item, LocalTransform.FromPosition(position));
+>         // Ecb.AddComponent(sortKey, item, new PowerUp { Type = (PowerUpType)roll, Value = ..., Lifetime = 5f });
+>         // Ecb.AddComponent<BulletTag>(sortKey, item); // 复用碰撞检测
+>     }
+> }
+>
+> // === Systems/PowerUpSystem.cs ===
+> [BurstCompile]
+> [UpdateInGroup(typeof(SimulationSystemGroup))]
+> [UpdateAfter(typeof(CleanupSystem))]
+> public partial struct PowerUpSystem : ISystem
+> {
+>     [BurstCompile] public void OnCreate(ref SystemState state)
+>     { state.RequireForUpdate<PowerUp>(); }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float deltaTime = SystemAPI.Time.DeltaTime;
+>         var ecbSingleton = SystemAPI.GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>();
+>         var ecb = ecbSingleton.CreateCommandBuffer(state.WorldUnmanaged);
+>
+>         // Job 1: 更新道具生命周期
+>         state.Dependency = new PowerUpLifetimeJob
+>         {
+>             DeltaTime = deltaTime,
+>             Ecb = ecb.AsParallelWriter()
+>         }.ScheduleParallel(state.Dependency);
+>
+>         // Job 2: 检测玩家拾取（需要碰撞检测，可复用 DamageSystem 的碰撞逻辑）
+>         // 简化：检查道具与玩家位置的距离
+>         state.Dependency = new PowerUpCollectJob
+>         {
+>             Ecb = ecb.AsParallelWriter()
+>         }.ScheduleParallel(state.Dependency);
+>     }
+> }
+>
+> [BurstCompile]
+> [WithAll(typeof(PowerUp))]
+> public partial struct PowerUpLifetimeJob : IJobEntity
+> {
+>     public float DeltaTime;
+>     public EntityCommandBuffer.ParallelWriter Ecb;
+>
+>     void Execute([ChunkIndexInQuery] int sortKey, ref PowerUp power, in Entity entity)
+>     {
+>         power.Lifetime -= DeltaTime;
+>         if (power.Lifetime <= 0f)
+>             Ecb.DestroyEntity(sortKey, entity);
+>     }
+> }
+>
+> [BurstCompile]
+> [WithAll(typeof(PowerUp))]
+> public partial struct PowerUpCollectJob : IJobEntity
+> {
+>     public EntityCommandBuffer.ParallelWriter Ecb;
+>
+>     // 简化实现：遍历所有道具，检测与玩家的距离
+>     // 实际项目中应在 System 中获取玩家位置后传入
+>     // void Execute(..., in LocalTransform transform, in PowerUp power, in Entity entity)
+>     // {
+>     //     if (math.distance(transform.Position, PlayerPosition) < 1.5f)
+>     //     {
+>     //         Ecb.DestroyEntity(sortKey, entity);
+>     //         // 应用效果：通过 ECB 修改玩家组件或添加瞬时效果组件
+>     //     }
+>     // }
+> }
+> ```
+> **设计要点**：道具本身是 Entity（用 ECB 生成和销毁），通过 Tag 组件与碰撞检测系统复用交互逻辑。`PowerUpPrefabs` 单例组件存储 Prefab 引用。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **关卡管理系统核心架构**：
+>
+> ```csharp
+> // === Components/LevelData.cs ===
+> using Unity.Entities;
+> using Unity.Mathematics;
+>
+> public struct WaveData
+> {
+>     public int EnemyCount;
+>     public float SpawnInterval;
+>     public Entity EnemyPrefab;
+>     public int PatternType;
+> }
+>
+> // 存储为 BlobAsset（只读共享、Burst 友好）
+> public struct LevelData : IComponentData
+> {
+>     public BlobAssetReference<LevelBlob> Blob;
+> }
+>
+> public struct LevelBlob
+> {
+>     public BlobArray<WaveData> Waves;
+>     public int BossWaveInterval; // 每 N 波生成 Boss
+> }
+>
+> // 运行时状态
+> public struct WaveState : IComponentData
+> {
+>     public int CurrentWave;       // 当前波次（0-based）
+>     public int EnemiesSpawned;    // 本波已生成数
+>     public int EnemiesAlive;      // 当前存活敌人数
+>     public float WaveTimer;       // 波次内计时器
+>     public bool IsWaveActive;
+>     public bool IsBossWave;
+> }
+>
+> // === Systems/WaveSystem.cs 核心逻辑 ===
+> [BurstCompile]
+> [UpdateInGroup(typeof(SimulationSystemGroup))]
+> public partial struct WaveSystem : ISystem
+> {
+>     [BurstCompile] public void OnCreate(ref SystemState state)
+>     { state.RequireForUpdate<LevelData>(); }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // 注意：LevelData 中包含 BlobAsset，System 需要 IJobEntity 或非 Burst OnUpdate
+>         // 这里使用 SystemAPI.Query 进行主逻辑调度
+>         var levelData = SystemAPI.GetSingleton<LevelData>();
+>         ref var blob = ref levelData.Blob.Value;
+>
+>         foreach (var waveState in SystemAPI.Query<RefRW<WaveState>>())
+>         {
+>             ref var ws = ref waveState.ValueRW;
+>             if (ws.CurrentWave >= blob.Waves.Length)
+>             {
+>                 // 所有波次完成 → 触发胜利
+>                 return;
+>             }
+>
+>             ref var currentWave = ref blob.Waves[ws.CurrentWave];
+>
+>             // 波次结束条件：所有敌人已生成 且 存活数降为 0
+>             if (ws.EnemiesSpawned >= currentWave.EnemyCount && ws.EnemiesAlive <= 0)
+>             {
+>                 ws.CurrentWave++;
+>                 ws.EnemiesSpawned = 0;
+>                 ws.WaveTimer = 0f;
+>                 ws.IsBossWave = (ws.CurrentWave % blob.BossWaveInterval == 0);
+>                 continue;
+>             }
+>
+>             // 生成敌人
+>             if (ws.EnemiesSpawned < currentWave.EnemyCount)
+>             {
+>                 ws.WaveTimer -= SystemAPI.Time.DeltaTime;
+>                 if (ws.WaveTimer <= 0f)
+>                 {
+>                     ws.WaveTimer = currentWave.SpawnInterval;
+>                     // 通过 ECB 实例化敌人实体（代码省略，与 SpawnPoint 模式相同）
+>                     ws.EnemiesSpawned++;
+>                 }
+>             }
+>         }
+>     }
+> }
+>
+> // === Systems/BossSystem.cs ===
+> // Boss 继承 EnemyTag 但拥有特殊组件：
+> public struct BossTag : IComponentData { }
+> public struct BossData : IComponentData
+> {
+>     public float PhaseThreshold;  // 血量百分比触发阶段切换
+>     public int CurrentPhase;
+> }
+>
+> // Boss 的弹幕 Pattern 更复杂（使用多种模式交替），通过修改 BulletSpawner.PatternType 实现
+>
+> // === Systems/GameOverSystem.cs ===
+> // 玩家 Health <= 0 时设置 GameOverState 单例
+> public struct GameOverState : IComponentData
+> {
+>     public bool IsGameOver;
+>     public float RestartTimer;
+> }
+>
+> [BurstCompile]
+> [UpdateInGroup(typeof(SimulationSystemGroup))]
+> [UpdateAfter(typeof(DamageSystem))]
+> public partial struct GameOverSystem : ISystem
+> {
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // 检测玩家 Health
+>         foreach (var (health, _) in SystemAPI.Query<RefRO<Health>>().WithAll<PlayerTag>())
+>         {
+>             if (health.ValueRO.Current <= 0f)
+>             {
+>                 var singleton = SystemAPI.GetSingletonRW<GameOverState>();
+>                 singleton.ValueRW.IsGameOver = true;
+>                 singleton.ValueRW.RestartTimer = 3f;
+>             }
+>         }
+>
+>         // 重启逻辑
+>         if (SystemAPI.HasSingleton<GameOverState>())
+>         {
+>             var go = SystemAPI.GetSingletonRW<GameOverState>();
+>             if (go.ValueRO.IsGameOver)
+>             {
+>                 go.ValueRW.RestartTimer -= SystemAPI.Time.DeltaTime;
+>                 if (go.ValueRW.RestartTimer <= 0f)
+>                 {
+>                     // 通过 SceneSystem 重新加载场景
+>                 }
+>             }
+>         }
+>     }
+> }
+> ```
+> **架构关键**：关卡数据用 `BlobAsset` 存储以实现 Burst 兼容的只读共享。波次推进由 `WaveState` 驱动（生产者-消费者模式：生成 + 存活追踪）。Boss 通过额外的组件和不同弹幕模式配置实现差异化行为。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

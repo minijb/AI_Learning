@@ -1132,6 +1132,433 @@ public static class ReportFactory
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：多格式报表生成器
+> ```csharp
+> using System.Text;
+>
+> public abstract class ReportGenerator
+> {
+>     public sealed void Generate()
+>     {
+>         var data = GatherData();
+>         var output = new StringBuilder();
+>
+>         var header = FormatHeader();
+>         if (header != null) output.AppendLine(header);
+>
+>         output.AppendLine(FormatBody(data));
+>
+>         var footer = FormatFooter();
+>         if (footer != null) output.AppendLine(footer);
+>
+>         Output(output.ToString());
+>     }
+>
+>     protected abstract List<(string Name, int Score)> GatherData();
+>     protected abstract string FormatBody(List<(string Name, int Score)> data);
+>     protected virtual string? FormatHeader() => null;
+>     protected virtual string? FormatFooter() => null;
+>     protected virtual void Output(string content) => Console.WriteLine(content);
+> }
+>
+> public class PdfReportGenerator : ReportGenerator
+> {
+>     protected override List<(string Name, int Score)> GatherData()
+>         => new() { ("Alice", 95), ("Bob", 87), ("Charlie", 92) };
+>
+>     protected override string? FormatHeader() => "[PDF] ===== Report Header =====";
+>
+>     protected override string FormatBody(List<(string Name, int Score)> data)
+>     {
+>         var sb = new StringBuilder();
+>         sb.AppendLine("[PDF] Name\tScore");
+>         sb.AppendLine("[PDF] ----\t-----");
+>         foreach (var (name, score) in data)
+>             sb.AppendLine($"[PDF] {name}\t{score}");
+>         return sb.ToString();
+>     }
+>
+>     protected override string? FormatFooter() => "[PDF] ===== Report Footer =====";
+> }
+>
+> public class HtmlReportGenerator : ReportGenerator
+> {
+>     protected override List<(string Name, int Score)> GatherData()
+>         => new() { ("Alice", 95), ("Bob", 87), ("Charlie", 92) };
+>
+>     protected override string? FormatHeader()
+>         => "<html><head><title>Score Report</title></head><body>";
+>
+>     protected override string FormatBody(List<(string Name, int Score)> data)
+>     {
+>         var sb = new StringBuilder();
+>         sb.AppendLine("<table border=\"1\">");
+>         sb.AppendLine("  <tr><th>Name</th><th>Score</th></tr>");
+>         foreach (var (name, score) in data)
+>             sb.AppendLine($"  <tr><td>{name}</td><td>{score}</td></tr>");
+>         sb.AppendLine("</table>");
+>         return sb.ToString();
+>     }
+>
+>     protected override string? FormatFooter() => "</body></html>";
+> }
+>
+> public class CsvReportGenerator : ReportGenerator
+> {
+>     protected override List<(string Name, int Score)> GatherData()
+>         => new() { ("Alice", 95), ("Bob", 87), ("Charlie", 92) };
+>
+>     protected override string FormatBody(List<(string Name, int Score)> data)
+>     {
+>         var sb = new StringBuilder();
+>         sb.AppendLine("Name,Score");
+>         foreach (var (name, score) in data)
+>             sb.AppendLine($"{name},{score}");
+>         return sb.ToString();
+>     }
+> }
+>
+> // 测试：
+> // new PdfReportGenerator().Generate();
+> // new HtmlReportGenerator().Generate();
+> // new CsvReportGenerator().Generate();
+> ```
+
+> [!tip]- 练习 2 参考答案：添加钩子方法
+> ```csharp
+> // 在基类 ReportGenerator 中添加三个钩子，并修改 Generate() 使用它们：
+>
+> public abstract class ReportGenerator
+> {
+>     public sealed void Generate()
+>     {
+>         var data = GatherData();
+>
+>         // 钩子 2：排序
+>         if (ShouldSortData())
+>             data = data.OrderByDescending(d => d.Score).ToList();
+>
+>         var output = new StringBuilder();
+>
+>         var header = FormatHeader();
+>         if (header != null) output.AppendLine(header);
+>
+>         output.AppendLine(FormatBody(data));
+>
+>         // 钩子 1：统计摘要
+>         if (ShouldIncludeSummary() && data.Count > 0)
+>         {
+>             var avg = data.Average(d => (double)d.Score);
+>             var max = data.Max(d => d.Score);
+>             var min = data.Min(d => d.Score);
+>             output.AppendLine($"--- Summary: Avg={avg:F1}, Max={max}, Min={min} ---");
+>         }
+>
+>         var footer = FormatFooter();
+>         if (footer != null) output.AppendLine(footer);
+>
+>         // 钩子 3：输出前处理
+>         var finalContent = OnBeforeOutput(output.ToString());
+>         Output(finalContent);
+>     }
+>
+>     // ... 原有 abstract/virtual 方法不变 ...
+>
+>     // 新增钩子
+>     protected virtual bool ShouldIncludeSummary() => true;
+>     protected virtual bool ShouldSortData() => true;
+>     protected virtual string OnBeforeOutput(string content) => content;
+> }
+>
+> // CSV 覆盖：不排序、不含摘要
+> public class CsvReportGeneratorV2 : ReportGenerator
+> {
+>     // GatherData / FormatBody 同练习 1 ...
+>     protected override bool ShouldSortData() => false;
+>     protected override bool ShouldIncludeSummary() => false;
+>
+>     protected override List<(string Name, int Score)> GatherData()
+>         => new() { ("Alice", 95), ("Bob", 87), ("Charlie", 92) };
+>
+>     protected override string FormatBody(List<(string Name, int Score)> data)
+>     {
+>         var sb = new StringBuilder();
+>         sb.AppendLine("Name,Score");
+>         foreach (var (name, score) in data)
+>             sb.AppendLine($"{name},{score}");
+>         return sb.ToString();
+>     }
+> }
+>
+> // HTML 覆盖 OnBeforeOutput：添加 DOCTYPE
+> public class HtmlReportGeneratorV2 : HtmlReportGenerator
+> {
+>     protected override string OnBeforeOutput(string content)
+>         => "<!DOCTYPE html>\n" + content;
+> }
+>
+> // PDF 使用默认钩子行为（排序 + 摘要 + 无 DOCTYPE）
+> ```
+
+> [!tip]- 练习 3 参考答案：重构为 Strategy + Builder
+> ```csharp
+> // ============================================
+> // IReportStep 接口
+> // ============================================
+> public interface IReportStep
+> {
+>     string Name { get; }
+>     object? Execute(object? context);
+> }
+>
+> // ============================================
+> // ReportContext — 在步骤之间传递状态
+> // ============================================
+> public class ReportContext
+> {
+>     public List<(string Name, int Score)> RawData { get; set; } = new();
+>     public List<(string Name, int Score)> ProcessedData { get; set; } = new();
+>     public StringBuilder Output { get; set; } = new();
+> }
+>
+> // ============================================
+> // 具体步骤
+> // ============================================
+> public class GatherDataStep : IReportStep
+> {
+>     private readonly List<(string Name, int Score)> _data;
+>     public string Name => "GatherData";
+>     public GatherDataStep(List<(string Name, int Score)> data) => _data = data;
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.RawData = new List<(string, int)>(_data);
+>         ctx.ProcessedData = ctx.RawData;
+>         return ctx;
+>     }
+> }
+>
+> public class SortDataStep : IReportStep
+> {
+>     public string Name => "SortData";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.ProcessedData = ctx.ProcessedData
+>             .OrderByDescending(d => d.Score).ToList();
+>         return ctx;
+>     }
+> }
+>
+> public class PdfHeaderStep : IReportStep
+> {
+>     public string Name => "PdfHeader";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.AppendLine("[PDF] ===== Report Header =====");
+>         return ctx;
+>     }
+> }
+>
+> public class HtmlHeaderStep : IReportStep
+> {
+>     public string Name => "HtmlHeader";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.AppendLine("<html><head><title>Score Report</title></head><body>");
+>         return ctx;
+>     }
+> }
+>
+> public class PdfBodyStep : IReportStep
+> {
+>     public string Name => "PdfBody";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.AppendLine("[PDF] Name\tScore");
+>         ctx.Output.AppendLine("[PDF] ----\t-----");
+>         foreach (var (name, score) in ctx.ProcessedData)
+>             ctx.Output.AppendLine($"[PDF] {name}\t{score}");
+>         return ctx;
+>     }
+> }
+>
+> public class HtmlBodyStep : IReportStep
+> {
+>     public string Name => "HtmlBody";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.AppendLine("<table border=\"1\">");
+>         ctx.Output.AppendLine("  <tr><th>Name</th><th>Score</th></tr>");
+>         foreach (var (name, score) in ctx.ProcessedData)
+>             ctx.Output.AppendLine($"  <tr><td>{name}</td><td>{score}</td></tr>");
+>         ctx.Output.AppendLine("</table>");
+>         return ctx;
+>     }
+> }
+>
+> public class CsvBodyStep : IReportStep
+> {
+>     public string Name => "CsvBody";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.AppendLine("Name,Score");
+>         foreach (var (name, score) in ctx.ProcessedData)
+>             ctx.Output.AppendLine($"{name},{score}");
+>         return ctx;
+>     }
+> }
+>
+> public class SummaryStep : IReportStep
+> {
+>     public string Name => "Summary";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         var data = ctx.ProcessedData;
+>         if (data.Count == 0) return ctx;
+>         var avg = data.Average(d => (double)d.Score);
+>         var max = data.Max(d => d.Score);
+>         var min = data.Min(d => d.Score);
+>         ctx.Output.AppendLine($"--- Summary: Avg={avg:F1}, Max={max}, Min={min} ---");
+>         return ctx;
+>     }
+> }
+>
+> public class PdfFooterStep : IReportStep
+> {
+>     public string Name => "PdfFooter";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.AppendLine("[PDF] ===== Report Footer =====");
+>         return ctx;
+>     }
+> }
+>
+> public class HtmlFooterStep : IReportStep
+> {
+>     public string Name => "HtmlFooter";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.AppendLine("</body></html>");
+>         return ctx;
+>     }
+> }
+>
+> public class HtmlDoctypeStep : IReportStep
+> {
+>     public string Name => "HtmlDoctype";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         ctx.Output.Insert(0, "<!DOCTYPE html>\n");
+>         return ctx;
+>     }
+> }
+>
+> public class OutputStep : IReportStep
+> {
+>     public string Name => "Output";
+>     public object? Execute(object? context)
+>     {
+>         var ctx = (ReportContext)context!;
+>         Console.WriteLine(ctx.Output.ToString());
+>         return ctx;
+>     }
+> }
+>
+> // ============================================
+> // ReportPipeline + Builder
+> // ============================================
+> public class ReportPipeline
+> {
+>     private readonly List<IReportStep> _steps;
+>     public ReportPipeline(List<IReportStep> steps) => _steps = steps;
+>
+>     public void Execute()
+>     {
+>         object? context = new ReportContext();
+>         foreach (var step in _steps)
+>         {
+>             Console.WriteLine($"  [Step] {step.Name}");
+>             context = step.Execute(context);
+>         }
+>     }
+> }
+>
+> public class ReportPipelineBuilder
+> {
+>     private readonly List<IReportStep> _steps = new();
+>     public ReportPipelineBuilder AddStep(IReportStep step)
+>     {
+>         _steps.Add(step);
+>         return this;
+>     }
+>     public ReportPipeline Build() => new(_steps);
+> }
+>
+> // ============================================
+> // ReportFactory
+> // ============================================
+> public static class ReportFactory
+> {
+>     private static readonly List<(string, int)> DefaultData
+>         = new() { ("Alice", 95), ("Bob", 87), ("Charlie", 92) };
+>
+>     public static ReportPipeline Pdf(List<(string, int)>? data = null)
+>         => new ReportPipelineBuilder()
+>             .AddStep(new GatherDataStep(data ?? DefaultData))
+>             .AddStep(new SortDataStep())
+>             .AddStep(new PdfHeaderStep())
+>             .AddStep(new PdfBodyStep())
+>             .AddStep(new SummaryStep())
+>             .AddStep(new PdfFooterStep())
+>             .AddStep(new OutputStep())
+>             .Build();
+>
+>     public static ReportPipeline Html(List<(string, int)>? data = null)
+>         => new ReportPipelineBuilder()
+>             .AddStep(new GatherDataStep(data ?? DefaultData))
+>             .AddStep(new SortDataStep())
+>             .AddStep(new HtmlHeaderStep())
+>             .AddStep(new HtmlBodyStep())
+>             .AddStep(new SummaryStep())
+>             .AddStep(new HtmlFooterStep())
+>             .AddStep(new HtmlDoctypeStep())
+>             .AddStep(new OutputStep())
+>             .Build();
+>
+>     public static ReportPipeline Csv(List<(string, int)>? data = null)
+>         => new ReportPipelineBuilder()
+>             .AddStep(new GatherDataStep(data ?? DefaultData))
+>             .AddStep(new CsvBodyStep())
+>             .AddStep(new OutputStep())
+>             .Build();
+> }
+> ```
+>
+> **思考题回答：**
+>
+> 重构后，Template Method 的控制反转（IoC）特性**形式上丢失了**——原来基类通过 `sealed Generate()` 强制所有子类走同一个骨架；现在 `ReportPipeline` 的步骤列表可变，没有编译期约束。
+>
+> **补救方法：**
+> 1. `ReportPipeline.Execute()` 本身仍控制执行顺序 —— 通过工厂方法（`ReportFactory.Pdf()`）而非自由拼装来创建 Pipeline，执行顺序就是受控的
+> 2. 可在 `Build()` 中验证步骤完整性（必须有 Gather → Format → Output 等关键步骤），提供运行期保证
+> 3. 二者不冲突：Template Method 和 Strategy/Builder 可组合 —— Template Method 保证骨架，Builder 负责装配步骤 —— 见 ASP.NET Core Middleware Pipeline
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 相关模式

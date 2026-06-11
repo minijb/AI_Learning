@@ -199,6 +199,69 @@ vim.api.nvim_create_autocmd("LspAttach", {
 ```
 用 `:Telescope keymaps`（安装 Telescope 后）交互式查看。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```lua
+> -- 练习 1: 基础按键映射
+> -- 将以下代码放入 init.lua 或 keymaps 模块中
+>
+> vim.g.mapleader = " "  -- 确保在映射之前设置
+>
+> local map = vim.keymap.set
+> local opts = { noremap = true, silent = true }
+>
+> -- <leader>h — 取消搜索高亮
+> map("n", "<leader>h", "<cmd>nohlsearch<CR>", vim.tbl_extend("force", opts, { desc = "取消搜索高亮" }))
+>
+> -- <leader>sv — 垂直分割窗口
+> map("n", "<leader>sv", "<cmd>vsplit<CR>", vim.tbl_extend("force", opts, { desc = "垂直分割" }))
+>
+> -- <leader>sh — 水平分割窗口
+> map("n", "<leader>sh", "<cmd>split<CR>", vim.tbl_extend("force", opts, { desc = "水平分割" }))
+> ```
+>
+> **验证方式：** 在 Neovim 中按 `<leader>h`（默认空格+h）看搜索高亮是否清除；按 `<leader>sv` 和 `<leader>sh` 检查窗口是否分割。`:map <leader>h` 可查看已注册的映射。
+
+> [!tip]- 练习 2 参考答案
+> ```lua
+> -- 练习 2: 映射到 Lua 函数——切换相对行号
+> vim.keymap.set("n", "<leader>t", function()
+>     local current = vim.opt.relativenumber:get()
+>     vim.opt.relativenumber = not current
+>     -- 打印提示，让用户知道切换结果
+>     if not current then
+>         print("相对行号: 开启")
+>     else
+>         print("相对行号: 关闭")
+>     end
+> end, { desc = "切换相对行号" })
+> ```
+>
+> **关键点：**
+> - `vim.opt.relativenumber:get()` 返回当前布尔值，`not` 取反后赋值回去实现 toggle 效果。
+> - `rhs` 是一个 Lua 函数而非字符串，这是 `vim.keymap.set` 最强大的特性——可以在回调中做任意逻辑。
+> - 添加 `print()` 或 `vim.notify()` 给用户反馈，提升使用体验。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 在 Neovim 中运行：
+>
+> ```vim
+> " 查看所有普通模式映射（JSON-like 输出）
+> :lua print(vim.inspect(vim.api.nvim_get_keymap("n")))
+>
+> " 只看以 <leader> 开头的映射
+> :lua for _, m in ipairs(vim.api.nvim_get_keymap("n")) do if m.lhs:match("^<leader>") then print(m.lhs .. " → " .. (m.desc or m.rhs)) end end
+>
+> " 如果装了 Telescope: 交互式浏览
+> :Telescope keymaps
+> ```
+>
+> **理解：** `vim.api.nvim_get_keymap("n")` 返回一个 table 数组，每个元素包含 `lhs`（按键）、`rhs`（目标）、`desc`（描述）、`mode`、`noremap` 等字段。Telescope 的 keymaps 插件提供了模糊搜索和预览，是日常使用中最方便的映射查看方式。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

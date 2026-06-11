@@ -505,16 +505,13 @@ int main() {
 - 用 `sync_wait` 获取结果
 - 打印最终结果
 
-<details>
-<summary>提示</summary>
-
-`let_value` 的回调需要返回一个新的 sender，类型为 `sender_of<T>`（如 `just(...)`）。
-
-编译命令：
-```bash
-g++ -std=c++20 -I<stdexec>/include exercise1.cpp -o exercise1 -pthread
-```
-</details>
+> [!tip]- 提示
+> `let_value` 的回调需要返回一个新的 sender，类型为 `sender_of<T>`（如 `just(...)`）。
+>
+> 编译命令：
+> ```bash
+> g++ -std=c++20 -I<stdexec>/include exercise1.cpp -o exercise1 -pthread
+> ```
 
 ### 3.2 中级：为 Sender 添加超时
 
@@ -526,16 +523,10 @@ g++ -std=c++20 -I<stdexec>/include exercise1.cpp -o exercise1 -pthread
 - 如果超时先触发，取消 sender 并返回 fallback
 - 超时计时在独立线程中运行
 
-<details>
-<summary>提示</summary>
-
-可以使用 `std::thread` + `stop_source` + `std::condition_variable` 实现超时检测线程。`sync_wait` 返回 `std::optional<...>`，你可以用 `has_value()` 检查成功与否。
-
-但注意：P2300 的 `sync_wait` 在 sender 完成前会阻塞调用线程。你可以把超时检测放在另一个线程，并使用 `stop_source.request_stop()` 发送取消信号。
-</details>
-
-### 3.3 挑战：实现一个简单的线程池 Scheduler
-
+> [!tip]- 提示
+> 可以使用 `std::thread` + `stop_source` + `std::condition_variable` 实现超时检测线程。`sync_wait` 返回 `std::optional<...>`，你可以用 `has_value()` 检查成功与否。
+>
+> 但注意：P2300 的 `sync_wait` 在 sender 完成前会阻塞调用线程。你可以把超时检测放在另一个线程，并使用 `stop_source.request_stop()` 发送取消信号。
 **目标**：从零实现一个满足 P2300 `scheduler` 概念的自定义调度器。
 
 **要求**：
@@ -545,34 +536,345 @@ g++ -std=c++20 -I<stdexec>/include exercise1.cpp -o exercise1 -pthread
 - 使用 `tag_invoke` 机制发现 `schedule` 和 `connect`
 - 用 `sync_wait` 验证正确性
 
-<details>
-<summary>提示</summary>
-
-```cpp
-struct my_thread_pool {
-    // 线程池内部：队列 + 工作线程 + mutex + condition_variable
-    std::vector<std::thread> workers_;
-    std::queue<std::function<void()>> tasks_;
-    std::mutex mtx_;
-    std::condition_variable cv_;
-    bool stop_ = false;
-
-    explicit my_thread_pool(int n); // 启动 n 个线程
-    ~my_thread_pool();              // 优雅关闭
-
-    auto get_scheduler();           // 返回一个 scheduler 对象
-};
-```
-
-Scheduler 的 `schedule()` 方法返回一个 sender，该 sender 的 `connect` 将实际工作入队，`start` 只是标记开始（或者两者合一）。线程池的工作线程从队列中取出任务执行，完成后调 `set_value()`。
-
-`tag_invoke` 签名：
-```cpp
-friend auto tag_invoke(stdexec::schedule_t, my_scheduler sched);
-```
-</details>
+> [!tip]- 提示
+> ```cpp
+> struct my_thread_pool {
+>     // 线程池内部：队列 + 工作线程 + mutex + condition_variable
+>     std::vector<std::thread> workers_;
+>     std::queue<std::function<void()>> tasks_;
+>     std::mutex mtx_;
+>     std::condition_variable cv_;
+>     bool stop_ = false;
+>
+>     explicit my_thread_pool(int n); // 启动 n 个线程
+>     ~my_thread_pool();              // 优雅关闭
+>
+>     auto get_scheduler();           // 返回一个 scheduler 对象
+> };
+> ```
+>
+> Scheduler 的 `schedule()` 方法返回一个 sender，该 sender 的 `connect` 将实际工作入队，`start` 只是标记开始（或者两者合一）。线程池的工作线程从队列中取出任务执行，完成后调 `set_value()`。
+>
+> `tag_invoke` 签名：
+> ```cpp
+> friend auto tag_invoke(stdexec::schedule_t, my_scheduler sched);
+> ```
 
 ---
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案 (3.1 基础)
+> ```cpp
+> #include <stdexec/execution.hpp>
+> #include <iostream>
+> #include <string>
+> 
+> int main() {
+>     // 第一步：模拟获取用户 ID
+>     auto step1 = stdexec::just(42);  // user_id = 42
+> 
+>     // 第二步：用 let_value 链接——根据 user_id 获取用户名
+>     auto pipeline = step1
+>         | stdexec::let_value([](int user_id) {
+>             // 模拟第二步异步操作：根据 ID 查询用户名
+>             // let_value 的回调必须返回一个新的 sender
+>             std::string name = "user_" + std::to_string(user_id);
+>             return stdexec::just(std::make_pair(user_id, name));
+>           });
+> 
+>     // 执行并获取结果
+>     auto [result] = stdexec::sync_wait(pipeline).value();
+> 
+>     std::cout << "User ID: " << result.first
+>               << ", Name: " << result.second << std::endl;
+> }
+> ```
+> 
+> **关键要点**：
+> - `let_value` 类似 `flatMap`：回调必须返回一个新的 sender
+> - `just(value)` 创建立即完成的 sender，携带给定值
+> - `sync_wait` 阻塞当前线程直到 sender 完成，返回 `std::optional<std::tuple<...>>`
+> - **管道惰性**：`pipeline` 在 `sync_wait` 之前不做任何事
+
+> [!tip]- 练习 2 参考答案 (3.2 中级)
+> `with_timeout` 组合器实现——使用独立线程做超时检测：
+> 
+> ```cpp
+> #include <stdexec/execution.hpp>
+> #include <thread>
+> #include <chrono>
+> #include <iostream>
+> #include <atomic>
+> 
+> using namespace std::chrono_literals;
+> 
+> // ------------------------------------------------------------
+> // 自定义 sender：包装另一个 sender，添加超时逻辑
+> // 简化版——完整实现需处理 connect/start 协议
+> // ------------------------------------------------------------
+> 
+> // 方法：在独立线程中同时运行 sender 和超时定时器，
+> // 以先到者为准
+> template<typename Sender, typename Fallback>
+> auto with_timeout(Sender&& sender,
+>                   std::chrono::milliseconds timeout,
+>                   Fallback&& fallback) {
+>     // 使用 stdexec 的 upon_error 和 let_value 组合超时逻辑
+>     // 简化实现：用 std::thread + atomic 标志实现超时
+> 
+>     // 实际架构（概念性）：
+>     // 1. 创建 stop_source
+>     // 2. 启动超时检测线程
+>     // 3. 在超时检测线程中 sleep(timeout)，超时后 request_stop()
+>     // 4. sender 完成时取消超时检测线程
+> 
+>     // 这里提供概念性实现，因为完整的 sender 类型实现较复杂
+>     return sender;  // placeholder
+> }
+> 
+> // --- 简化概念演示：用 stdexec 内置机制 ---
+> int main() {
+>     // 场景：正常完成的 sender
+>     auto fast_work = stdexec::schedule(stdexec::run_loop{}.get_scheduler())
+>                    | stdexec::then([] { return 42; });
+> 
+>     auto [result] = stdexec::sync_wait(fast_work).value();
+>     std::cout << "Fast result: " << result << "\n";  // 42
+> 
+>     // 超时实现的核心思路（伪代码）：
+>     //
+>     // using namespace stdexec;
+>     //
+>     // auto with_timeout = [](auto sender, auto duration, auto fallback) {
+>     //     auto stop = std::make_shared<std::stop_source>();
+>     //
+>     //     // 超时检测线程
+>     //     std::thread([stop, duration] {
+>     //         std::this_thread::sleep_for(duration);
+>     //         stop->request_stop();
+>     //     }).detach();
+>     //
+>     //     return sender
+>     //         | let_value([fallback](auto val) {
+>     //             return just(val);
+>     //           })
+>     //         | let_error([fallback](auto) {
+>     //             return just(fallback);
+>     //           });
+>     // };
+>     //
+>     // auto pipeline = with_timeout(slow_sender, 500ms, -1);
+>     // auto [result] = sync_wait(pipeline).value();
+> }
+> ```
+> 
+> **超时实现的设计要点**：
+> 
+> 由于 P2300 的 sender/receiver 协议要求完整的 `connect`/`start` 实现，一个完整的 `with_timeout` 组合器需要定义自定义 sender 类型。概念实现的关键组件：
+> 
+> 1. **独立超时线程**：`std::thread` + `std::this_thread::sleep_for` 作为定时器
+> 2. **取消机制**：`std::stop_source` / `std::stop_token` 协调 sender 和超时线程
+> 3. **操作状态共享**：`std::atomic<bool>` 或 `std::mutex` + 标志位，确保 winner-takes-all
+> 4. **Receiver 完成信道**：`set_value(fallback)` 在超时时调用，`set_value(result)` 在 sender 完成时调用
+> 5. **资源安全**：确保在任一结果产生后清理超时线程和 sender 状态
+> 
+> **简化版（概念验证）**：
+> ```cpp
+> // 用 condition_variable 实现的超时包装器（非 sender 形式）
+> template<typename F>
+> auto run_with_timeout(F&& work, std::chrono::milliseconds timeout, auto fallback) {
+>     std::mutex mtx;
+>     std::condition_variable cv;
+>     bool done = false;
+>     decltype(work()) result = fallback;
+> 
+>     std::thread worker([&] {
+>         auto res = work();
+>         std::lock_guard lk(mtx);
+>         if (!done) {
+>             result = res;
+>             done = true;
+>             cv.notify_one();
+>         }
+>     });
+> 
+>     std::unique_lock lk(mtx);
+>     if (!cv.wait_for(lk, timeout, [&] { return done; })) {
+>         done = true;  // 超时：标记为 done，worker 完成后自行清理
+>         worker.detach();
+>         return fallback;
+>     }
+>     worker.join();
+>     return result;
+> }
+> ```
+
+> [!tip]- 练习 3 参考答案 (3.3 挑战)
+> 自定义线程池 Scheduler——实现满足 P2300 `scheduler` 概念的类型：
+> 
+> ```cpp
+> #include <stdexec/execution.hpp>
+> #include <thread>
+> #include <vector>
+> #include <queue>
+> #include <mutex>
+> #include <condition_variable>
+> #include <functional>
+> #include <iostream>
+> #include <cassert>
+> 
+> // ============================================================
+> // 自定义线程池
+> // ============================================================
+> class my_thread_pool {
+> public:
+>     explicit my_thread_pool(int num_threads) {
+>         for (int i = 0; i < num_threads; ++i) {
+>             workers_.emplace_back([this] {
+>                 while (true) {
+>                     std::function<void()> task;
+>                     {
+>                         std::unique_lock lk(mtx_);
+>                         cv_.wait(lk, [this] {
+>                             return stop_ || !tasks_.empty();
+>                         });
+>                         if (stop_ && tasks_.empty()) return;
+>                         task = std::move(tasks_.front());
+>                         tasks_.pop();
+>                     }
+>                     task();  // 执行任务
+>                 }
+>             });
+>         }
+>     }
+> 
+>     ~my_thread_pool() {
+>         {
+>             std::lock_guard lk(mtx_);
+>             stop_ = true;
+>         }
+>         cv_.notify_all();
+>         for (auto& w : workers_)
+>             if (w.joinable()) w.join();
+>     }
+> 
+>     // 返回一个 scheduler 对象
+>     auto get_scheduler();
+> 
+> private:
+>     friend class my_scheduler;
+> 
+>     void enqueue(std::function<void()> task) {
+>         {
+>             std::lock_guard lk(mtx_);
+>             tasks_.push(std::move(task));
+>         }
+>         cv_.notify_one();
+>     }
+> 
+>     std::vector<std::thread> workers_;
+>     std::queue<std::function<void()>> tasks_;
+>     std::mutex mtx_;
+>     std::condition_variable cv_;
+>     bool stop_ = false;
+> };
+> 
+> // ============================================================
+> // Scheduler 类型
+> // ============================================================
+> class my_scheduler {
+>     my_thread_pool* pool_;
+> 
+> public:
+>     explicit my_scheduler(my_thread_pool* pool) : pool_(pool) {}
+> 
+>     // schedule() 返回一个 sender——当 connect+start 后，
+>     // 该 sender 将在线程池中执行工作
+>     friend auto tag_invoke(stdexec::schedule_t, my_scheduler sched) {
+>         // 返回一个 sender：当 start 时，在线程池中提交并完成
+>         struct schedule_sender {
+>             my_thread_pool* pool;
+> 
+>             // connect：将 sender 和 receiver 绑定为 operation_state
+>             friend auto tag_invoke(stdexec::connect_t,
+>                                    schedule_sender snd,
+>                                    auto recv) {
+>                 struct operation {
+>                     my_thread_pool* pool;
+>                     std::remove_reference_t<decltype(recv)> receiver;
+> 
+>                     void start() & noexcept {
+>                         // 将工作提交到线程池
+>                         // 当线程池执行此任务时，调用 set_value
+>                         pool->enqueue([this] {
+>                             stdexec::set_value(std::move(receiver));
+>                         });
+>                     }
+>                 };
+>                 return operation{snd.pool, std::move(recv)};
+>             }
+>         };
+> 
+>         return schedule_sender{sched.pool_};
+>     }
+> 
+>     // 比较两个 scheduler（required by scheduler concept）
+>     friend bool operator==(my_scheduler a, my_scheduler b) noexcept {
+>         return a.pool_ == b.pool_;
+>     }
+>     friend bool operator!=(my_scheduler a, my_scheduler b) noexcept {
+>         return !(a == b);
+>     }
+> };
+> 
+> auto my_thread_pool::get_scheduler() {
+>     return my_scheduler{this};
+> }
+> 
+> // ============================================================
+> // 测试
+> // ============================================================
+> int main() {
+>     my_thread_pool pool{4};
+>     auto sched = pool.get_scheduler();
+> 
+>     // 使用 schedule(sched) 启动工作
+>     auto work = stdexec::schedule(sched)
+>               | stdexec::then([] {
+>                     std::cout << "[thread " << std::this_thread::get_id()
+>                               << "] hello from thread pool\n";
+>                     return 42;
+>                  })
+>               | stdexec::then([](int x) {
+>                     return x * 2;
+>                  });
+> 
+>     auto [result] = stdexec::sync_wait(work).value();
+>     std::cout << "Result: " << result << "\n";  // 84
+> }
+> ```
+> 
+> **架构设计详解**：
+> 
+> | 组件 | 职责 |
+> |------|------|
+> | `my_thread_pool` | 线程池：worker 线程 + 任务队列 + cv 通知 |
+> | `my_scheduler` | 轻量句柄，持有线程池指针，实现 `schedule()` |
+> | `schedule_sender` | schedule() 返回的 sender：描述"在线程池中执行" |
+> | `operation` | connect 的结果：持有 receiver 引用，`start()` 时将工作入队 |
+> 
+> **P2300 协议关键点**：
+> 
+> - `tag_invoke` 用于自定义类型发现 `schedule` 和 `connect`——这是 P2300 的扩展机制
+> - **Sender**：只描述工作，不做任何事——`schedule_sender` 只是一个包含线程池指针的 struct
+> - **OperationState**：`connect(sender, receiver)` 的返回值，持有 receiver
+> - **`start()`**：真正将工作提交到线程池——此时异步操作才开始
+> - **`set_value(receiver)`**：在线程池线程中调用，完成 sender 管道
+> - 必须实现 `operator==`/`!=` 以满足 `scheduler` 概念
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 常见陷阱
 

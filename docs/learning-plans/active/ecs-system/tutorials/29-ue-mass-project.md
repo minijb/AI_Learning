@@ -1078,6 +1078,600 @@ void UCrowdPerformanceMonitor::Execute(
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // ZoneGraphMovementProcessor.h
+> #pragma once
+> #include "MassProcessor.h"
+> #include "ZoneGraphMovementProcessor.generated.h"
+>
+> UCLASS()
+> class UZoneGraphMovementProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UZoneGraphMovementProcessor()
+>     {
+>         bAutoRegisterWithProcessingPhases = true;
+>         ExecutionOrder.ExecuteInGroup =
+>             UE::Mass::ProcessorGroupNames::Movement;
+>         ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+>     }
+>
+>     // 期望移动速度
+>     UPROPERTY(EditAnywhere, Category = "Movement")
+>     float WalkingSpeed = 150.0f;  // cm/s
+>
+>     // 到达路径点判距阈值
+>     UPROPERTY(EditAnywhere, Category = "Movement")
+>     float ArrivalTolerance = 100.0f;  // cm
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery PathFollowQuery;
+> };
+> ```
+>
+> ```cpp
+> // ZoneGraphMovementProcessor.cpp
+> #include "ZoneGraphMovementProcessor.h"
+> #include "CrowdProjectFragments.h"
+> #include "MassCommonFragments.h"
+> #include "MassMovementFragments.h"
+> #include "ZoneGraphSubsystem.h"
+> #include "MassNavigationFragments.h"
+> #include "MassEntityManager.h"
+> #include "MassExecutionContext.h"
+>
+> void UZoneGraphMovementProcessor::ConfigureQueries()
+> {
+>     // 需要 ZoneGraph 路径 Fragment + Transform + 移动参数
+>     PathFollowQuery.AddRequirement<FMassZoneGraphPathFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PathFollowQuery.AddRequirement<FMassZoneGraphLaneLocationFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PathFollowQuery.AddRequirement<FTransformFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PathFollowQuery.AddRequirement<FCrowdMovementFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PathFollowQuery.AddTagRequirement<FCrowdNavigationActiveTag>(
+>         EMassFragmentPresence::All);
+>     PathFollowQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UZoneGraphMovementProcessor::Execute(
+>     FMassEntityManager& Mgr, FMassExecutionContext& Ctx)
+> {
+>     const UZoneGraphSubsystem* ZoneGraph =
+>         Ctx.GetSubsystem<UZoneGraphSubsystem>();
+>     if (!ZoneGraph) return;
+>
+>     const float DeltaTime = Ctx.GetDeltaTimeSeconds();
+>
+>     PathFollowQuery.ForEachEntityChunk(Mgr, Ctx,
+>         [this, ZoneGraph, DeltaTime](FMassExecutionContext& Chunk)
+>         {
+>             auto Paths = Chunk.GetMutableFragmentView<
+>                 FMassZoneGraphPathFragment>();
+>             auto Lanes = Chunk.GetMutableFragmentView<
+>                 FMassZoneGraphLaneLocationFragment>();
+>             auto Transforms = Chunk.GetMutableFragmentView<
+>                 FTransformFragment>();
+>             auto Movements = Chunk.GetMutableFragmentView<
+>                 FCrowdMovementFragment>();
+>
+>             for (int32 i = 0; i < Chunk.GetNumEntities(); ++i)
+>             {
+>                 auto& Path = Paths[i];
+>                 auto& Lane = Lanes[i];
+>                 FTransform& T = Transforms[i].GetMutableTransform();
+>                 auto& Move = Movements[i];
+>                 const FVector CurrentPos = T.GetLocation();
+>
+>                 // 1. 如果没有路径或已到达终点，请求新路径
+>                 if (Path.PathPoints.IsEmpty() ||
+>                     Path.CurrentPointIndex >= Path.PathPoints.Num())
+>                 {
+>                     // 已到达终点——在实际项目中从路径请求系统获取下一路径
+>                     continue;
+>                 }
+>
+>                 // 2. 获取当前目标点
+>                 const FVector TargetPoint =
+>                     Path.PathPoints[Path.CurrentPointIndex];
+>
+>                 // 3. 检查是否到达当前目标点
+>                 const float DistToTarget =
+>                     FVector::Dist(CurrentPos, TargetPoint);
+>
+>                 if (DistToTarget <= ArrivalTolerance)
+>                 {
+>                     // 到达当前点，前进到下一个路径点
+>                     Path.CurrentPointIndex++;
+>                     // 已到达终点则不继续移动
+>                     if (Path.CurrentPointIndex >= Path.PathPoints.Num())
+>                         continue;
+>                 }
+>
+>                 // 4. 计算朝目标点的移动方向
+>                 const FVector CurrentTarget =
+>                     Path.PathPoints[Path.CurrentPointIndex];
+>                 const FVector MoveDirection =
+>                     (CurrentTarget - CurrentPos).GetSafeNormal();
+>
+>                 // 5. 沿 ZoneGraph 车道移动——结合 Lane 位置进行平滑
+>                 // 实际项目中用 ZoneGraphSubsystem 查询车道切线
+>                 const FVector NewPos = CurrentPos +
+>                     MoveDirection * WalkingSpeed * DeltaTime;
+>                 T.SetLocation(NewPos);
+>
+>                 // 6. 更新朝向（面对移动方向）
+>                 if (!MoveDirection.IsNearlyZero())
+>                 {
+>                     const FRotator NewRotation =
+>                         MoveDirection.Rotation();
+>                     T.SetRotation(FQuat::Slerp(
+>                         T.GetRotation(),
+>                         NewRotation.Quaternion(),
+>                         FMath::Min(1.0f,
+>                             Move.RotationSpeed * DeltaTime / 90.0f)));
+>                 }
+>
+>                 // 7. 更新车道位置
+>                 ZoneGraph->FindNearestLane(NewPos, Lane);
+>
+>                 // 8. 更新当前速度
+>                 Move.CurrentSpeed = WalkingSpeed;
+>             }
+>         });
+> }
+> ```
+>
+> **Trait 配置——在 Spawner 中为实体添加 ZoneGraph Fragment：**
+>
+> ```cpp
+> // CrowdZoneGraphTrait.h
+> UCLASS()
+> class UCrowdZoneGraphTrait : public UMassEntityTraitBase
+> {
+>     GENERATED_BODY()
+> public:
+>     virtual void BuildTemplate(FMassEntityTemplateBuildContext& BuildContext,
+>                                const UWorld& World) const override
+>     {
+>         // 添加 ZoneGraph 路径 Fragment（为空，后续由路径请求系统填充）
+>         BuildContext.AddFragment<FMassZoneGraphPathFragment>();
+>         BuildContext.AddFragment<FMassZoneGraphLaneLocationFragment>();
+>
+>         // 标记为导航激活实体
+>         BuildContext.AddTag<FCrowdNavigationActiveTag>();
+>     }
+> };
+> ```
+>
+> **验证步骤**：在 ZoneGraph 编辑器中绘制闭合步道回路 → 在 Spawner 的 `MassEntityConfig` 中添加 `UCrowdZoneGraphTrait` → 运行游戏 → 观察行人是否沿步道行走而非随机漂移。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // TrafficLightFragments.h
+> #pragma once
+> #include "MassEntityTypes.h"
+> #include "TrafficLightFragments.generated.h"
+>
+> // 红绿灯状态 Fragment（挂载在 TrafficLight 实体上）
+> USTRUCT()
+> struct FTrafficLightFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     // 0=Green, 1=Yellow, 2=Red
+>     UPROPERTY() int32 CurrentPhase = 0;
+>
+>     // 当前相位已经过的时间（秒）
+>     UPROPERTY() float PhaseTime = 0.0f;
+>
+>     // 各相位持续时间（秒）
+>     UPROPERTY() float GreenDuration = 30.0f;
+>     UPROPERTY() float YellowDuration = 3.0f;
+>     UPROPERTY() float RedDuration = 30.0f;
+>
+>     // 红绿灯影响范围（cm）
+>     UPROPERTY() float InfluenceRadius = 3000.0f;
+> };
+> ```
+>
+> ```cpp
+> // TrafficLightProcessor.h
+> #pragma once
+> #include "MassProcessor.h"
+> #include "TrafficLightProcessor.generated.h"
+>
+> UCLASS()
+> class UTrafficLightProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UTrafficLightProcessor()
+>     {
+>         bAutoRegisterWithProcessingPhases = true;
+>         // 在导航 Processor 之后、移动 Processor 之前执行
+>         ExecutionOrder.ExecuteInGroup =
+>             UE::Mass::ProcessorGroupNames::Behavior;
+>         ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+>     }
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+>
+> private:
+>     FMassEntityQuery TrafficLightQuery;   // 更新红绿灯相位
+>     FMassEntityQuery CrowdQuery;          // 应用红绿灯到行人
+> };
+> ```
+>
+> ```cpp
+> // TrafficLightProcessor.cpp (核心实现)
+> void UTrafficLightProcessor::ConfigureQueries()
+> {
+>     // 查询 1：所有红绿灯实体
+>     TrafficLightQuery.AddRequirement<FTrafficLightFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     TrafficLightQuery.AddRequirement<FTransformFragment>(
+>         EMassFragmentAccess::ReadOnly);
+>     TrafficLightQuery.RegisterWithProcessor(*this);
+>
+>     // 查询 2：所有有导航数据的行人实体
+>     CrowdQuery.AddRequirement<FTransformFragment>(
+>         EMassFragmentAccess::ReadOnly);
+>     CrowdQuery.AddRequirement<FCrowdMovementFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     CrowdQuery.AddRequirement<FMassZoneGraphLaneLocationFragment>(
+>         EMassFragmentAccess::ReadOnly);
+>     CrowdQuery.AddTagRequirement<FCrowdPedestrianTag>(
+>         EMassFragmentPresence::All);
+>     CrowdQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UTrafficLightProcessor::Execute(
+>     FMassEntityManager& Mgr, FMassExecutionContext& Ctx)
+> {
+>     const float DeltaTime = Ctx.GetDeltaTimeSeconds();
+>
+>     // ── 第一遍：更新所有红绿灯的相位 ──
+>     TArray<FTransform> LightTransforms;
+>     TArray<FTrafficLightFragment> LightStates;
+>
+>     TrafficLightQuery.ForEachEntityChunk(Mgr, Ctx,
+>         [DeltaTime, &LightTransforms, &LightStates]
+>         (FMassExecutionContext& Chunk)
+>         {
+>             auto Lights = Chunk.GetMutableFragmentView<
+>                 FTrafficLightFragment>();
+>             const auto Transforms =
+>                 Chunk.GetFragmentView<FTransformFragment>();
+>
+>             for (int32 i = 0; i < Chunk.GetNumEntities(); ++i)
+>             {
+>                 auto& L = Lights[i];
+>                 L.PhaseTime += DeltaTime;
+>
+>                 // 相位切换逻辑
+>                 switch (L.CurrentPhase)
+>                 {
+>                 case 0: // Green → Yellow
+>                     if (L.PhaseTime >= L.GreenDuration)
+>                     {
+>                         L.CurrentPhase = 1; L.PhaseTime = 0.0f;
+>                     }
+>                     break;
+>                 case 1: // Yellow → Red
+>                     if (L.PhaseTime >= L.YellowDuration)
+>                     {
+>                         L.CurrentPhase = 2; L.PhaseTime = 0.0f;
+>                     }
+>                     break;
+>                 case 2: // Red → Green
+>                     if (L.PhaseTime >= L.RedDuration)
+>                     {
+>                         L.CurrentPhase = 0; L.PhaseTime = 0.0f;
+>                     }
+>                     break;
+>                 }
+>
+>                 // 收集红绿灯状态供第二遍使用
+>                 LightTransforms.Add(
+>                     Transforms[i].GetTransform());
+>                 LightStates.Add(L);
+>             }
+>         });
+>
+>     if (LightStates.IsEmpty()) return;
+>
+>     // ── 第二遍：将红绿灯状态应用到行人 ──
+>     CrowdQuery.ForEachEntityChunk(Mgr, Ctx,
+>         [&LightTransforms, &LightStates]
+>         (FMassExecutionContext& Chunk)
+>         {
+>             const auto Transforms =
+>                 Chunk.GetFragmentView<FTransformFragment>();
+>             const auto Lanes = Chunk.GetFragmentView<
+>                 FMassZoneGraphLaneLocationFragment>();
+>             auto Movements = Chunk.GetMutableFragmentView<
+>                 FCrowdMovementFragment>();
+>
+>             for (int32 i = 0; i < Chunk.GetNumEntities(); ++i)
+>             {
+>                 const FVector PedPos =
+>                     Transforms[i].GetTransform().GetLocation();
+>                 auto& Move = Movements[i];
+>
+>                 // 恢复默认速度（假设上一帧可能被减速）
+>                 Move.DesiredSpeed = Move.MaxSpeed;
+>
+>                 // 检查每个红绿灯
+>                 for (int32 j = 0; j < LightStates.Num(); ++j)
+>                 {
+>                     const auto& L = LightStates[j];
+>                     const FVector LightPos =
+>                         LightTransforms[j].GetLocation();
+>
+>                     const float Dist = FVector::Dist(
+>                         PedPos, LightPos);
+>
+>                     // 在红绿灯影响范围内
+>                     if (Dist <= L.InfluenceRadius)
+>                     {
+>                         // 检查行人是否在 Crosswalk 车道上
+>                         // （实际项目中通过 Lane 的 Tags 判断）
+>                         const FZoneGraphTag CrosswalkTag =
+>                             ZoneGraphTag::Crosswalk;
+>                         const bool bIsOnCrosswalk =
+>                             Lanes[i].Tags.Contains(CrosswalkTag);
+>
+>                         if (bIsOnCrosswalk)
+>                         {
+>                             switch (L.CurrentPhase)
+>                             {
+>                             case 0: // Green——正常通行
+>                                 break; // 保持 DesiredSpeed
+>                             case 1: // Yellow——减速
+>                                 Move.DesiredSpeed =
+>                                     FMath::Max(0.0f,
+>                                         Move.MaxSpeed * 0.3f);
+>                                 break;
+>                             case 2: // Red——停止
+>                                 Move.DesiredSpeed = 0.0f;
+>                                 break;
+>                             }
+>                         }
+>                     }
+>                 }
+>             }
+>         });
+> }
+> ```
+>
+> **关键设计决策：**
+> - 红绿灯影响只作用于斑马线上的行人（通过 `ZoneGraphTag::Crosswalk` 判断），不阻碍旁边车道的行人
+> - `DesiredSpeed = 0` 而非直接改 `CurrentSpeed`——让 Movement Processor 通过加速度平滑减速，避免瞬时停止
+> - Yellow 相位减速到 30% 而非立即停止，模拟"加速通过黄灯"的现实行为
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // CrowdDensityManager.h
+> #pragma once
+> #include "CoreMinimal.h"
+> #include "GameFramework/Actor.h"
+> #include "CrowdDensityManager.generated.h"
+>
+> UCLASS()
+> class UCrowdDensityManager : public UObject
+> {
+>     GENERATED_BODY()
+> public:
+>     // 一天中的时间（0-24 小时，浮点数）
+>     float GetCurrentTimeOfDay() const { return CurrentTime; }
+>
+>     // 根据当前时间计算目标人群密度
+>     float CalculateTargetDensity() const;
+>
+>     // 更新当前密度（线性插值到目标值，防止突变）
+>     void UpdateDensity(float DeltaTime, FCrowdGlobalSharedFragment& Config);
+>
+>     // 设置当前游戏时间（由外部时间系统调用）
+>     void SetTimeOfDay(float Hour) { CurrentTime = Hour; }
+>
+> private:
+>     float CurrentTime = 12.0f;   // 默认中午 12:00
+>     float CurrentDensity = 4.0f; // 当前实际密度
+>     float TargetDensity = 4.0f;  // 目标密度
+> };
+> ```
+>
+> ```cpp
+> // CrowdDensityManager.cpp
+> #include "CrowdDensityManager.h"
+> #include "CrowdProjectFragments.h"
+> #include "MassSpawner.h"
+>
+> float UCrowdDensityManager::CalculateTargetDensity() const
+> {
+>     const float Hour = CurrentTime;
+>
+>     // 凌晨 2:00 - 5:00：最低密度
+>     if (Hour >= 2.0f && Hour < 5.0f)
+>         return 1.0f;
+>
+>     // 早高峰 8:00 - 9:00：最高密度
+>     if (Hour >= 8.0f && Hour < 9.0f)
+>         return 8.0f;
+>
+>     // 晚高峰 17:00 - 18:00：最高密度
+>     if (Hour >= 17.0f && Hour < 18.0f)
+>         return 8.0f;
+>
+>     // 过渡时段：线性插值
+>     // 5:00→8:00：密度从 1.0 渐变到 8.0
+>     if (Hour >= 5.0f && Hour < 8.0f)
+>     {
+>         const float T = (Hour - 5.0f) / 3.0f;
+>         return FMath::Lerp(1.0f, 8.0f, T);
+>     }
+>
+>     // 9:00→17:00：白天中等密度
+>     if (Hour >= 9.0f && Hour < 17.0f)
+>     {
+>         const float T = (Hour - 9.0f) / 8.0f;
+>         return FMath::Lerp(8.0f, 5.0f, T);
+>     }
+>
+>     // 18:00→2:00(+1天)：夜晚逐渐降低
+>     if (Hour >= 18.0f)
+>     {
+>         const float T = (Hour - 18.0f) / 8.0f;
+>         return FMath::Lerp(5.0f, 1.0f, FMath::Min(T, 1.0f));
+>     }
+>
+>     // 0:00→2:00：继续降至最低
+>     return FMath::Lerp(2.0f, 1.0f, Hour / 2.0f);
+> }
+>
+> void UCrowdDensityManager::UpdateDensity(
+>     float DeltaTime, FCrowdGlobalSharedFragment& Config)
+> {
+>     TargetDensity = CalculateTargetDensity();
+>
+>     // 缓慢过渡到目标密度——5 分钟内从凌晨过渡到早高峰
+>     // 32 个单位变化在 300 秒内 = 约 0.1 单位/秒的过渡速度
+>     constexpr float DensityChangeSpeed = 0.1f; // 密度单位/秒
+>     CurrentDensity = FMath::FInterpConstantTo(
+>         CurrentDensity, TargetDensity,
+>         DeltaTime, DensityChangeSpeed);
+>
+>     Config.MaxCrowdDensity = CurrentDensity;
+> }
+>
+> // ── DensityTimeProcessor（Mass Processor）──
+> UCLASS()
+> class UDensityTimeProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UDensityTimeProcessor()
+>     {
+>         bAutoRegisterWithProcessingPhases = true;
+>         ExecutionOrder.ExecuteInGroup =
+>             UE::Mass::ProcessorGroupNames::PrePhysics;
+>         ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+>     }
+>
+>     // 时间流逝速度（1.0 = 实时，3600.0 = 1小时/秒）
+>     UPROPERTY(EditAnywhere, Category = "Time")
+>     float TimeScale = 600.0f; // 10分钟 = 1秒，方便测试日/夜循环
+>
+> protected:
+>     virtual void ConfigureQueries() override
+>     {
+>         // 读取并修改全局 Shared Fragment（密度配置）
+>         EntityQuery.AddRequirement<FCrowdGlobalSharedFragment>(
+>             EMassFragmentAccess::ReadWrite);
+>         EntityQuery.RegisterWithProcessor(*this);
+>     }
+>
+>     virtual void Execute(FMassEntityManager& Mgr,
+>                          FMassExecutionContext& Ctx) override
+>     {
+>         const float DeltaTime = Ctx.GetDeltaTimeSeconds();
+>
+>         EntityQuery.ForEachEntityChunk(Mgr, Ctx,
+>             [this, DeltaTime](FMassExecutionContext& Chunk)
+>             {
+>                 auto Configs = Chunk.GetMutableFragmentView<
+>                     FCrowdGlobalSharedFragment>();
+>
+>                 if (Configs.Num() > 0)
+>                 {
+>                     auto& Config = Configs[0];
+>                     TimeOfDay += DeltaTime * TimeScale;
+>                     if (TimeOfDay >= 24.0f) TimeOfDay -= 24.0f;
+>
+>                     DensityManager.SetTimeOfDay(TimeOfDay);
+>                     DensityManager.UpdateDensity(DeltaTime, Config);
+>
+>                     // HUD 输出（实际项目用 ScreenDebugMessage 或 UMG）
+>                     if (GEngine)
+>                     {
+>                         GEngine->AddOnScreenDebugMessage(
+>                             -1, 0.0f, FColor::Cyan,
+>                             FString::Printf(
+>                                 TEXT("Time: %02d:%02d | "
+>                                      "Density: %.1f | "
+>                                      "Active: %d"),
+>                                 (int32)TimeOfDay,
+>                                 (int32)((TimeOfDay -
+>                                     (int32)TimeOfDay) * 60),
+>                                 DensityManager
+>                                     .CalculateTargetDensity(),
+>                                 Mgr.GetNumEntities()));
+>                     }
+>                 }
+>             });
+>     }
+>
+> private:
+>     UCrowdDensityManager DensityManager;
+>     float TimeOfDay = 8.0f; // 从早上 8:00 开始
+> };
+> ```
+>
+> **Spawner 集成关键点：**
+>
+> ```cpp
+> // 在 Spawner 的 Tick 中根据密度动态调整实体数
+> void ACrowdSpawner::Tick(float DeltaTime)
+> {
+>     Super::Tick(DeltaTime);
+>
+>     const float TargetDensity =
+>         DensityManager.CalculateTargetDensity();
+>     const int32 TargetCount =
+>         FMath::CeilToInt(TargetDensity * SpawnAreaSize);
+>     const int32 CurrentCount =
+>         EntityManager->GetNumEntities();
+>
+>     if (CurrentCount < TargetCount)
+>     {
+>         // 生成差额实体到 ZoneGraph 入口
+>         for (int32 i = 0;
+>              i < TargetCount - CurrentCount && i < MaxSpawnPerFrame;
+>              ++i)
+>         {
+>             SpawnAtRandomZoneGraphEntry();
+>         }
+>     }
+>     else if (CurrentCount > TargetCount)
+>     {
+>         // 销毁超出实体（优先选择离玩家最远的 Low LOD 实体）
+>         TrimEntities(CurrentCount - TargetCount);
+>     }
+> }
+> ```
+>
+> **防卡顿策略：**
+> - `MaxSpawnPerFrame` 限制每帧最大生成数（如 20 个），避免帧率尖刺
+> - 销毁优先选择 Low LOD 实体——它们在远距离，销毁瞬间不可见
+> - `FInterpConstantTo` 而非 `FMath::Lerp`——确保过渡速度恒定，不受帧率影响
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **City Sample 项目**: Epic Games Launcher → 学习 → City Sample。这是学习 Mass 框架的最佳实践项目，包含完整的行人、车辆和交通系统

@@ -1794,6 +1794,444 @@ cmake --build .
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // MatrixPaletteCache.hpp —— 带脏标记的矩阵调色板缓存
+>
+> struct CachedBone {
+>     Bone* bone;
+>     bool dirty = true;          // 当前帧是否需要重新计算
+>     Mat4 cachedModelMatrix;     // 缓存的模型空间矩阵
+> };
+>
+> class MatrixPaletteCache {
+> public:
+>     void Initialize(Skeleton* skeleton) {
+>         skeleton_ = skeleton;
+>         cachedBones_.resize(skeleton->boneCount);
+>         for (int i = 0; i < skeleton->boneCount; ++i) {
+>             cachedBones_[i].bone = &skeleton->bones[i];
+>         }
+>         InvalidateAll();  // 初始全部脏
+>     }
+>
+>     // 标记某根骨骼的局部变换已改变
+>     void MarkDirty(int boneIndex) {
+>         // 脏标记沿层级向下传播：父骨骼脏 → 所有子孙也脏
+>         MarkDirtyRecursive(boneIndex);
+>     }
+>
+>     // 计算所有需要更新的骨骼矩阵
+>     void ComputeMatrices(const Pose& currentPose,
+>                          Mat4 outPalette[MAX_BONES]) {
+>         for (int i = 0; i < skeleton_->boneCount; ++i) {
+>             ComputeBoneMatrix(i, currentPose);
+>             outPalette[i] = cachedBones_[i].cachedModelMatrix;
+>         }
+>     }
+>
+> private:
+>     void MarkDirtyRecursive(int boneIndex) {
+>         if (boneIndex < 0 || boneIndex >= skeleton_->boneCount) return;
+>         if (cachedBones_[boneIndex].dirty) return;  // 已标记，剪枝
+>
+>         cachedBones_[boneIndex].dirty = true;
+>         dirtyCount_++;
+>
+>         // 递归标记所有子骨骼为脏
+>         for (int i = 0; i < skeleton_->boneCount; ++i) {
+>             if (skeleton_->bones[i].parentIndex == boneIndex) {
+>                 MarkDirtyRecursive(i);
+>             }
+>         }
+>     }
+>
+>     void ComputeBoneMatrix(int index, const Pose& pose) {
+>         auto& cb = cachedBones_[index];
+>         if (!cb.dirty) return;  // 缓存命中——无需重新计算
+>
+>         // 计算局部变换矩阵
+>         Mat4 local = Mat4::FromTRS(
+>             pose.positions[index],
+>             pose.rotations[index],
+>             pose.scales[index]
+>         );
+>
+>         // 层级累积：M_model = M_local * M_parent
+>         int parent = skeleton_->bones[index].parentIndex;
+>         if (parent == -1) {
+>             cb.cachedModelMatrix = local;
+>         } else {
+>             // 父骨骼必须先被计算（脏标记保证了这一点）
+>             ComputeBoneMatrix(parent, pose);
+>             cb.cachedModelMatrix =
+>                 local * cachedBones_[parent].cachedModelMatrix;
+>         }
+>
+>         cb.dirty = false;
+>         dirtyCount_--;
+>     }
+>
+>     void InvalidateAll() {
+>         for (auto& cb : cachedBones_) cb.dirty = true;
+>         dirtyCount_ = cachedBones_.size();
+>     }
+>
+>     Skeleton* skeleton_ = nullptr;
+>     std::vector<CachedBone> cachedBones_;
+>     size_t dirtyCount_ = 0;
+> };
+>
+> // 使用示例
+> void AnimateWithCache(Pose& pose, MatrixPaletteCache& cache,
+>                       Mat4 palette[MAX_BONES]) {
+>     // 只有被动画曲线修改过的骨骼才标记为脏
+>     // 假设 AnimationPlayer 知道哪些骨骼被修改
+>     cache.MarkDirty(modifiedBoneIndex);
+>     cache.ComputeMatrices(pose, palette);
+>     // 大部分骨骼命中缓存，无需重新计算
+> }
+> ```
+>
+> **性能分析**：对于100根骨骼的场景，如果每帧只有10根骨骼被动画修改，脏标记机制可避免90%的矩阵乘法。脏标记沿层级传播确保了正确性：父骨骼变化→所有子孙也变——这是由层级矩阵累积公式决定的，`M_child = M_local_child × M_parent`，父变了子矩阵必然变。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // FABRIK.hpp —— Forward And Backward Reaching IK
+>
+> #include <vector>
+> #include <cmath>
+> #include <iostream>
+>
+> struct IKJoint {
+>     float x, y;            // 当前位置
+>     float angleMin;        // 角度下限（弧度，0=无限制）
+>     float angleMax;        // 角度上限
+> };
+>
+> class FABRIKSolver {
+> public:
+>     void SetJoints(const std::vector<IKJoint>& joints) {
+>         joints_ = joints;
+>         // 预计算骨骼长度
+>         boneLengths_.resize(joints_.size() - 1);
+>         for (size_t i = 0; i < boneLengths_.size(); ++i) {
+>             float dx = joints_[i+1].x - joints_[i].x;
+>             float dy = joints_[i+1].y - joints_[i].y;
+>             boneLengths_[i] = std::sqrt(dx*dx + dy*dy);
+>         }
+>     }
+>
+>     // 求解 IK：调整关节位置使末端到达目标
+>     // 返回 true 表示收敛
+>     bool Solve(float targetX, float targetY,
+>                int maxIterations = 20,
+>                float tolerance = 0.01f) {
+>         if (joints_.empty()) return false;
+>
+>         int n = (int)joints_.size();
+>         const IKJoint& endEffector = joints_[n - 1];
+>
+>         // 检查是否已达到目标
+>         float dx = endEffector.x - targetX;
+>         float dy = endEffector.y - targetY;
+>         if (std::sqrt(dx*dx + dy*dy) <= tolerance) return true;
+>
+>         // 检查是否可达
+>         float totalLength = 0;
+>         for (float len : boneLengths_) totalLength += len;
+>         float distToTarget = std::sqrt(
+>             (targetX - joints_[0].x) * (targetX - joints_[0].x) +
+>             (targetY - joints_[0].y) * (targetY - joints_[0].y)
+>         );
+>         if (distToTarget > totalLength) {
+>             // 不可达：拉伸到最大长度方向
+>             for (int i = 0; i < n - 1; ++i) {
+>                 float r = std::sqrt(
+>                     (targetX - joints_[i].x) * (targetX - joints_[i].x) +
+>                     (targetY - joints_[i].y) * (targetY - joints_[i].y)
+>                 );
+>                 float lambda = boneLengths_[i] / r;
+>                 joints_[i+1].x = (1 - lambda) * joints_[i].x
+>                                + lambda * targetX;
+>                 joints_[i+1].y = (1 - lambda) * joints_[i].y
+>                                + lambda * targetY;
+>             }
+>             return false;  // 不可达
+>         }
+>
+>         // FABRIK 迭代
+>         for (int iter = 0; iter < maxIterations; ++iter) {
+>             // ---- Forward Reaching ----
+>             // 将末端关节移到目标
+>             joints_[n - 1].x = targetX;
+>             joints_[n - 1].y = targetY;
+>
+>             // 从末端向根方向逐个调整
+>             for (int i = n - 2; i >= 0; --i) {
+>                 float dx = joints_[i+1].x - joints_[i].x;
+>                 float dy = joints_[i+1].y - joints_[i].y;
+>                 float dist = std::sqrt(dx*dx + dy*dy);
+>                 float lambda = boneLengths_[i] / dist;
+>
+>                 joints_[i].x = joints_[i+1].x - lambda * dx;
+>                 joints_[i].y = joints_[i+1].y - lambda * dy;
+>
+>                 // 关节角度限制
+>                 EnforceAngleLimits(i);
+>             }
+>
+>             // ---- Backward Reaching ----
+>             // 固定根关节位置
+>             float rootX = joints_[0].x;
+>             float rootY = joints_[0].y;
+>
+>             // 从根向末端逐个调整
+>             for (int i = 0; i < n - 1; ++i) {
+>                 float dx = joints_[i+1].x - joints_[i].x;
+>                 float dy = joints_[i+1].y - joints_[i].y;
+>                 float dist = std::sqrt(dx*dx + dy*dy);
+>                 if (dist < 1e-6f) continue;
+>                 float lambda = boneLengths_[i] / dist;
+>
+>                 joints_[i+1].x = joints_[i].x + lambda * dx;
+>                 joints_[i+1].y = joints_[i].y + lambda * dy;
+>
+>                 EnforceAngleLimits(i);
+>             }
+>
+>             // 检查收敛
+>             float ex = joints_[n-1].x - targetX;
+>             float ey = joints_[n-1].y - targetY;
+>             if (std::sqrt(ex*ex + ey*ey) <= tolerance) return true;
+>         }
+>
+>         return false;  // 达到最大迭代次数但未收敛
+>     }
+>
+>     // 可视化输出
+>     void DebugPrint(float targetX, float targetY) const {
+>         std::cout << "Joints: ";
+>         for (size_t i = 0; i < joints_.size(); ++i) {
+>             std::cout << "(" << joints_[i].x << "," << joints_[i].y << ")";
+>             if (i < joints_.size() - 1) std::cout << " -> ";
+>         }
+>         std::cout << "  Target: (" << targetX << "," << targetY << ")\n";
+>     }
+>
+> private:
+>     // 强制关节角度限制（这里简化为方向约束）
+>     void EnforceAngleLimits(int jointIndex) {
+>         auto& j = joints_[jointIndex];
+>         if (j.angleMin == 0 && j.angleMax == 0) return;  // 无限制
+>
+>         // 计算当前骨骼方向
+>         float dx = joints_[jointIndex+1].x - joints_[jointIndex].x;
+>         float dy = joints_[jointIndex+1].y - joints_[jointIndex].y;
+>         float angle = std::atan2(dy, dx);
+>
+>         // 钳制角度
+>         if (angle < j.angleMin || angle > j.angleMax) {
+>             float clamped = std::max(j.angleMin,
+>                                      std::min(j.angleMax, angle));
+>             float len = std::sqrt(dx*dx + dy*dy);
+>             joints_[jointIndex+1].x = joints_[jointIndex].x
+>                                     + std::cos(clamped) * len;
+>             joints_[jointIndex+1].y = joints_[jointIndex].y
+>                                     + std::sin(clamped) * len;
+>         }
+>     }
+>
+>     std::vector<IKJoint> joints_;
+>     std::vector<float> boneLengths_;
+> };
+>
+> // 测试代码（5关节链）
+> void TestFABRIK() {
+>     FABRIKSolver solver;
+>     std::vector<IKJoint> chain = {
+>         {0, 0, 0, 0},           // 根关节（固定）
+>         {1, 0, -3.14f, 3.14f},  // 肩
+>         {2, 0, -2.0f, 0.5f},    // 肘（膝只能单向弯曲）
+>         {3, 0, -2.0f, 0.5f},    // 腕
+>         {4, 0, 0, 0},           // 末端执行器
+>     };
+>     solver.SetJoints(chain);
+>
+>     // 目标位置（不可达远点）
+>     bool ok = solver.Solve(0, 5, 20, 0.01f);
+>     solver.DebugPrint(0, 5);
+>     std::cout << "Converged: " << (ok ? "yes" : "no") << std::endl;
+> }
+> ```
+>
+> **核心思路**：FABRIK 与传统的雅可比矩阵IK不同，它直接操作位置而非角度。Forward阶段从末端向根推进——先把末端放在目标位置，然后依次将每个父关节沿骨骼方向拉近；Backward阶段反向——固定根关节，依次将每个子关节沿骨骼方向推远。两次迭代后末端向目标靠近一点，重复直到收敛。关节角度限制在每次调整后强制施加，防止产生违反关节限定的姿势。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // AnimationCompressor.hpp —— 动画压缩器
+>
+> #include <vector>
+> #include <cmath>
+> #include <cstdint>
+>
+> // 原始关键帧
+> struct RawKeyframe {
+>     float time;
+>     float posX, posY, posZ;
+>     float rotX, rotY, rotZ, rotW;
+>     float sclX, sclY, sclZ;
+> };
+>
+> // 压缩后的关键帧
+> struct CompressedKeyframe {
+>     float time;
+>     int16_t posX, posY, posZ;  // 量化到16位
+>     int16_t rotX, rotY, rotZ, rotW;
+>     int16_t sclX, sclY, sclZ;
+> };
+>
+> class AnimationCompressor {
+> public:
+>     // 曲线精简：移除冗余关键帧
+>     // 如果移除某帧后用线性插值重建的曲线误差 < threshold，则该帧为冗余
+>     static std::vector<RawKeyframe> SimplifyCurve(
+>         const std::vector<RawKeyframe>& input,
+>         float positionThreshold = 0.01f,
+>         float rotationThreshold = 0.001f)  // 四元数分量误差
+>     {
+>         if (input.size() <= 2) return input;
+>
+>         std::vector<RawKeyframe> result;
+>         result.push_back(input.front());  // 保留首帧
+>
+>         size_t lastKept = 0;
+>         for (size_t i = 1; i < input.size() - 1; ++i) {
+>             // 在线性插值重建中，i帧的误差有多大？
+>             float maxPosErr = ComputeInterpolationError(
+>                 input[lastKept], input[i + 1],
+>                 input[i], 'p', positionThreshold);
+>             float maxRotErr = ComputeInterpolationError(
+>                 input[lastKept], input[i + 1],
+>                 input[i], 'r', rotationThreshold);
+>
+>             // 如果任一误差超过阈值，保留该帧
+>             if (maxPosErr > positionThreshold ||
+>                 maxRotErr > rotationThreshold) {
+>                 result.push_back(input[i]);
+>                 lastKept = i;
+>             }
+>         }
+>         result.push_back(input.back());  // 保留尾帧
+>         return result;
+>     }
+>
+>     // 量化：浮点→16位定点
+>     static CompressedKeyframe Quantize(const RawKeyframe& raw,
+>         float posRange = 100.0f)   // 假设模型大小不超过±100
+>     {
+>         CompressedKeyframe c;
+>         c.time = raw.time;
+>
+>         // 位置：映射到 [-range, range] → [-32767, 32767]
+>         c.posX = floatToInt16(raw.posX, posRange);
+>         c.posY = floatToInt16(raw.posY, posRange);
+>         c.posZ = floatToInt16(raw.posZ, posRange);
+>
+>         // 旋转：四元数分量在 [-1, 1] → [-32767, 32767]
+>         c.rotX = floatToInt16(raw.rotX, 1.0f);
+>         c.rotY = floatToInt16(raw.rotY, 1.0f);
+>         c.rotZ = floatToInt16(raw.rotZ, 1.0f);
+>         c.rotW = floatToInt16(raw.rotW, 1.0f);
+>
+>         // 缩放：通常在 [0, 10] 范围
+>         c.sclX = floatToInt16(raw.sclX, 10.0f);
+>         c.sclY = floatToInt16(raw.sclY, 10.0f);
+>         c.sclZ = floatToInt16(raw.sclZ, 10.0f);
+>
+>         return c;
+>     }
+>
+>     // 反量化
+>     static RawKeyframe Dequantize(const CompressedKeyframe& c,
+>         float posRange = 100.0f)
+>     {
+>         RawKeyframe r;
+>         r.time = c.time;
+>         r.posX = int16ToFloat(c.posX, posRange);
+>         r.posY = int16ToFloat(c.posY, posRange);
+>         r.posZ = int16ToFloat(c.posZ, posRange);
+>         r.rotX = int16ToFloat(c.rotX, 1.0f);
+>         r.rotY = int16ToFloat(c.rotY, 1.0f);
+>         r.rotZ = int16ToFloat(c.rotZ, 1.0f);
+>         r.rotW = int16ToFloat(c.rotW, 1.0f);
+>         r.sclX = int16ToFloat(c.sclX, 10.0f);
+>         r.sclY = int16ToFloat(c.sclY, 10.0f);
+>         r.sclZ = int16ToFloat(c.sclZ, 10.0f);
+>         return r;
+>     }
+>
+>     // 压缩比计算
+>     static float CompressionRatio(
+>         const std::vector<RawKeyframe>& original,
+>         const std::vector<CompressedKeyframe>& compressed)
+>     {
+>         float originalSize = original.size() * sizeof(RawKeyframe);
+>         float compSize = compressed.size() * sizeof(CompressedKeyframe);
+>         return originalSize / compSize;
+>     }
+>
+> private:
+>     static float ComputeInterpolationError(
+>         const RawKeyframe& a, const RawKeyframe& b,
+>         const RawKeyframe& actual, char component,
+>         float threshold)
+>     {
+>         float t = (actual.time - a.time) / (b.time - a.time);
+>         float maxErr = 0;
+>         if (component == 'p') {
+>             auto interp = [](float v0, float v1, float t)
+>                 { return v0 + (v1 - v0) * t; };
+>             maxErr = std::max(maxErr,
+>                 std::abs(actual.posX - interp(a.posX, b.posX, t)));
+>             maxErr = std::max(maxErr,
+>                 std::abs(actual.posY - interp(a.posY, b.posY, t)));
+>             maxErr = std::max(maxErr,
+>                 std::abs(actual.posZ - interp(a.posZ, b.posZ, t)));
+>         } else {
+>             auto interp = [](float v0, float v1, float t)
+>                 { return v0 + (v1 - v0) * t; };
+>             maxErr = std::max(maxErr,
+>                 std::abs(actual.rotX - interp(a.rotX, b.rotX, t)));
+>             maxErr = std::max(maxErr,
+>                 std::abs(actual.rotY - interp(a.rotY, b.rotY, t)));
+>             maxErr = std::max(maxErr,
+>                 std::abs(actual.rotZ - interp(a.rotZ, b.rotZ, t)));
+>             maxErr = std::max(maxErr,
+>                 std::abs(actual.rotW - interp(a.rotW, b.rotW, t)));
+>         }
+>         return maxErr;
+>     }
+>
+>     static int16_t floatToInt16(float v, float range) {
+>         float normalized = v / range;  // [-1, 1]
+>         normalized = std::max(-1.0f, std::min(1.0f, normalized));
+>         return (int16_t)(normalized * 32767.0f);
+>     }
+>
+>     static float int16ToFloat(int16_t v, float range) {
+>         return (float)v / 32767.0f * range;
+>     }
+> };
+> ```
+>
+> **压缩效果分析**：曲线精简可在关键帧间线性插值误差小于阈值的前提下移除冗余帧，对大段匀速运动的动画（如走路、跑步）压缩效果显著，可达5-10倍。浮点量化将每个float分量从32位压缩到16位，所有分量合并后单帧从13×4=52字节压缩到13×2=26字节（50%压缩）。两者结合可达到10-20倍的总体压缩比。Catmull-Rom样条拟合（进阶方案）可以用更少的控制点重建平滑曲线，压缩比可达50-100倍。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [Skinning: Real-Time Rendering, 4th Edition - Chapter 4](https://www.realtimerendering.com/)：实时渲染中关于蒙皮的权威章节

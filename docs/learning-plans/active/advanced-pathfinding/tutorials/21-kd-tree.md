@@ -655,6 +655,294 @@ KDNode* build_inplace(std::vector<Point2D>& points, size_t lo, size_t hi, int de
 
 **验证**: 测量 `build` vs `build_inplace` 的构建时间。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 将 2D KD-Tree 扩展到 3D，核心修改点：`Point3D` 增加 z 分量、切分轴循环 `depth % 3`、AABB 增加 z 范围、距离计算增加 z 分量。
+>
+> ```cpp
+> // ============================================================
+> // 3D 点
+> // ============================================================
+> struct Point3D {
+>     float x, y, z;
+>     Point3D() : x(0), y(0), z(0) {}
+>     Point3D(float x_, float y_, float z_) : x(x_), y(y_), z(z_) {}
+>
+>     float operator[](int dim) const {
+>         switch (dim) { case 0: return x; case 1: return y; case 2: return z; }
+>         return 0;
+>     }
+>     float& operator[](int dim) {
+>         switch (dim) { case 0: return x; case 1: return y; case 2: return z; }
+>         return x;
+>     }
+> };
+>
+> float squared_dist3D(const Point3D& a, const Point3D& b) {
+>     float dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
+>     return dx*dx + dy*dy + dz*dz;
+> }
+>
+> // ============================================================
+> // 3D AABB
+> // ============================================================
+> struct AABB3D {
+>     float x_min, y_min, z_min, x_max, y_max, z_max;
+>     bool contains(const Point3D& p) const {
+>         return p.x >= x_min && p.x <= x_max &&
+>                p.y >= y_min && p.y <= y_max &&
+>                p.z >= z_min && p.z <= z_max;
+>     }
+> };
+>
+> // ============================================================
+> // 3D KD-Tree
+> // ============================================================
+> struct KDNode3D {
+>     Point3D point;
+>     KDNode3D *left, *right;
+>     KDNode3D(const Point3D& p) : point(p), left(nullptr), right(nullptr) {}
+> };
+>
+> class KDTree3D {
+> public:
+>     KDTree3D() : root_(nullptr) {}
+>     ~KDTree3D() { destroy(root_); }
+>
+>     void build(std::vector<Point3D> points) {
+>         destroy(root_);
+>         root_ = build_recursive(points, 0);
+>     }
+>
+>     Point3D nearest(const Point3D& query) const {
+>         float best_d2 = std::numeric_limits<float>::max();
+>         Point3D best;
+>         nearest_recursive(root_, query, 0, best, best_d2);
+>         return best;
+>     }
+>
+>     std::vector<Point3D> range_query(const AABB3D& rect) const {
+>         std::vector<Point3D> results;
+>         range_recursive(root_, 0, rect, results);
+>         return results;
+>     }
+>
+> private:
+>     KDNode3D* root_;
+>
+>     static KDNode3D* build_recursive(std::vector<Point3D>& points, int depth) {
+>         if (points.empty()) return nullptr;
+>         int axis = depth % 3;  // 关键：3 维循环
+>         size_t median = points.size() / 2;
+>         std::nth_element(points.begin(), points.begin() + median, points.end(),
+>             [axis](const Point3D& a, const Point3D& b) { return a[axis] < b[axis]; });
+>         KDNode3D* node = new KDNode3D(points[median]);
+>         std::vector<Point3D> left_pts(points.begin(), points.begin() + median);
+>         std::vector<Point3D> right_pts(points.begin() + median + 1, points.end());
+>         node->left  = build_recursive(left_pts,  depth + 1);
+>         node->right = build_recursive(right_pts, depth + 1);
+>         return node;
+>     }
+>
+>     static void nearest_recursive(KDNode3D* node, const Point3D& query, int depth,
+>                                    Point3D& best, float& best_d2) {
+>         if (!node) return;
+>         float d2 = squared_dist3D(query, node->point);
+>         if (d2 < best_d2) { best_d2 = d2; best = node->point; }
+>         int axis = depth % 3;
+>         float diff = query[axis] - node->point[axis];
+>         KDNode3D* first  = (diff <= 0) ? node->left  : node->right;
+>         KDNode3D* second = (diff <= 0) ? node->right : node->left;
+>         nearest_recursive(first,  query, depth + 1, best, best_d2);
+>         if (diff * diff < best_d2)  // 剪枝：轴距 < 当前最优
+>             nearest_recursive(second, query, depth + 1, best, best_d2);
+>     }
+>
+>     static void range_recursive(KDNode3D* node, int depth,
+>                                  const AABB3D& rect, std::vector<Point3D>& results) {
+>         if (!node) return;
+>         if (rect.contains(node->point)) results.push_back(node->point);
+>         int axis = depth % 3;
+>         // 左子树可能与查询区域相交？
+>         if (node->point[axis] >= (axis == 0 ? rect.x_min : axis == 1 ? rect.y_min : rect.z_min))
+>             range_recursive(node->left, depth + 1, rect, results);
+>         // 右子树可能与查询区域相交？
+>         if (node->point[axis] <= (axis == 0 ? rect.x_max : axis == 1 ? rect.y_max : rect.z_max))
+>             range_recursive(node->right, depth + 1, rect, results);
+>     }
+>
+>     static void destroy(KDNode3D* node) {
+>         if (!node) return;
+>         destroy(node->left);
+>         destroy(node->right);
+>         delete node;
+>     }
+> };
+>
+> // 验证（main 中调用）
+> // std::vector<Point3D> pts(5000);
+> // std::mt19937 rng(42);
+> // std::uniform_real_distribution<float> dist(-100, 100);
+> // for (auto& p : pts) p = Point3D(dist(rng), dist(rng), dist(rng));
+> // KDTree3D tree; tree.build(pts);
+> // Point3D q(dist(rng), dist(rng), dist(rng));
+> // Point3D kd_result = tree.nearest(q);
+> // // 暴力验证
+> // float best_d2 = std::numeric_limits<float>::max();
+> // Point3D bf_result;
+> // for (auto& p : pts) {
+> //     float d2 = squared_dist3D(q, p);
+> //     if (d2 < best_d2) { best_d2 = d2; bf_result = p; }
+> // }
+> // assert(squared_dist3D(kd_result, bf_result) < 0.001f);
+> ```
+>
+> **关键差异总结**：2D → 3D 的唯一本质变化是将 `depth % 2` 改为 `depth % 3`，其余（nth_element、递归、剪枝逻辑）全部一致——这正是 KD-Tree "维度无关"设计的优势。
+
+> [!tip]- 练习 2 参考答案
+> 增量插入在不平衡 KD-Tree 上的实现，每次插入从根沿切分轴递归到叶子，在空指针处创建新节点。
+>
+> ```cpp
+> // 在 KDTree 类中添加以下方法（保持 2D 版本）
+> public:
+>     // 插入单个点——不平衡构建，O(depth) ≈ O(log N) 平均，O(N) 最坏
+>     void insert(const Point2D& p) {
+>         root_ = insert_recursive(root_, p, 0);
+>     }
+>
+> private:
+>     // 递归插入：沿切分轴走到叶子，在 nullptr 处创建节点
+>     static KDNode* insert_recursive(KDNode* node, const Point2D& p, int depth) {
+>         if (!node) return new KDNode(p);
+>
+>         int axis = depth % 2;
+>         if (p[axis] < node->point[axis])
+>             node->left  = insert_recursive(node->left,  p, depth + 1);
+>         else
+>             node->right = insert_recursive(node->right, p, depth + 1);
+>         return node;
+>     }
+> ```
+>
+> **对比实验代码**（加到 main 中）：
+>
+> ```cpp
+> // === 不平衡 vs 平衡对比 ===
+> const int N = 10000;
+> std::vector<Point2D> pts_unbalanced(N);
+> std::mt19937 rng(42);
+> std::uniform_real_distribution<float> dist(-500, 500);
+> for (auto& p : pts_unbalanced) p = Point2D(dist(rng), dist(rng));
+>
+> // 不平衡插入（按随机顺序）
+> KDTree unbalanced_tree;
+> auto t1 = std::chrono::high_resolution_clock::now();
+> for (auto& p : pts_unbalanced) unbalanced_tree.insert(p);
+> auto t2 = std::chrono::high_resolution_clock::now();
+> auto insert_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+> // 平衡构建
+> KDTree balanced_tree;
+> t1 = std::chrono::high_resolution_clock::now();
+> balanced_tree.build(pts_unbalanced);
+> t2 = std::chrono::high_resolution_clock::now();
+> auto build_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+> // NN 查询对比
+> const int QUERIES = 1000;
+> std::vector<Point2D> queries(QUERIES);
+> for (auto& q : queries) q = Point2D(dist(rng), dist(rng));
+>
+> t1 = std::chrono::high_resolution_clock::now();
+> for (auto& q : queries) unbalanced_tree.nearest(q);
+> t2 = std::chrono::high_resolution_clock::now();
+> auto nn_unbalanced_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+> t1 = std::chrono::high_resolution_clock::now();
+> for (auto& q : queries) balanced_tree.nearest(q);
+> t2 = std::chrono::high_resolution_clock::now();
+> auto nn_balanced_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+> std::cout << "不平衡插入: " << insert_us << "us,  平衡构建: " << build_us << "us\n";
+> std::cout << "不平衡 NN:  " << nn_unbalanced_us << "us, 平衡 NN: " << nn_balanced_us << "us ("
+>           << (double)nn_unbalanced_us / nn_balanced_us << "x slower)\n";
+> ```
+>
+> **为何不平衡插入更慢？** 插入不保证中位数切分，实际深度取决于插入顺序。随机顺序下平均深度 ~O(log N) 但常数比平衡版本大；最坏情况（如按 x 排序插入）退化为链表，查询退化为 O(N)。游戏场景中若单位生成位置有空间局部性，不平衡插入的性能退化会更严重。
+
+> [!tip]- 练习 3 参考答案
+> 通过 `[lo, hi)` 区间索引避免每次递归复制 vector，nth_element 只作用于子范围。
+>
+> ```cpp
+> // 在 KDTree 类中添加
+> public:
+>     // 原地构建：不复制 vector，用 [lo, hi) 索引指定子范围
+>     void build_inplace(std::vector<Point2D>& points) {
+>         destroy(root_);
+>         root_ = build_inplace_recursive(points, 0, points.size(), 0);
+>     }
+>
+> private:
+>     // 在 [lo, hi) 范围内原地构建，depth 控制切分轴
+>     static KDNode* build_inplace_recursive(std::vector<Point2D>& points,
+>                                              size_t lo, size_t hi, int depth) {
+>         if (lo >= hi) return nullptr;
+>
+>         int axis = depth % 2;
+>         size_t mid = lo + (hi - lo) / 2;  // 中位数索引 = lo + 区间大小/2
+>
+>         // 只对 [lo, hi) 子范围做 nth_element——不动区间外的元素
+>         std::nth_element(points.begin() + lo,
+>                          points.begin() + mid,
+>                          points.begin() + hi,
+>             [axis](const Point2D& a, const Point2D& b) {
+>                 return a[axis] < b[axis];
+>             });
+>
+>         KDNode* node = new KDNode(points[mid]);
+>         node->left  = build_inplace_recursive(points, lo, mid, depth + 1);
+>         node->right = build_inplace_recursive(points, mid + 1, hi, depth + 1);
+>         return node;
+>     }
+> ```
+>
+> **对比验证代码**：
+>
+> ```cpp
+> // === 原地构建 vs 复制构建 ===
+> const int N = 10000;
+> std::vector<Point2D> pts(N);
+> std::mt19937 rng(42);
+> std::uniform_real_distribution<float> dist(-500, 500);
+> for (auto& p : pts) p = Point2D(dist(rng), dist(rng));
+>
+> // 复制构建（原始版本）
+> auto pts_copy = pts;
+> KDTree tree_copy;
+> auto t1 = std::chrono::high_resolution_clock::now();
+> tree_copy.build(std::move(pts_copy));
+> auto t2 = std::chrono::high_resolution_clock::now();
+> auto copy_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+> // 原地构建
+> auto pts_inplace = pts;
+> KDTree tree_inplace;
+> t1 = std::chrono::high_resolution_clock::now();
+> tree_inplace.build_inplace(pts_inplace);
+> t2 = std::chrono::high_resolution_clock::now();
+> auto inplace_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+> std::cout << "复制构建: " << copy_us << "us, 原地构建: " << inplace_us << "us ("
+>           << (double)copy_us / inplace_us << "x speedup)\n";
+> ```
+>
+> **性能分析**：原 `build_recursive` 每层递归产生两次 vector 复制（left_pts 和 right_pts），总复制次数 ~2N（每层每个元素平均被复制 2 次）。`build_inplace` 零复制——nth_element 在原数组上交换元素，内存分配仅限树节点本身。N=10,000 时通常可提速 2-5x（瓶颈从内存分配转移到 nth_element 的交换操作）。
+>
+> **注意**：原地构建会破坏原 points 数组的排列顺序——如果调用方后续还需要原数组，应先复制。对于一次性构建后丢弃点列表的场景，原地版本是最优策略。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Bentley, J. L. (1975).** "Multidimensional Binary Search Trees Used for Associative Searching". *Communications of the ACM, 18(9), 509–517.* — KD-Tree 的原始论文

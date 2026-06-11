@@ -575,6 +575,184 @@ Managed Heap: 180MB → 45MB
 3. 找出 PC 上看不到、移动端才暴漏的瓶颈（通常是带宽/填充率）
 4. 记录你的发现和修复方案
 
+
+## 6.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **重现与测量步骤：**
+>
+> 1. **场景构建**（Unity 2022 LTS + URP）：
+>    ```csharp
+>    // SpawnTestScene.cs — 快速创建测试场景
+>    using UnityEngine;
+>
+>    public class SpawnTestScene : MonoBehaviour
+>    {
+>        public GameObject enemyPrefab;
+>        public GameObject bulletPrefab;
+>        public int enemyCount = 200;
+>        public float fireRate = 0.05f; // 每秒 20 发
+>
+>        private float fireTimer;
+>
+>        void Start()
+>        {
+>            for (int i = 0; i < enemyCount; i++)
+>            {
+>                Vector3 pos = new Vector3(
+>                    Random.Range(-20f, 20f),
+>                    Random.Range(-10f, 10f), 0);
+>                Instantiate(enemyPrefab, pos, Quaternion.identity);
+>            }
+>        }
+>
+>        void Update()
+>        {
+>            fireTimer += Time.deltaTime;
+>            while (fireTimer >= fireRate)
+>            {
+>                fireTimer -= fireRate;
+>                Vector3 dir = Random.insideUnitCircle.normalized;
+>                var bullet = Instantiate(bulletPrefab,
+>                    transform.position + (Vector3)dir * 0.5f,
+>                    Quaternion.identity);
+>                bullet.GetComponent<Rigidbody2D>().velocity = dir * 10f;
+>                // ❌ 没有对象池：Destroy 在 bullet 脚本的 OnBecameInvisible 中
+>            }
+>        }
+>    }
+>    ```
+>
+> 2. **Unity Profiler 记录**（运行 5 秒后截图）：
+>    ```
+>    CPU Usage (Main Thread): ~48ms
+>    ├── Scripts: 32.1ms  ← 🔴 Top 1
+>    │   ├── EnemyAI.Update(): 8.3ms
+>    │   ├── BulletManager.Update(): 7.1ms
+>    │   └── ...
+>    ├── Rendering: 9.4ms   ← 🔴 Top 2
+>    │   └── Batches: ~4,200
+>    ├── Physics2D: 3.8ms   ← 🔴 Top 3
+>    └── GC.Collect: 2.9ms (spikes)
+>    ```
+>
+> 3. **前 3 大瓶颈标注**：
+>    - **瓶颈 1 — Scripts (32.1ms)**：Instantiate/Destroy 高频率调用 + 每帧遍历所有对象（O(N²) 距离检查）
+>    - **瓶颈 2 — Rendering (9.4ms)**：4,200 Batches → 每个 Sprite 独立 Draw Call
+>    - **瓶颈 3 — GC.Collect (2.9ms spikes)**：频繁堆分配导致 GC 每 3 秒触发一次
+
+> [!tip]- 练习 2 参考答案
+> **三项优化实施与对比：**
+>
+> ### 优化 1: 对象池管理（敌人+子弹）
+> ```csharp
+> public class BulletPool : MonoBehaviour
+> {
+>     [SerializeField] private Bullet bulletPrefab;
+>     [SerializeField] private int poolSize = 500;
+>     private Queue<Bullet> pool = new Queue<Bullet>();
+>
+>     void Awake()
+>     {
+>         for (int i = 0; i < poolSize; i++)
+>         {
+>             var bullet = Instantiate(bulletPrefab);
+>             bullet.gameObject.SetActive(false);
+>             pool.Enqueue(bullet);
+>         }
+>     }
+>
+>     public Bullet Get(Vector3 pos, Vector2 velocity)
+>     {
+>         Bullet bullet = pool.Count > 0 ? pool.Dequeue() : Instantiate(bulletPrefab);
+>         bullet.transform.position = pos;
+>         bullet.gameObject.SetActive(true);
+>         bullet.Launch(velocity);
+>         return bullet;
+>     }
+>
+>     public void Return(Bullet bullet)
+>     {
+>         bullet.gameObject.SetActive(false);
+>         pool.Enqueue(bullet);
+>     }
+> }
+> ```
+> 预期：GC.Alloc 450KB/frame → ~2KB/frame；GC 间隔 3s → 永不触发
+>
+> ### 优化 2: Sprite Atlas（子弹统一纹理）
+> - 创建 Sprite Atlas：`Assets → Create → 2D → Sprite Atlas`，大小 2048×2048
+> - 将所有子弹精灵拖入 `Objects for Packing`
+> - 确保所有子弹 SpriteRenderer 使用相同的 Default Material（不创建实例）
+> - 预期：子弹 Batches 500 → ~8（按 Sorting Layer 分组）
+>
+> ### 优化 3: Shader 驱动 HP 条（替代 200 个 HP Bar Sprite）
+> ```hlsl
+> // 在 enemy Shader 中添加 HP 条渲染
+> // frag shader 中：
+> float hpBarTop = 1.0;
+> float hpBarHeight = 4.0 * _MainTex_TexelSize.w;
+> if (i.uv.y > hpBarTop - hpBarHeight && i.uv.y <= hpBarTop)
+> {
+>     float3 barColor = (i.uv.x <= _HPFill)
+>         ? float3(0, 1, 0)   // 绿色 = 血量
+>         : float3(0.3, 0, 0); // 深红 = 背景
+>     return float4(barColor, 1);
+> }
+> ```
+> ```csharp
+> // 每帧仅更新 MaterialPropertyBlock（零 GC）
+> void UpdateHPBar(SpriteRenderer sr, float hpPercent)
+> {
+>     mpb.SetFloat("_HPFill", hpPercent);
+>     sr.SetPropertyBlock(mpb);
+> }
+> ```
+> 预期：HP Bar Batches 200 → 0（HP 条融入敌人自身渲染）
+>
+> **优化前后总对比**：
+>
+> | 指标 | 优化前 | 优化后 | 改善 |
+> |------|--------|--------|------|
+> | Main Thread | 48ms | 15.9ms | 67% |
+> | Batches | 4,200 | ~180 | 95.7% |
+> | GC.Alloc/frame | ~450KB | ~2KB | 99.6% |
+> | Managed Heap | 180MB | 45MB | 75% |
+> | FPS | 18-22 | **稳定 60** | 3× |
+
+> [!tip]- 练习 3 参考答案（可选）
+> **移动端真机测试要点：**
+>
+> 1. **部署到真机**：
+>    - Android：`Build Settings → Android → Build And Run`（USB 连接 + USB Debugging 开启）
+>    - iOS：需要 Mac + Xcode，`Build → iOS → 通过 Xcode 部署`
+>    - 使用 Development Build + Autoconnect Profiler 选项
+>
+> 2. **Profiler 连接**：
+>    - `Window → Analysis → Profiler → 下拉选择 "AndroidPlayer (ADB@...)"` 或 iOS 设备
+>    - 或使用 `Android GPU Inspector (AGI)`（谷歌官方工具）获取 GPU 计数器
+>
+> 3. **常见移动端瓶颈（PC 上看不到）**：
+>
+>    | 瓶颈 | 现象 | 检测方法 | 修复 |
+>    |------|------|---------|------|
+>    | **带宽/填充率** | GPU 耗时高但 PC 上 OK | AGI 的 Memory bandwidth 计数器 | 降低分辨率、减少透明层、禁用 MSAA |
+>    | **Tile-based GPU Overdraw** | 大量透明 Sprite 叠加时帧率暴跌 | AGI 的 Overdraw 可视化 | 减少透明 Sprite 层数、使用 Opaque 渲染 |
+>    | **纹理带宽** | 大纹理切换频繁 | Unity Profiler `RenderTexture` 等 | 减小 Atlas 分辨率（≤2048）、使用 ASTC 压缩 |
+>    | **CPU 频率限制（Thermal Throttling）** | 运行 5 分钟后帧率下降 | 监控 CPU/GPU 频率 | 减少持续 CPU 负载、添加帧率上限 |
+>    | **IL2CPP GC** | GC 卡顿比 Editor 中更严重 | Profiler 的 GC.Alloc 帧 | 零分配热路径（见练习 2） |
+>    | **Draw Call 限制更严格** | >300 Batches 就开始掉帧 | Frame Debugger | 激进合批、减少 Sorting Layer |
+>
+> 4. **典型发现**：即使 PC 上优化到 180 Batches 跑 60fps，移动端 180 Batches 可能仍有 40ms 的渲染开销。原因是移动 GPU 的驱动开销更高。需要在移动端设置更激进的目标（<100 Batches）。
+>
+> 5. **修复方案摘要**：
+>    - 将 Sprite Atlas 尺寸从 4096 降到 2048（移动 GPU 最大纹理限制）
+>    - 减少排序层数量（每个 Sorting Layer 都是潜在批次断点）
+>    - 关闭不必要的后处理（Bloom/Color Grading 在移动端巨大消耗）
+>    - 使用 `QualitySettings.vSyncCount = 0` 并设置 `Application.targetFrameRate = 30`（对移动端，稳定 30fps 比不稳定的 60fps 更好）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 7. 扩展阅读

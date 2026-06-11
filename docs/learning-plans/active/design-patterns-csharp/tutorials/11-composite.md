@@ -767,12 +767,8 @@ g++ -std=c++17 -o prog main.cpp && ./prog
 
 **要点：** `Department` 本身也是一个 `IOrganizationUnit`（负责人也算一个 Head,有薪资），但它是 Composite 而非 Leaf——所以 Department 的 `GetHeadcount()` 和 `GetBudget()` 应该汇总**负责人 + 所有后代**。
 
-<details>
-<summary>提示</summary>
-
-Department 除了维护下属列表，还需要持有负责人（一个 Employee）。`GetHeadcount()` = 1（负责人自身）+ 所有 `_units` 的 `GetHeadcount()`。同理 `GetBudget()`。
-
-</details>
+> [!tip]- 提示
+> Department 除了维护下属列表，还需要持有负责人（一个 Employee）。`GetHeadcount()` = 1（负责人自身）+ 所有 `_units` 的 `GetHeadcount()`。同理 `GetBudget()`。
 
 ### 练习 2（进阶）：访问者模式 + 组合树
 
@@ -788,29 +784,25 @@ Department 除了维护下属列表，还需要持有负责人（一个 Employee
 
 **要点：** Visitor 利用多态分发 (`employee.Accept(visitor)` → `visitor.Visit(this)`) 避免在遍历代码中写 `if (unit is Employee e) ... else if (unit is Department d) ...`。
 
-<details>
-<summary>提示</summary>
-
-```csharp
-public interface IOrganizationVisitor
-{
-    void Visit(Employee employee);
-    void Visit(Department department);
-}
-
-// Employee 中的实现
-public void Accept(IOrganizationVisitor visitor) => visitor.Visit(this);
-
-// Department 中的实现
-public void Accept(IOrganizationVisitor visitor)
-{
-    visitor.Visit(this);
-    foreach (var unit in _units)
-        unit.Accept(visitor);
-}
-```
-
-</details>
+> [!tip]- 提示
+> ```csharp
+> public interface IOrganizationVisitor
+> {
+>     void Visit(Employee employee);
+>     void Visit(Department department);
+> }
+>
+> // Employee 中的实现
+> public void Accept(IOrganizationVisitor visitor) => visitor.Visit(this);
+>
+> // Department 中的实现
+> public void Accept(IOrganizationVisitor visitor)
+> {
+>     visitor.Visit(this);
+>     foreach (var unit in _units)
+>         unit.Accept(visitor);
+> }
+> ```
 
 ### 练习 3（挑战）：`yield return` 树遍历工具
 
@@ -827,60 +819,529 @@ public void Accept(IOrganizationVisitor visitor)
 
 **要求：** 所有遍历方法使用 `yield return`，支持 LINQ 链式操作。
 
-<details>
-<summary>提示</summary>
-
-```csharp
-public abstract class TreeNode<T> where T : TreeNode<T>
-{
-    private readonly List<T> _children = new();
-    public T? Parent { get; private set; }
-    public IReadOnlyList<T> Children => _children;
-
-    public void Add(T child)
-    {
-        _children.Add(child);
-        child.Parent = (T)this;
-    }
-
-    public bool IsLeaf => _children.Count == 0;
-}
-
-public static class TreeNodeExtensions
-{
-    public static IEnumerable<T> Descendants<T>(this T node) where T : TreeNode<T>
-    {
-        foreach (var child in node.Children)
-        {
-            yield return child;
-            foreach (var descendant in child.Descendants())
-                yield return descendant;
-        }
-    }
-
-    public static IEnumerable<T> Ancestors<T>(this T node) where T : TreeNode<T>
-    {
-        var current = node.Parent;
-        while (current != null)
-        {
-            yield return current;
-            current = current.Parent;
-        }
-    }
-
-    public static IEnumerable<T> Siblings<T>(this T node) where T : TreeNode<T>
-    {
-        if (node.Parent == null) yield break;
-        foreach (var child in node.Parent.Children)
-            if (child != node)
-                yield return child;
-    }
-}
-```
-
-</details>
+> [!tip]- 提示
+> ```csharp
+> public abstract class TreeNode<T> where T : TreeNode<T>
+> {
+>     private readonly List<T> _children = new();
+>     public T? Parent { get; private set; }
+>     public IReadOnlyList<T> Children => _children;
+>
+>     public void Add(T child)
+>     {
+>         _children.Add(child);
+>         child.Parent = (T)this;
+>     }
+>
+>     public bool IsLeaf => _children.Count == 0;
+> }
+>
+> public static class TreeNodeExtensions
+> {
+>     public static IEnumerable<T> Descendants<T>(this T node) where T : TreeNode<T>
+>     {
+>         foreach (var child in node.Children)
+>         {
+>             yield return child;
+>             foreach (var descendant in child.Descendants())
+>                 yield return descendant;
+>         }
+>     }
+>
+>     public static IEnumerable<T> Ancestors<T>(this T node) where T : TreeNode<T>
+>     {
+>         var current = node.Parent;
+>         while (current != null)
+>         {
+>             yield return current;
+>             current = current.Parent;
+>         }
+>     }
+>
+>     public static IEnumerable<T> Siblings<T>(this T node) where T : TreeNode<T>
+>     {
+>         if (node.Parent == null) yield break;
+>         foreach (var child in node.Parent.Children)
+>             if (child != node)
+>                 yield return child;
+>     }
+> }
+> ```
 
 ---
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // IOrganizationUnit — 统一接口
+> // ============================================
+> public interface IOrganizationUnit
+> {
+>     string Name { get; }
+>     int GetHeadcount();
+>     decimal GetBudget();
+>     void Print(int indent = 0);
+> }
+>
+> // ============================================
+> // Employee（Leaf）— 叶子节点
+> // ============================================
+> public class Employee : IOrganizationUnit
+> {
+>     public string Name { get; }
+>     public string Title { get; }
+>     public decimal Salary { get; }
+>
+>     public Employee(string name, string title, decimal salary)
+>     {
+>         Name = name;
+>         Title = title;
+>         Salary = salary;
+>     }
+>
+>     public int GetHeadcount() => 1;
+>
+>     public decimal GetBudget() => Salary;
+>
+>     public void Print(int indent = 0)
+>     {
+>         var prefix = new string(' ', indent);
+>         Console.WriteLine(
+>             $"{prefix}{Name} ({Title}, ${Salary:N0})");
+>     }
+> }
+>
+> // ============================================
+> // Department（Composite）— 组合节点
+> // ============================================
+> public class Department : IOrganizationUnit
+> {
+>     private readonly List<IOrganizationUnit> _units = new();
+>     private readonly Employee _head;
+>
+>     public string Name { get; }
+>     public string HeadTitle { get; }
+>
+>     public Department(string name, Employee head, string headTitle)
+>     {
+>         Name = name;
+>         _head = head;
+>         HeadTitle = headTitle;
+>     }
+>
+>     public void Add(IOrganizationUnit unit) => _units.Add(unit);
+>
+>     public void Remove(IOrganizationUnit unit) => _units.Remove(unit);
+>
+>     /// <summary>
+>     /// 总人数 = 负责人(1) + 所有下属的 Headcount
+>     /// </summary>
+>     public int GetHeadcount()
+>     {
+>         return 1 + _units.Sum(u => u.GetHeadcount());
+>     }
+>
+>     /// <summary>
+>     /// 总预算 = 负责人薪资 + 所有下属的 Budget
+>     /// </summary>
+>     public decimal GetBudget()
+>     {
+>         return _head.Salary + _units.Sum(u => u.GetBudget());
+>     }
+>
+>     public void Print(int indent = 0)
+>     {
+>         var prefix = new string(' ', indent);
+>         Console.WriteLine(
+>             $"{prefix}{Name} ({HeadTitle}: {_head.Name}) " +
+>             $"[{GetHeadcount()}人, ${GetBudget():N0}]");
+>
+>         // 先打印负责人
+>         _head.Print(indent + 2);
+>
+>         // 再打印下属
+>         foreach (var unit in _units)
+>             unit.Print(indent + 2);
+>     }
+> }
+>
+>
+> // ============================================
+> // 构造并打印组织架构
+> // ============================================
+> static void TestOrgChart()
+> {
+>     // 叶子员工
+>     var wangwu = new Employee("王五", "高级工程师", 120_000);
+>     var zhaoliu = new Employee("赵六", "工程师", 85_000);
+>     var sunba = new Employee("孙八", "产品经理", 100_000);
+>
+>     // 技术部（组合节点）
+>     var techHead = new Employee("李四", "CTO", 200_000);
+>     var tech = new Department("技术部", techHead, "CTO");
+>     tech.Add(wangwu);
+>     tech.Add(zhaoliu);
+>
+>     // 产品部（组合节点）
+>     var productHead = new Employee("钱七", "CPO", 180_000);
+>     var product = new Department("产品部", productHead, "CPO");
+>     product.Add(sunba);
+>
+>     // 公司（根组合节点）
+>     var ceo = new Employee("张三", "CEO", 300_000);
+>     var company = new Department("公司", ceo, "CEO");
+>     company.Add(tech);
+>     company.Add(product);
+>
+>     Console.WriteLine("=== 组织架构图 ===");
+>     company.Print();
+>
+>     Console.WriteLine($"\n=== 汇总 ===");
+>     Console.WriteLine($"公司总人数: {company.GetHeadcount()} (CEO + CTO + 王五 + 赵六 + CPO + 孙八 = 6)");
+>     Console.WriteLine($"公司总预算: ${company.GetBudget():N0}");
+>     Console.WriteLine($"技术部人数: {tech.GetHeadcount()} (CTO + 2人 = 3)");
+>     Console.WriteLine($"技术部预算: ${tech.GetBudget():N0}");
+>     Console.WriteLine($"产品部人数: {product.GetHeadcount()} (CPO + 1人 = 2)");
+>     Console.WriteLine($"产品部预算: ${product.GetBudget():N0}");
+> }
+> ```
+> **设计要点：**
+> 1. `Department` 同时**是一个** `IOrganizationUnit` 且**包含** `IOrganizationUnit` 列表——这是组合模式的核心
+> 2. `GetHeadcount()` 和 `GetBudget()` 递归汇总，调用方不关心当前节点是 Employee 还是 Department
+> 3. 负责人用 `Employee` 对象表示（而非单独字段），使"负责人也算一个 head"的逻辑自然融入递归
+> 4. `Employee` 是纯 Leaf，不持有子节点；`Department` 是 Composite，管理子树
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+> using System.Text;
+>
+> // ============================================
+> // 在 IOrganizationUnit 中添加 Accept
+> // ============================================
+> // （追加到已有接口定义）
+> public interface IOrganizationUnit
+> {
+>     string Name { get; }
+>     int GetHeadcount();
+>     decimal GetBudget();
+>     void Print(int indent = 0);
+>     void Accept(IOrganizationVisitor visitor);  // ← 新增
+> }
+>
+> // ============================================
+> // IOrganizationVisitor 接口
+> // ============================================
+> public interface IOrganizationVisitor
+> {
+>     void Visit(Employee employee);
+>     void Visit(Department department);
+> }
+>
+> // ============================================
+> // Employee 中的 Accept 实现
+> // ============================================
+> // 在 Employee 类中添加：
+> // public void Accept(IOrganizationVisitor visitor)
+> //     => visitor.Visit(this);
+>
+> // ============================================
+> // Department 中的 Accept 实现
+> // ============================================
+> // 在 Department 类中添加：
+> // public void Accept(IOrganizationVisitor visitor)
+> // {
+> //     visitor.Visit(this);
+> //     // 递归遍历子树
+> //     foreach (var unit in _units)
+> //         unit.Accept(visitor);
+> // }
+>
+> // ============================================
+> // 具体 Visitor 1：薪资报表
+> // ============================================
+> public class BudgetReportVisitor : IOrganizationVisitor
+> {
+>     private readonly StringBuilder _report = new();
+>
+>     public void Visit(Employee employee)
+>     {
+>         // 只对 Employee 收集数据
+>         _report.AppendLine(
+>             $"  {employee.Name,-6} {employee.Title,-12} ${employee.Salary,10:N0}");
+>     }
+>
+>     public void Visit(Department department)
+>     {
+>         _report.AppendLine(
+>             $"\n--- {department.Name} ---");
+>         // 自动递归遍历子树（在 Department.Accept 中触发）
+>     }
+>
+>     public string GetReport() => _report.ToString();
+> }
+>
+> // ============================================
+> // 具体 Visitor 2：高薪名单
+> // ============================================
+> public class HighEarnerVisitor : IOrganizationVisitor
+> {
+>     private readonly decimal _threshold;
+>     private readonly List<(string Name, string Title, decimal Salary)> _highEarners = new();
+>
+>     public HighEarnerVisitor(decimal threshold = 100_000)
+>     {
+>         _threshold = threshold;
+>     }
+>
+>     public void Visit(Employee employee)
+>     {
+>         if (employee.Salary > _threshold)
+>         {
+>             _highEarners.Add((employee.Name, employee.Title, employee.Salary));
+>         }
+>     }
+>
+>     public void Visit(Department department)
+>     {
+>         // Department 不直接参与判断，但通过递归会遍历到其中所有 Employee
+>     }
+>
+>     public IReadOnlyList<(string Name, string Title, decimal Salary)>
+>         GetHighEarners() => _highEarners;
+> }
+>
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static void TestVisitors()
+> {
+>     // 复用练习 1 的组织架构
+>     var company = BuildOrgChart(); // 同练习 1
+>
+>     Console.WriteLine("=== 薪资报表 ===");
+>     var budgetReport = new BudgetReportVisitor();
+>     company.Accept(budgetReport);
+>     Console.WriteLine(budgetReport.GetReport());
+>
+>     Console.WriteLine("=== 高薪名单 (>$100,000) ===");
+>     var highEarner = new HighEarnerVisitor(threshold: 100_000);
+>     company.Accept(highEarner);
+>     foreach (var (name, title, salary) in highEarner.GetHighEarners())
+>     {
+>         Console.WriteLine($"  {name} ({title}): ${salary:N0}");
+>     }
+> }
+> ```
+> **设计要点：**
+> 1. **双分派（Double Dispatch）**：`unit.Accept(visitor)` → 运行时根据 `unit` 的具体类型，调用 `visitor.Visit(Employee)` 或 `visitor.Visit(Department)` —— 避免了 `if (unit is Employee e)` 的类型判断
+> 2. `Department.Accept` 在调用 `visitor.Visit(this)` 后**递归遍历子树**，Visit 方法本身不需要知道遍历逻辑
+> 3. `BudgetReportVisitor` 只关心 Employee 的薪资数据，Department 只是作为分组标题；`HighEarnerVisitor` 只关心 Employee 的薪资阈值
+> 4. Visitor 模式的核心收益：新增一种"遍历操作"（如薪资报表）**不需要修改 Employee 或 Department 的代码**——只需要新增一个 Visitor 类
+
+> [!tip]- 练习 3 参考答案（挑战）
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // TreeNode&lt;T&gt; 泛型组合基类
+> // ============================================
+> public abstract class TreeNode<T> where T : TreeNode<T>
+> {
+>     private readonly List<T> _children = new();
+>
+>     public T? Parent { get; private set; }
+>     public IReadOnlyList<T> Children => _children;
+>     public bool IsLeaf => _children.Count == 0;
+>
+>     /// <summary>添加子节点并自动设置 Parent 反向引用</summary>
+>     public void Add(T child)
+>     {
+>         if (child == null)
+>             throw new ArgumentNullException(nameof(child));
+>
+>         _children.Add(child);
+>         child.Parent = (T)this;
+>     }
+>
+>     /// <summary>移除子节点并清除 Parent 引用（防止内存泄漏）</summary>
+>     public bool Remove(T child)
+>     {
+>         if (_children.Remove(child))
+>         {
+>             child.Parent = null;
+>             return true;
+>         }
+>         return false;
+>     }
+> }
+>
+> // ============================================
+> // 扩展方法：yield return 树遍历
+> // ============================================
+> public static class TreeNodeExtensions
+> {
+>     /// <summary>深度优先遍历所有后代（不含自身）</summary>
+>     public static IEnumerable<T> Descendants<T>(this T node)
+>         where T : TreeNode<T>
+>     {
+>         foreach (var child in node.Children)
+>         {
+>             yield return child;
+>             // 递归 yield：遍历 child 的所有后代
+>             foreach (var descendant in child.Descendants())
+>                 yield return descendant;
+>         }
+>     }
+>
+>     /// <summary>自底向上遍历所有祖先</summary>
+>     public static IEnumerable<T> Ancestors<T>(this T node)
+>         where T : TreeNode<T>
+>     {
+>         var current = node.Parent;
+>         while (current != null)
+>         {
+>             yield return current;
+>             current = current.Parent;
+>         }
+>     }
+>
+>     /// <summary>兄弟节点（同一父节点下、不含自身）</summary>
+>     public static IEnumerable<T> Siblings<T>(this T node)
+>         where T : TreeNode<T>
+>     {
+>         if (node.Parent == null)
+>             yield break;
+>
+>         foreach (var child in node.Parent.Children)
+>         {
+>             if (!ReferenceEquals(child, node))
+>                 yield return child;
+>         }
+>     }
+>
+>     /// <summary>扁平化遍历整棵子树（含自身），广度优先</summary>
+>     public static IEnumerable<T> Flatten<T>(this T root)
+>         where T : TreeNode<T>
+>     {
+>         var queue = new Queue<T>();
+>         queue.Enqueue(root);
+>
+>         while (queue.Count > 0)
+>         {
+>             var current = queue.Dequeue();
+>             yield return current;
+>
+>             foreach (var child in current.Children)
+>                 queue.Enqueue(child);
+>         }
+>     }
+> }
+>
+>
+> // ============================================
+> // 使用示例：文件系统节点
+> // ============================================
+> public class FileNode : TreeNode<FileNode>
+> {
+>     public string Name { get; }
+>     public bool IsDirectory { get; }
+>     public long Size { get; }
+>
+>     public FileNode(string name, bool isDirectory, long size = 0)
+>     {
+>         Name = name;
+>         IsDirectory = isDirectory;
+>         Size = size;
+>     }
+>
+>     public override string ToString() =>
+>         IsDirectory ? $"📁 {Name}/" : $"📄 {Name} ({Size} bytes)";
+> }
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static void TestTreeTraversal()
+> {
+>     // 构建树
+>     var root = new FileNode("root", true);
+>     var docs = new FileNode("docs", true);
+>     var src = new FileNode("src", true);
+>     root.Add(docs);
+>     root.Add(src);
+>
+>     var readme = new FileNode("README.md", false, 1024);
+>     var tutorial = new FileNode("tutorial.md", false, 5120);
+>     docs.Add(readme);
+>     docs.Add(tutorial);
+>
+>     var main = new FileNode("Program.cs", false, 2048);
+>     var utils = new FileNode("Utils.cs", false, 1536);
+>     var tests = new FileNode("tests", true);
+>     src.Add(main);
+>     src.Add(utils);
+>     src.Add(tests);
+>
+>     var testFile = new FileNode("UtilsTests.cs", false, 3072);
+>     tests.Add(testFile);
+>
+>     Console.WriteLine("=== 所有后代 (DFS) ===");
+>     foreach (var node in root.Descendants())
+>         Console.WriteLine($"  {node}");
+>
+>     Console.WriteLine($"\n=== testFile 的祖先 ===");
+>     foreach (var node in testFile.Ancestors())
+>         Console.WriteLine($"  {node}");
+>     // tests → src → root
+>
+>     Console.WriteLine($"\n=== main 的兄弟节点 ===");
+>     foreach (var node in main.Siblings())
+>         Console.WriteLine($"  {node}");
+>     // Utils.cs, tests/
+>
+>     Console.WriteLine($"\n=== LINQ 链式操作 ===");
+>     var largeFiles = root.Descendants()
+>         .Where(n => !n.IsDirectory && n.Size > 2000)
+>         .Select(n => n.Name);
+>     Console.WriteLine($"大文件: [{string.Join(", ", largeFiles)}]");
+>
+>     var leafCount = root.Descendants().Count(n => n.IsLeaf);
+>     Console.WriteLine($"叶子节点数: {leafCount}");
+>
+>     Console.WriteLine($"\n=== 扁平化 (BFS) ===");
+>     foreach (var node in root.Flatten())
+>         Console.WriteLine($"  {node}");
+>
+>     // 验证 Parent 引用
+>     Console.WriteLine($"\n=== Parent 验证 ===");
+>     Console.WriteLine($"testFile.Parent = {testFile.Parent?.Name}");          // tests
+>     Console.WriteLine($"testFile.Parent!.Parent = {testFile.Parent?.Parent?.Name}"); // src
+>     Console.WriteLine($"root.Parent = {root.Parent?.Name ?? "null"}");        // null
+> }
+> ```
+> **设计要点：**
+> 1. **CRTP（奇异递归模板模式）**：`TreeNode<T> where T : TreeNode<T>` 使泛型参数绑定到具体子类，`Add(T child)` 的类型是具体类型而非基类
+> 2. **`yield return` 惰性求值**：遍历不一次性生成完整列表，支持调用方随时 `break` 或链式 LINQ 过滤
+> 3. **`Add` 自动设置 Parent**：封装父子关系的维护逻辑，使用方不需要手动管理 `child.Parent`
+> 4. **`Remove` 清除 Parent**：防止已移除的子树仍通过 Parent 引用被 GC Root 可达（见"常见陷阱 3"）
+> 5. **`ReferenceEquals`**：`Siblings()` 使用引用比较而非 `==`，避免类重写 `Equals` 导致的误判
+> 6. 所有遍历方法都是 `O(d)`（d = 后代数）且通过 `yield return` 实现，无需预先分配完整列表
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 
 ## 4. 扩展阅读
 

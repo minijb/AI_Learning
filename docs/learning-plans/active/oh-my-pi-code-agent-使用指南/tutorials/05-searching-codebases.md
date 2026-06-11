@@ -128,6 +128,75 @@ search: pattern="async function.*\n.*try \{", paths=["src/**/*.ts"]
 2. 批量将它们改为 `const`/`let`
 3. 观察 OMP 如何使用搜索结果的锚点进行编辑
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在熟悉项目中执行文件发现：
+>
+> ```text
+> 1. "列出所有配置文件（*.config.*, .env*, tsconfig.json 等）"
+>    → OMP 会多次调用 find，如：
+>      find: paths=["**/*.config.*"]        → webpack.config.js, vite.config.ts 等
+>      find: paths=[".env*"], gitignore: false → .env, .env.local 等
+>      find: paths=["**/tsconfig*.json"]      → tsconfig.json, tsconfig.build.json
+>    → 注意 .env 文件通常被 .gitignore 排除，需要 gitignore: false
+>
+> 2. "找到所有测试文件并统计数量"
+>    → OMP 调用 find: paths=["**/*.test.*", "**/*.spec.*"]
+>    → 然后可能用 bash: find . -name "*.test.ts" | wc -l 统计行数/文件数
+>
+> 3. "定位 CI/CD 相关文件"
+>    → OMP 调用 find: paths=[".github/**", ".gitlab-ci.yml", "Jenkinsfile", "Dockerfile*"]
+>    → 返回按修改时间排序的结果
+> ```
+>
+> **思考题答案：** `find` 返回的是文件路径列表（按 mtime 排序），不是文件内容。要获取文件内容，需要再用 `read`。`find` 尊重 `.gitignore`，所以找 `.env` 等敏感文件时要用 `gitignore: false`。
+
+> [!tip]- 练习 2 参考答案
+> 内容搜索操作：
+>
+> ```text
+> 1. "搜索所有使用了 deprecatedFunction 的地方"
+>    → OMP 调用 search: pattern="deprecatedFunction" paths=["src/**/*"]
+>    → 返回每个匹配的行（附锚点），可以直接用于 edit
+>
+> 2. "找出所有包含硬编码密码或密钥的行"
+>    → OMP 调用 search: pattern="(password|secret|api[_-]?key)\s*=\s*['\"][^'\"]+['\"]"
+>    → 正则搜索硬编码的键值对。注意 RE2 不支持 lookahead
+>    → 更好的方式：search 多个简单 pattern 再人工/AI 审查
+>
+> 3. "搜索项目中 'Connection timeout' 错误消息的所有出现位置"
+>    → OMP 调用 search: pattern="Connection timeout" paths=["src/**"]
+>    → 如果需要跨语言搜索，去掉路径的扩展名限制
+> ```
+>
+> **关键技巧：** RE2 正则不支持 lookahead/lookbehind。如果 pattern 太复杂，拆成多个简单搜索，再用 `read` 检查匹配上下文。
+
+> [!tip]- 练习 3 参考答案
+> 搜索后批量编辑：
+>
+> ```text
+> 1. "找出所有使用 var 声明变量的地方"
+>    → OMP 调用 search: pattern="\bvar\s+\w+" paths=["src/**/*.ts"]
+>    → 返回匹配行及其锚点
+>
+> 2. "批量将它们改为 const/let"
+>    → OMP 分析每个匹配：
+>      - 如果变量从未被重新赋值 → 改为 const
+>      - 如果变量被重新赋值 → 改为 let
+>    → OMP 对每个匹配行执行 edit: ≔ANCHOR（替换 var → const/let）
+>
+> 3. 观察搜索锚点的使用：
+>    → search 返回的每一行都有 LINEhh| 锚点
+>    → OMP 直接将这些锚点复制到 edit 命令中
+>    → 不需要重新 read 每个文件——search 的输出就是编辑的输入
+> ```
+>
+> **思考题答案：** `search` → `edit` 工作流的高效之处：search 返回的锚点可直接被 edit 使用，跳过了中间的 read 步骤。但要注意——search 只返回匹配行，不返回上下文；如果编辑需要了解周围代码（如判断 var 是否被重新赋值），仍需要额外 read。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

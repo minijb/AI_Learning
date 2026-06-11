@@ -475,6 +475,342 @@ Vec3 mat4_mul_vec3(const Mat4& mat, Vec3 v) {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <chrono>
+> > #include <xmmintrin.h>  // SSE
+> > #include <cstdlib>      // aligned_alloc (C++17)
+> >
+> > constexpr size_t NUM = 1'000'000;
+> > constexpr float  DT  = 0.016f;
+> >
+> > // ============ SoA 布局 + 16 字节对齐 ============
+> > struct ParticleSSE {
+> >     alignas(16) float* pos_x, *pos_y, *pos_z;
+> >     alignas(16) float* vel_x, *vel_y, *vel_z;
+> >     size_t count;
+> >
+> >     ParticleSSE(size_t n) : count(n) {
+> >         // 确保对齐分配（16 字节对齐）
+> >         pos_x = static_cast<float*>(std::aligned_alloc(16, n * sizeof(float)));
+> >         pos_y = static_cast<float*>(std::aligned_alloc(16, n * sizeof(float)));
+> >         pos_z = static_cast<float*>(std::aligned_alloc(16, n * sizeof(float)));
+> >         vel_x = static_cast<float*>(std::aligned_alloc(16, n * sizeof(float)));
+> >         vel_y = static_cast<float*>(std::aligned_alloc(16, n * sizeof(float)));
+> >         vel_z = static_cast<float*>(std::aligned_alloc(16, n * sizeof(float)));
+> >     }
+> >     ~ParticleSSE() {
+> >         std::free(pos_x); std::free(pos_y); std::free(pos_z);
+> >         std::free(vel_x); std::free(vel_y); std::free(vel_z);
+> >     }
+> > };
+> >
+> > // ============ SSE 粒子更新 ============
+> > void sse_particle_update(ParticleSSE& p) {
+> >     size_t n = p.count - (p.count % 4);  // 处理 4 的倍数
+> >     __m128 dt = _mm_set1_ps(DT);
+> >
+> >     for (size_t i = 0; i < n; i += 4) {
+> >         // 加载 4 个连续 float
+> >         __m128 px = _mm_load_ps(&p.pos_x[i]);
+> >         __m128 py = _mm_load_ps(&p.pos_y[i]);
+> >         __m128 pz = _mm_load_ps(&p.pos_z[i]);
+> >         __m128 vx = _mm_load_ps(&p.vel_x[i]);
+> >         __m128 vy = _mm_load_ps(&p.vel_y[i]);
+> >         __m128 vz = _mm_load_ps(&p.vel_z[i]);
+> >
+> >         // pos += vel * dt（4 路并行）
+> >         px = _mm_add_ps(px, _mm_mul_ps(vx, dt));
+> >         py = _mm_add_ps(py, _mm_mul_ps(vy, dt));
+> >         pz = _mm_add_ps(pz, _mm_mul_ps(vz, dt));
+> >
+> >         // 存回
+> >         _mm_store_ps(&p.pos_x[i], px);
+> >         _mm_store_ps(&p.pos_y[i], py);
+> >         _mm_store_ps(&p.pos_z[i], pz);
+> >     }
+> >
+> >     // 尾数处理（n%4 != 0 时）
+> >     for (size_t i = n; i < p.count; ++i) {
+> >         p.pos_x[i] += p.vel_x[i] * DT;
+> >         p.pos_y[i] += p.vel_y[i] * DT;
+> >         p.pos_z[i] += p.vel_z[i] * DT;
+> >     }
+> > }
+> >
+> > // ============ 标量版本 ============
+> > void scalar_particle_update(ParticleSSE& p) {
+> >     for (size_t i = 0; i < p.count; ++i) {
+> >         p.pos_x[i] += p.vel_x[i] * DT;
+> >         p.pos_y[i] += p.vel_y[i] * DT;
+> >         p.pos_z[i] += p.vel_z[i] * DT;
+> >     }
+> > }
+> >
+> > // ============ 初始化 ============
+> > void init_particles(ParticleSSE& p) {
+> >     for (size_t i = 0; i < p.count; ++i) {
+> >         p.pos_x[i] = static_cast<float>(i);
+> >         p.pos_y[i] = static_cast<float>(i * 2);
+> >         p.pos_z[i] = static_cast<float>(i * 3);
+> >         p.vel_x[i] = 1.0f;
+> >         p.vel_y[i] = 0.5f;
+> >         p.vel_z[i] = 0.0f;
+> >     }
+> > }
+> >
+> > // ============ 基准 ============
+> > template<typename F>
+> > double bench(F&& f, int iters = 30) {
+> >     for (int i = 0; i < 3; ++i) f();
+> >     double best = 1e18;
+> >     for (int i = 0; i < iters; ++i) {
+> >         auto t1 = std::chrono::high_resolution_clock::now();
+> >         f();
+> >         auto t2 = std::chrono::high_resolution_clock::now();
+> >         double ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+> >         if (ms < best) best = ms;
+> >     }
+> >     return best;
+> > }
+> >
+> > int main() {
+> >     // 准备两份相同的数据
+> >     ParticleSSE p1(NUM), p2(NUM);
+> >     init_particles(p1);
+> >     init_particles(p2);
+> >
+> >     double scalar_ms = bench([&]() { scalar_particle_update(p1); });
+> >     double sse_ms    = bench([&]() { sse_particle_update(p2); });
+> >
+> >     std::cout << "Scalar: " << scalar_ms << " ms\n";
+> >     std::cout << "SSE:    " << sse_ms    << " ms\n";
+> >     std::cout << "加速比: " << scalar_ms / sse_ms << "x\n";
+> >     // 预期 SSE 快 2-4 倍
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <chrono>
+> > #include <xmmintrin.h>
+> > #include <smmintrin.h>   // SSE4.1 _mm_dp_ps
+> > #include <cstring>
+> >
+> > // ============ SSE 4x4 矩阵 × 向量 ============
+> > // 矩阵按列优先排列：mat[0..3] = 第0列, mat[4..7] = 第1列, ...
+> > inline void sse_mat4_mul_vec4(float* __restrict result,
+> >                                 const float* __restrict mat,
+> >                                 const float* __restrict vec) {
+> >     // 加载向量 [vx, vy, vz, vw]
+> >     __m128 v = _mm_loadu_ps(vec);
+> >
+> >     // 广播各分量
+> >     __m128 v0 = _mm_shuffle_ps(v, v, _MM_SHUFFLE(0, 0, 0, 0));  // [vx,vx,vx,vx]
+> >     __m128 v1 = _mm_shuffle_ps(v, v, _MM_SHUFFLE(1, 1, 1, 1));  // [vy,vy,vy,vy]
+> >     __m128 v2 = _mm_shuffle_ps(v, v, _MM_SHUFFLE(2, 2, 2, 2));  // [vz,vz,vz,vz]
+> >     __m128 v3 = _mm_shuffle_ps(v, v, _MM_SHUFFLE(3, 3, 3, 3));  // [vw,vw,vw,vw]
+> >
+> >     // 加载矩阵的 4 列
+> >     __m128 c0 = _mm_loadu_ps(mat + 0);
+> >     __m128 c1 = _mm_loadu_ps(mat + 4);
+> >     __m128 c2 = _mm_loadu_ps(mat + 8);
+> >     __m128 c3 = _mm_loadu_ps(mat + 12);
+> >
+> >     // 逐列乘加
+> >     __m128 r = _mm_mul_ps(c0, v0);
+> >     r = _mm_add_ps(r, _mm_mul_ps(c1, v1));
+> >     r = _mm_add_ps(r, _mm_mul_ps(c2, v2));
+> >     r = _mm_add_ps(r, _mm_mul_ps(c3, v3));
+> >
+> >     _mm_storeu_ps(result, r);
+> > }
+> >
+> > // ============ SSE4.1 点积版本（使用 _mm_dp_ps） ============
+> > inline void sse_dp_mat4_mul_vec4(float* __restrict result,
+> >                                    const float* __restrict mat,
+> >                                    const float* __restrict vec) {
+> >     __m128 v = _mm_loadu_ps(vec);
+> >
+> >     // 每行与 vec 做点积
+> >     // _mm_dp_ps(a, b, mask): mask 控制哪些通道参与、结果存放位置
+> >     // 0xF1 = 1111 0001b → 全通道参与，结果写回最低位
+> >     __m128 r0 = _mm_dp_ps(_mm_loadu_ps(mat + 0), v, 0xF1);
+> >     __m128 r1 = _mm_dp_ps(_mm_loadu_ps(mat + 4), v, 0xF2);  // 结果在 bit[32..63]
+> >     __m128 r2 = _mm_dp_ps(_mm_loadu_ps(mat + 8), v, 0xF4);
+> >     __m128 r3 = _mm_dp_ps(_mm_loadu_ps(mat + 12), v, 0xF8);
+> >
+> >     // 合并（或操作）
+> >     __m128 r01 = _mm_or_ps(r0, r1);
+> >     __m128 r23 = _mm_or_ps(r2, r3);
+> >     _mm_storeu_ps(result, _mm_or_ps(r01, r23));
+> > }
+> >
+> > // ============ 标量版本 ============
+> > inline void scalar_mat4_mul_vec4(float* __restrict result,
+> >                                    const float* __restrict mat,
+> >                                    const float* __restrict vec) {
+> >     for (int row = 0; row < 4; ++row) {
+> >         result[row] = mat[row+0]  * vec[0]
+> >                     + mat[row+4]  * vec[1]
+> >                     + mat[row+8]  * vec[2]
+> >                     + mat[row+12] * vec[3];
+> >     }
+> > }
+> >
+> > // ============ 批量模式：1 个矩阵 × 4 个向量 ============
+> > // 4 个 vec 组成 [v0x,v1x,v2x,v3x] [v0y,v1y,v2y,v3y] ...
+> > // 适合 SoA 布局的批量向量
+> >
+> > // ============ 基准 ============
+> > int main() {
+> >     alignas(16) float mat[16] = {
+> >         1,0,0,0, 0,1,0,0, 0,0,1,0, 2,3,4,1
+> >     };
+> >     alignas(16) float vec[4] = {1, 2, 3, 1};
+> >     alignas(16) float res_sse[4], res_scalar[4];
+> >
+> >     constexpr int ITERS = 1'000'000;
+> >
+> >     // SSE 版本
+> >     auto t1 = std::chrono::high_resolution_clock::now();
+> >     for (int i = 0; i < ITERS; ++i)
+> >         sse_mat4_mul_vec4(res_sse, mat, vec);
+> >     auto t2 = std::chrono::high_resolution_clock::now();
+> >
+> >     // 标量版本
+> >     auto t3 = std::chrono::high_resolution_clock::now();
+> >     for (int i = 0; i < ITERS; ++i)
+> >         scalar_mat4_mul_vec4(res_scalar, mat, vec);
+> >     auto t4 = std::chrono::high_resolution_clock::now();
+> >
+> >     double sse_ms = std::chrono::duration<double, std::milli>(t2-t1).count();
+> >     double sca_ms = std::chrono::duration<double, std::milli>(t4-t3).count();
+> >
+> >     std::cout << "SSE result:    [" << res_sse[0] << "," << res_sse[1]
+> >               << "," << res_sse[2] << "," << res_sse[3] << "]\n";
+> >     std::cout << "Scalar result: [" << res_scalar[0] << "," << res_scalar[1]
+> >               << "," << res_scalar[2] << "," << res_scalar[3] << "]\n";
+> >     std::cout << "SSE: " << sse_ms << " ms, Scalar: " << sca_ms << " ms\n";
+> >     std::cout << "加速比: " << sca_ms / sse_ms << "x\n";
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <chrono>
+> > #include <cstdlib>
+> > #include <cstring>
+> >
+> > #ifdef __AVX__
+> >   #include <immintrin.h>  // AVX
+> > #else
+> >   #include <xmmintrin.h>   // SSE fallback
+> > #endif
+> >
+> > constexpr size_t NUM = 1'000'000;
+> > constexpr float  DT  = 0.016f;
+> >
+> > // ============ 统一 SIMD 接口 ============
+> > #ifdef __AVX__
+> >   constexpr size_t SIMD_WIDTH = 8;  // 8× float per __m256
+> >   using simd_t = __m256;
+> >
+> >   inline simd_t simd_load(const float* p)  { return _mm256_load_ps(p); }
+> >   inline void   simd_store(float* p, simd_t v) { _mm256_store_ps(p, v); }
+> >   inline simd_t simd_set1(float x)         { return _mm256_set1_ps(x); }
+> >   inline simd_t simd_add(simd_t a, simd_t b)  { return _mm256_add_ps(a,b); }
+> >   inline simd_t simd_mul(simd_t a, simd_t b)  { return _mm256_mul_ps(a,b); }
+> > #else
+> >   constexpr size_t SIMD_WIDTH = 4;  // 4× float per __m128
+> >   using simd_t = __m128;
+> >
+> >   inline simd_t simd_load(const float* p)  { return _mm_load_ps(p); }
+> >   inline void   simd_store(float* p, simd_t v) { _mm_store_ps(p, v); }
+> >   inline simd_t simd_set1(float x)         { return _mm_set1_ps(x); }
+> >   inline simd_t simd_add(simd_t a, simd_t b)  { return _mm_add_ps(a,b); }
+> >   inline simd_t simd_mul(simd_t a, simd_t b)  { return _mm_mul_ps(a,b); }
+> > #endif
+> >
+> > // ============ 统一粒子更新 ============
+> > void simd_particle_update(float* pos_x, float* pos_y, float* pos_z,
+> >                            float* vel_x, float* vel_y, float* vel_z,
+> >                            size_t count) {
+> >     simd_t dt = simd_set1(DT);
+> >     size_t n = count - (count % SIMD_WIDTH);
+> >
+> >     for (size_t i = 0; i < n; i += SIMD_WIDTH) {
+> >         simd_t px = simd_load(&pos_x[i]);
+> >         simd_t py = simd_load(&pos_y[i]);
+> >         simd_t pz = simd_load(&pos_z[i]);
+> >         simd_t vx = simd_load(&vel_x[i]);
+> >         simd_t vy = simd_load(&vel_y[i]);
+> >         simd_t vz = simd_load(&vel_z[i]);
+> >
+> >         px = simd_add(px, simd_mul(vx, dt));
+> >         py = simd_add(py, simd_mul(vy, dt));
+> >         pz = simd_add(pz, simd_mul(vz, dt));
+> >
+> >         simd_store(&pos_x[i], px);
+> >         simd_store(&pos_y[i], py);
+> >         simd_store(&pos_z[i], pz);
+> >     }
+> >
+> >     // 尾数
+> >     for (size_t i = n; i < count; ++i) {
+> >         pos_x[i] += vel_x[i] * DT;
+> >         pos_y[i] += vel_y[i] * DT;
+> >         pos_z[i] += vel_z[i] * DT;
+> >     }
+> > }
+> >
+> > int main() {
+> >     auto* px = static_cast<float*>(std::aligned_alloc(32, NUM * sizeof(float)));
+> >     auto* py = static_cast<float*>(std::aligned_alloc(32, NUM * sizeof(float)));
+> >     auto* pz = static_cast<float*>(std::aligned_alloc(32, NUM * sizeof(float)));
+> >     auto* vx = static_cast<float*>(std::aligned_alloc(32, NUM * sizeof(float)));
+> >     auto* vy = static_cast<float*>(std::aligned_alloc(32, NUM * sizeof(float)));
+> >     auto* vz = static_cast<float*>(std::aligned_alloc(32, NUM * sizeof(float)));
+> >
+> >     for (size_t i = 0; i < NUM; ++i) {
+> >         px[i] = (float)i; py[i] = (float)(i*2); pz[i] = (float)(i*3);
+> >         vx[i] = 1.0f; vy[i] = 0.5f; vz[i] = 0.0f;
+> >     }
+> >
+> >     auto t1 = std::chrono::high_resolution_clock::now();
+> >     for (int iter = 0; iter < 30; ++iter)
+> >         simd_particle_update(px, py, pz, vx, vy, vz, NUM);
+> >     auto t2 = std::chrono::high_resolution_clock::now();
+> >
+> >     double ms = std::chrono::duration<double, std::milli>(t2-t1).count() / 30.0;
+> >     std::cout << "SIMD width = " << SIMD_WIDTH << '\n';
+> >     std::cout << "Average: " << ms << " ms per update\n";
+> >     std::cout << "Throughput: " << (NUM / ms / 1000.0) << " M particles/s\n";
+> >
+> >     // 讨论：实际 AVX 加速比可能低于 2×
+> >     // 原因 1：内存带宽成为瓶颈（DRAM 带宽有限）
+> >     // 原因 2：AVX 指令在某些 CPU 上会降低频率（AVX offset）
+> >     // 原因 3：如果数据已在 L2/L3 中，SSE 已接近带宽极限
+> >     // 原因 4：编译器可能已对 SSE 路径做了更好的优化
+> >     std::cout << "\n注意：编译时用 -mavx2 或 -msse4.2 切换指令集\n";
+> >
+> >     std::free(px); std::free(py); std::free(pz);
+> >     std::free(vx); std::free(vy); std::free(vz);
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Intel Intrinsics Guide** (https://www.intel.com/content/www/us/en/docs/intrinsics-guide/index.html) — 所有 x86 intrinsic 的交互式查询工具，**每日必查**

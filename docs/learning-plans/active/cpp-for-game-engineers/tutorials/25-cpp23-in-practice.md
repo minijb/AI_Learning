@@ -639,6 +639,425 @@ struct Result {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <expected>
+> #include <string>
+> #include <vector>
+> #include <cstdint>
+> #include <fstream>
+> #include <sstream>
+> #include <print>
+> #include <chrono>
+> #include <iostream>
+>
+> // ===== 错误类型 =====
+> struct AppError {
+>     enum Code { FileNotFound, BadJson, ValidationFailed } code;
+>     std::string message;
+> };
+>
+> // ===== 模拟旧的 Result 类型（对比用） =====
+> template<typename T>
+> struct Result {
+>     bool ok;
+>     union { T value; AppError error; };
+>
+>     Result(T val) : ok(true), value(std::move(val)) {}
+>     Result(AppError err) : ok(false), error(std::move(err)) {}
+>     ~Result() { if (ok) value.~T(); else error.~AppError(); }
+>
+>     explicit operator bool() const { return ok; }
+> };
+>
+> // ===== C++23 expected 版本 =====
+> using ExpectedStr   = std::expected<std::string, AppError>;
+> using ExpectedJson  = std::expected<std::vector<uint8_t>, AppError>;
+> using ExpectedCfg   = std::expected<std::string, AppError>;  // 最终结果
+>
+> // Step 1: 文件读取
+> ExpectedJson read_file(std::string_view path) {
+>     // 模拟：某些路径会失败
+>     if (path.empty() || path == "missing.cfg") {
+>         return std::unexpected(AppError{
+>             AppError::FileNotFound, "file not found"
+>         });
+>     }
+>     // 模拟读取成功
+>     return std::vector<uint8_t>(128, 0x42);
+> }
+>
+> // Step 2: JSON 解析
+> ExpectedStr parse_json(const std::vector<uint8_t>& raw) {
+>     if (raw.empty() || raw[0] != 0x42) {
+>         return std::unexpected(AppError{
+>             AppError::BadJson, "invalid JSON format"
+>         });
+>     }
+>     return std::string("parsed_config");
+> }
+>
+> // Step 3: 配置验证
+> ExpectedStr validate_config(const std::string& json) {
+>     if (json.find("error") != std::string::npos) {
+>         return std::unexpected(AppError{
+>             AppError::ValidationFailed, "config validation failed"
+>         });
+>     }
+>     return std::string("validated_config_ready");
+> }
+>
+> // ===== 链式调用（expected 单子链） =====
+> ExpectedStr load_config_chain(std::string_view path) {
+>     return read_file(path)
+>         .and_then(parse_json)
+>         .and_then(validate_config)
+>         .or_else([](const AppError& e) -> ExpectedStr {
+>             // 错误恢复：返回默认配置
+>             if (e.code == AppError::FileNotFound) {
+>                 return std::string("default_config");
+>             }
+>             return std::unexpected(e);
+>         });
+> }
+>
+> // ===== if-else 版本（对比） =====
+> ExpectedStr load_config_ifelse(std::string_view path) {
+>     auto raw = read_file(path);
+>     if (!raw) {
+>         if (raw.error().code == AppError::FileNotFound)
+>             return std::string("default_config");
+>         return std::unexpected(raw.error());
+>     }
+>
+>     auto json = parse_json(*raw);
+>     if (!json)
+>         return std::unexpected(json.error());
+>
+>     auto cfg = validate_config(*json);
+>     if (!cfg)
+>         return std::unexpected(cfg.error());
+>
+>     return *cfg;
+> }
+>
+> // ===== 使用示例 =====
+> int main() {
+>     std::cout << "=== expected 加载管线 ===\n\n";
+>
+>     // 测试正常路径
+>     auto r1 = load_config_chain("game.cfg");
+>     if (r1) std::println("Success: {}", *r1);
+>     else    std::println("Error: {}", r1.error().message);
+>
+>     // 测试缺失文件（触发 or_else 恢复）
+>     auto r2 = load_config_chain("missing.cfg");
+>     if (r2) std::println("Recovered: {}", *r2);
+>     else    std::println("Unrecoverable: {}", r2.error().message);
+>
+>     return 0;
+> }
+> ```
+>
+> **汇编等价性分析**：
+> - `and_then` / `or_else` / `transform` 在 -O2 下完全内联
+> - 链式版本和 if-else 版本生成的跳转指令相同——单子操作是零开销抽象
+> - 验证方法：Compiler Explorer 上编译两个函数，对比汇编输出（`-O2 -std=c++23`）
+> - `transform` 映射值（T→U），`and_then` 可改变错误类型（返回 expected<U,E>），`or_else` 可恢复（返回 expected<T,G>）
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <mdspan>
+> #include <vector>
+> #include <cmath>
+> #include <algorithm>
+> #include <chrono>
+> #include <iostream>
+> #include <numbers>
+>
+> namespace stdex = std::experimental;  // C++23 std::
+>
+> constexpr int IMG_SIZE = 256;
+> constexpr int KERNEL_SIZE = 5;
+> constexpr int KERNEL_RAD = KERNEL_SIZE / 2;  // 2
+>
+> // 5x5 高斯核（σ=1.0）
+> constexpr float gauss(int x, int y, float sigma = 1.0f) {
+>     float s2 = 2.0f * sigma * sigma;
+>     return std::exp(-(x*x + y*y) / s2) / (std::numbers::pi_v<float> * s2);
+> }
+>
+> // 预计算的高斯核（5x5, σ=1.0）
+> const float GAUSS_KERNEL[5][5] = {
+>     {0.003f, 0.013f, 0.022f, 0.013f, 0.003f},
+>     {0.013f, 0.060f, 0.098f, 0.060f, 0.013f},
+>     {0.022f, 0.098f, 0.162f, 0.098f, 0.022f},
+>     {0.013f, 0.060f, 0.098f, 0.060f, 0.013f},
+>     {0.003f, 0.013f, 0.022f, 0.013f, 0.003f},
+> };
+>
+> // 边界处理：clamp
+> float sample_clamp(const float* data, int w, int h, int x, int y) {
+>     if (x < 0) x = 0; else if (x >= w) x = w - 1;
+>     if (y < 0) y = 0; else if (y >= h) y = h - 1;
+>     return data[y * w + x];
+> }
+>
+> // ===== mdspan 版本 =====
+> std::vector<float> gauss_blur_mdspan(
+>     std::mdspan<const float, std::dextents<size_t, 2>> input)
+> {
+>     size_t h = input.extent(0);
+>     size_t w = input.extent(1);
+>     std::vector<float> output(h * w);
+>     auto out_2d = std::mdspan(output.data(), h, w);
+>
+>     for (size_t y = 0; y < h; ++y) {
+>         for (size_t x = 0; x < w; ++x) {
+>             float sum = 0.0f;
+>             for (int ky = -KERNEL_RAD; ky <= KERNEL_RAD; ++ky) {
+>                 for (int kx = -KERNEL_RAD; kx <= KERNEL_RAD; ++kx) {
+>                     // Clamp 边界
+>                     int sy = static_cast<int>(y) + ky;
+>                     int sx = static_cast<int>(x) + kx;
+>                     sy = std::clamp(sy, 0, static_cast<int>(h) - 1);
+>                     sx = std::clamp(sx, 0, static_cast<int>(w) - 1);
+>                     sum += input[sy, sx] * GAUSS_KERNEL[ky + KERNEL_RAD][kx + KERNEL_RAD];
+>                 }
+>             }
+>             out_2d[y, x] = sum;
+>         }
+>     }
+>     return output;
+> }
+>
+> // ===== 裸指针版本 =====
+> std::vector<float> gauss_blur_raw(const float* data, size_t w, size_t h) {
+>     std::vector<float> output(h * w);
+>
+>     for (size_t y = 0; y < h; ++y) {
+>         for (size_t x = 0; x < w; ++x) {
+>             float sum = 0.0f;
+>             for (int ky = -KERNEL_RAD; ky <= KERNEL_RAD; ++ky) {
+>                 for (int kx = -KERNEL_RAD; kx <= KERNEL_RAD; ++kx) {
+>                     int sy = std::clamp(static_cast<int>(y) + ky, 0, static_cast<int>(h) - 1);
+>                     int sx = std::clamp(static_cast<int>(x) + kx, 0, static_cast<int>(w) - 1);
+>                     sum += data[sy * w + sx] * GAUSS_KERNEL[ky + KERNEL_RAD][kx + KERNEL_RAD];
+>                 }
+>             }
+>             output[y * w + x] = sum;
+>         }
+>     }
+>     return output;
+> }
+>
+> // ===== RGBA 四通道扩展 =====
+> std::vector<float> gauss_blur_rgba(
+>     std::mdspan<const float, std::dextents<size_t, 3>> input)
+> {
+>     size_t h = input.extent(0);
+>     size_t w = input.extent(1);
+>     size_t c = input.extent(2);  // 4 (RGBA)
+>     std::vector<float> output(h * w * c);
+>     auto out_3d = std::mdspan(output.data(), h, w, c);
+>
+>     for (size_t y = 0; y < h; ++y) {
+>         for (size_t x = 0; x < w; ++x) {
+>             for (size_t ch = 0; ch < c; ++ch) {
+>                 float sum = 0.0f;
+>                 for (int ky = -KERNEL_RAD; ky <= KERNEL_RAD; ++ky) {
+>                     for (int kx = -KERNEL_RAD; kx <= KERNEL_RAD; ++kx) {
+>                         int sy = std::clamp(static_cast<int>(y) + ky, 0, static_cast<int>(h) - 1);
+>                         int sx = std::clamp(static_cast<int>(x) + kx, 0, static_cast<int>(w) - 1);
+>                         sum += input[sy, sx, ch] * GAUSS_KERNEL[ky + KERNEL_RAD][kx + KERNEL_RAD];
+>                     }
+>                 }
+>                 out_3d[y, x, ch] = sum;
+>             }
+>         }
+>     }
+>     return output;
+> }
+>
+> // ===== Benchmark =====
+> int main() {
+>     constexpr int N = IMG_SIZE * IMG_SIZE;
+>     std::vector<float> img(N);
+>
+>     // 生成测试图像（棋盘格 + 噪声）
+>     for (int y = 0; y < IMG_SIZE; ++y)
+>         for (int x = 0; x < IMG_SIZE; ++x)
+>             img[y * IMG_SIZE + x] = ((x / 16 + y / 16) % 2) ? 0.2f : 0.8f;
+>
+>     auto img_view = std::mdspan(img.data(), IMG_SIZE, IMG_SIZE);
+>
+>     // 预热
+>     gauss_blur_mdspan(img_view);
+>     gauss_blur_raw(img.data(), IMG_SIZE, IMG_SIZE);
+>
+>     constexpr int ITERS = 10;
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     for (int i = 0; i < ITERS; ++i)
+>         gauss_blur_mdspan(img_view);
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     for (int i = 0; i < ITERS; ++i)
+>         gauss_blur_raw(img.data(), IMG_SIZE, IMG_SIZE);
+>     auto t3 = std::chrono::high_resolution_clock::now();
+>
+>     double ms_mdspan = std::chrono::duration<double, std::milli>(t1 - t0).count();
+>     double ms_raw    = std::chrono::duration<double, std::milli>(t3 - t2).count();
+>
+>     std::cout << "=== mdspan vs Raw Pointer (256x256, " << ITERS << " iters) ===\n";
+>     std::cout << "mdspan:  " << ms_mdspan << " ms\n";
+>     std::cout << "raw:     " << ms_raw << " ms\n";
+>     std::cout << "Ratio:   " << ms_mdspan / ms_raw << "x (should be ~1.0)\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **mdspan vs 裸指针分析**：
+> - `mdspan` 的 `operator[]` 在 -O2 下编译为与 `data[y * w + x]` 相同的寻址指令
+> - 多维索引 `input[y, x]` 展开为 `input.data_handle()[y * input.extent(1) + x]`——和手写完全一致
+> - RGBA 四通道版本自然扩展到 3 维 extents，无需手动管理跨通道偏移
+> - 额外优势：`submdspan` 支持子视图裁剪、`layout_stride` 支持非连续数据
+
+> [!tip]- 练习 3 参考答案（挑战）
+> ```cpp
+> #include <cstddef>
+> #include <cassert>
+> #include <span>
+> #include <iostream>
+> #include <algorithm>
+> #include <initializer_list>
+>
+> // ===== FixedVector<T, N>：栈上固定容量容器 =====
+> template<typename T, size_t N>
+> class FixedVector {
+>     alignas(T) unsigned char storage_[N * sizeof(T)];
+>     size_t size_{0};
+>
+>     T* data_ptr()       { return reinterpret_cast<T*>(storage_); }
+>     const T* data_ptr() const { return reinterpret_cast<const T*>(storage_); }
+>
+> public:
+>     FixedVector() = default;
+>
+>     FixedVector(std::initializer_list<T> il) {
+>         for (const auto& v : il) push_back(v);
+>     }
+>
+>     void push_back(const T& val) {
+>         assert(size_ < N);
+>         new (data_ptr() + size_) T(val);
+>         ++size_;
+>     }
+>
+>     // ===== C++23 deducing this: 单一 operator[] =====
+>     template<typename Self>
+>     auto&& operator[](this Self&& self, size_t idx) {
+>         assert(idx < self.size_);
+>         // decltype(auto) 保留值类别：
+>         //   Self = FixedVector&     → T&
+>         //   Self = const FixedVector& → const T&
+>         //   Self = FixedVector&&    → T&&
+>         return static_cast<decltype(self.data_ptr()[idx])>(self.data_ptr()[idx]);
+>     }
+>
+>     // ===== C++23 deducing this: 单一 begin() =====
+>     template<typename Self>
+>     auto begin(this Self&& self) {
+>         return self.data_ptr();
+>     }
+>
+>     template<typename Self>
+>     auto end(this Self&& self) {
+>         return self.data_ptr() + self.size_;
+>     }
+>
+>     // ===== Bonus: view() 总是返回 span<const T> =====
+>     template<typename Self>
+>     std::span<const T> view(this Self&& self) {
+>         return {self.data_ptr(), self.size_};
+>     }
+>
+>     size_t size() const { return size_; }
+>     static constexpr size_t capacity() { return N; }
+> };
+>
+> // ===== C++17 对比：需要几个重载？ =====
+> template<typename T, size_t N>
+> class FixedVector17 {
+>     unsigned char storage_[N * sizeof(T)];
+>     size_t size_{0};
+>
+>     T* data()       { return reinterpret_cast<T*>(storage_); }
+>     const T* data() const { return reinterpret_cast<const T*>(storage_); }
+>
+> public:
+>     // C++17 需要 3 个重载：
+>     //   T&       operator[](size_t idx)       { return data()[idx]; }          // &
+>     //   const T& operator[](size_t idx) const { return data()[idx]; }          // const&
+>     //   T&&      operator[](size_t idx) &&    { return std::move(data()[idx]); } // &&
+>
+>     // begin() 同理：
+>     //   T*       begin()       { return data(); }
+>     //   const T* begin() const { return data(); }
+>     //   // 右值 begin() 很少需要但也要考虑
+> };
+>
+> // ===== 验证 =====
+> int main() {
+>     FixedVector<int, 10> v = {1, 2, 3, 4, 5};
+>
+>     // 非 const：返回 int&
+>     v[0] = 42;
+>     std::cout << "v[0] = " << v[0] << " (should be 42)\n";
+>
+>     // const：返回 const int&
+>     const auto& cv = v;
+>     std::cout << "cv[0] = " << cv[0] << " (should be 42)\n";
+>     // cv[0] = 10;  // 编译错误——返回 const int&
+>
+>     // 右值：返回 int&&（可移动）
+>     auto x = FixedVector<int, 3>{10, 20, 30}[1];
+>     std::cout << "rvalue[1] = " << x << " (should be 20)\n";
+>
+>     // begin()/end()
+>     int sum = 0;
+>     for (auto& val : v) sum += val;
+>     std::cout << "sum = " << sum << " (should be 42+2+3+4+5=56)\n";
+>
+>     // const 迭代
+>     const auto& cv2 = v;
+>     int sum2 = 0;
+>     for (const auto& val : cv2) sum2 += val;
+>     std::cout << "const sum = " << sum2 << "\n";
+>
+>     // view()：无论值类别都返回 span<const T>
+>     auto sv = v.view();
+>     std::cout << "view: size=" << sv.size() << " [" << sv[0] << "]\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **deducing this 的节省**：
+> - `operator[]`：C++17 需 3 个重载（`&`, `const&`, `&&`），C++23 仅 1 个模板
+> - `begin()`/`end()`：C++17 需 2 个重载（`&`, `const&`），C++23 仅各 1 个
+> - 总计：C++17 = 3 + 2 + 2 = 7 个函数，C++23 = 1 + 1 + 1 = 3 个函数——节省 57%
+> - 额外收益：右值版本的 `operator[]` 返回 `T&&`，支持从临时容器中高效移出元素
+> - `view()` 方法无论调用对象值类别都返回 `span<const T>`——提供统一的"安全视图"接口
+> - 模式可推广到任何需要区分 `const`/非 `const`、左值/右值的访问器
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读]** *C++23 Standard (N4950)* — ISO C++23 最终草案

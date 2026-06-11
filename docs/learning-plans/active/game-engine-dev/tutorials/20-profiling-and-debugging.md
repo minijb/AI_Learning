@@ -1418,6 +1418,811 @@ int main() {
 **注意**：这个练习涉及全局运算符重载，建议在独立的测试项目中进行，避免影响其他代码。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1: 扩展 Instrumentation Profiler
+>
+> #### 1.1 分类着色 — `PROFILE_SCOPE_CATEGORY` + `cname` 字段
+>
+> ```cpp
+> // 新增：类别枚举与颜色映射
+> enum class ProfileCategory : uint8_t {
+>     Default,    // 默认灰
+>     Rendering,  // 蓝色
+>     Physics,    // 红色
+>     AI,         // 绿色
+>     Audio,      // 黄色
+>     IO,         // 青色
+>     Count
+> };
+>
+> // Chrome Tracing "cname" 对每种 category 使用固定的 CSS 颜色名
+> constexpr const char* kCategoryColors[] = {
+>     "grey",                // Default
+>     "blue",                // Rendering
+>     "red",                 // Physics
+>     "green",               // AI
+>     "olive",               // Audio
+>     "cyan",                // IO
+> };
+>
+> static_assert(std::size(kCategoryColors) == static_cast<size_t>(ProfileCategory::Count));
+> ```
+>
+> ```cpp
+> // ProfileResult 新增 category 字段
+> struct ProfileResult {
+>     std::string name;
+>     long long start;
+>     long long end;
+>     uint32_t threadID;
+>     ProfileCategory category = ProfileCategory::Default;
+> };
+> ```
+>
+> ```cpp
+> // Profiler::WriteProfile() 增加 cname 输出
+> void WriteProfile(const ProfileResult& result) {
+>     std::lock_guard<std::mutex> lock(m_mutex);
+>     if (m_profileCount++ > 0) m_outputStream << ",";
+>
+>     // 转义
+>     std::string escapedName = result.name;
+>     for (size_t i = 0; i < escapedName.size(); ++i) {
+>         if (escapedName[i] == '"') { escapedName.insert(i, "\\"); ++i; }
+>     }
+>
+>     m_outputStream << "\n    {"
+>         << "\"cat\":\"" << kCategoryColors[static_cast<int>(result.category)] << "\","
+>         << "\"dur\":" << (result.end - result.start) << ","
+>         << "\"name\":\"" << escapedName << "\","
+>         << "\"ph\":\"X\","
+>         << "\"pid\":0,"
+>         << "\"tid\":" << result.threadID << ","
+>         << "\"ts\":" << result.start;
+>
+>     // 如果注册了渲染类别，写入 cname（Chrome Trace Event 规范字段）
+>     if (result.category != ProfileCategory::Default) {
+>         m_outputStream << ",\"cname\":\"" << kCategoryColors[static_cast<int>(result.category)] << "\"";
+>     }
+>     m_outputStream << "}";
+>
+>     // 同时记录统计
+>     m_stats[result.name].totalUs += (result.end - result.start);
+>     m_stats[result.name].callCount++;
+>
+>     if (m_profileCount % 100 == 0) m_outputStream.flush();
+> }
+> ```
+>
+> ```cpp
+> // 重载宏：保留原 PROFILE_SCOPE 向后兼容，新增分类版
+> #if defined(ENABLE_PROFILING)
+>     #define PROFILE_SCOPE(name) \
+>         InstrumentationTimer _timer_##__LINE__(name, ProfileCategory::Default)
+>     #define PROFILE_SCOPE_CATEGORY(name, cat) \
+>         InstrumentationTimer _timer_##__LINE__(name, cat)
+>     #define PROFILE_FUNCTION()     PROFILE_SCOPE(__FUNCTION__)
+>     #define PROFILE_FUNCTION_CAT(cat) PROFILE_SCOPE_CATEGORY(__FUNCTION__, cat)
+> #else
+>     #define PROFILE_SCOPE(name)
+>     #define PROFILE_SCOPE_CATEGORY(name, cat)
+>     #define PROFILE_FUNCTION()
+>     #define PROFILE_FUNCTION_CAT(cat)
+> #endif
+> ```
+>
+> ```cpp
+> // InstrumentationTimer 增加 category 参数
+> class InstrumentationTimer {
+> public:
+>     explicit InstrumentationTimer(const char* name,
+>                                   ProfileCategory cat = ProfileCategory::Default)
+>         : m_name(name), m_category(cat), m_stopped(false)
+>     {
+>         m_startTimepoint = std::chrono::high_resolution_clock::now();
+>     }
+>
+>     ~InstrumentationTimer() { if (!m_stopped) Stop(); }
+>
+>     void Stop() {
+>         auto endTimepoint = std::chrono::high_resolution_clock::now();
+>         auto start = std::chrono::time_point_cast<std::chrono::microseconds>(
+>             m_startTimepoint).time_since_epoch().count();
+>         auto end = std::chrono::time_point_cast<std::chrono::microseconds>(
+>             endTimepoint).time_since_epoch().count();
+>
+>         uint32_t threadID = static_cast<uint32_t>(
+>             std::hash<std::thread::id>{}(std::this_thread::get_id()));
+>
+>         ProfileResult r{m_name, start, end, threadID, m_category};
+>         Profiler::Instance().WriteProfile(r);
+>         m_stopped = true;
+>     }
+>
+> private:
+>     const char* m_name;
+>     ProfileCategory m_category;
+>     std::chrono::time_point<std::chrono::high_resolution_clock> m_startTimepoint;
+>     bool m_stopped;
+> };
+> ```
+>
+> ```cpp
+> // 使用示例
+> void RenderScene() {
+>     PROFILE_SCOPE_CATEGORY("RenderScene", ProfileCategory::Rendering);
+>     // ...
+> }
+> ```
+>
+> #### 1.2 即时模式统计 — `PrintStats()`
+>
+> ```cpp
+> // 在 Profiler 类中添加统计结构和 PrintStats 方法
+> struct ProfileStat {
+>     long long totalUs = 0;
+>     int callCount = 0;
+> };
+>
+> // Profiler 私有成员
+> std::unordered_map<std::string, ProfileStat> m_stats;
+>
+> // PrintStats 实现 — 在 EndSession 前调用，输出排序后的统计表
+> void PrintStats(std::ostream& out = std::cout) {
+>     std::lock_guard<std::mutex> lock(m_mutex);
+>
+>     // 按 totalUs 降序排列
+>     std::vector<std::pair<std::string, ProfileStat>> sorted;
+>     for (const auto& [name, stat] : m_stats) {
+>         sorted.emplace_back(name, stat);
+>     }
+>     std::sort(sorted.begin(), sorted.end(),
+>         [](const auto& a, const auto& b) { return a.second.totalUs > b.second.totalUs; });
+>
+>     out << "\n========= Profile Statistics (sorted by total time) =========\n";
+>     out << std::left
+>         << std::setw(40) << "Name"
+>         << std::setw(12) << "Calls"
+>         << std::setw(14) << "Total(ms)"
+>         << std::setw(14) << "Avg(ms)"
+>         << std::setw(12) << "%" << "\n";
+>     out << std::string(92, '-') << "\n";
+>
+>     long long grandTotalUs = 0;
+>     for (const auto& [_, stat] : m_stats) grandTotalUs += stat.totalUs;
+>
+>     for (const auto& [name, stat] : sorted) {
+>         double totalMs = stat.totalUs / 1000.0;
+>         double avgMs = totalMs / static_cast<double>(stat.callCount);
+>         double pct = grandTotalUs > 0
+>             ? (100.0 * stat.totalUs / static_cast<double>(grandTotalUs)) : 0.0;
+>
+>         out << std::left
+>             << std::setw(40) << name
+>             << std::setw(12) << stat.callCount
+>             << std::setw(14) << std::fixed << std::setprecision(3) << totalMs
+>             << std::setw(14) << std::fixed << std::setprecision(3) << avgMs
+>             << std::setw(11) << std::fixed << std::setprecision(1) << pct << "%\n";
+>     }
+>     out << std::string(92, '-') << "\n";
+>     out << "Grand Total: " << (grandTotalUs / 1000.0) << " ms\n";
+> }
+> ```
+>
+> #### 1.3 线程名标注 — `metadata` 事件
+>
+> ```cpp
+> // 在 Profiler 类中新增：注册线程名 + 写入 meta 事件
+> class Profiler {
+> public:
+>     // 线程启动时调用一次，会在 JSON 头部插入 metadata 事件
+>     static void SetThreadName(const std::string& name) {
+>         std::lock_guard<std::mutex> lock(Instance().m_mutex);
+>         Instance().m_threadNames[std::this_thread::get_id()] = name;
+>
+>         // 如果 profiling session 已开启，立刻写入 metadata
+>         if (Instance().m_outputStream.is_open()) {
+>             WriteThreadNameMeta(Instance().m_outputStream, name);
+>         }
+>     }
+>
+> private:
+>     // WriteHeader 被修改为同时写入已注册的线程名
+>     void WriteHeader() {
+>         m_outputStream << "{\n  \"displayTimeUnit\": \"ms\",\n  \"traceEvents\": [";
+>         // 为主线程写入默认名
+>         WriteThreadNameMeta(m_outputStream, "MainThread");
+>
+>         // 写入所有已注册的非主线程名
+>         auto mainId = std::this_thread::get_id();
+>         for (const auto& [id, name] : m_threadNames) {
+>             if (id != mainId) {
+>                 m_outputStream << ",";
+>                 WriteThreadNameMeta(m_outputStream, name);
+>             }
+>         }
+>     }
+>
+>     static void WriteThreadNameMeta(std::ofstream& out, const std::string& name) {
+>         uint32_t tid = static_cast<uint32_t>(
+>             std::hash<std::thread::id>{}(std::this_thread::get_id()));
+>         out << "\n    {"
+>             << "\"name\":\"thread_name\","
+>             << "\"ph\":\"M\","      // M = Meta event
+>             << "\"pid\":0,"
+>             << "\"tid\":" << tid << ","
+>             << "\"args\":{\"name\":\"" << name << "\"}"
+>             << "}";
+>     }
+>
+>     std::unordered_map<std::thread::id, std::string> m_threadNames;
+>     // ... 其他成员不变
+> };
+> ```
+>
+> ```cpp
+> // 使用示例
+> void RenderThreadMain() {
+>     Profiler::SetThreadName("RenderThread");
+>     while (running) { /* ... */ }
+> }
+> ```
+
+> [!tip]- 练习 2: 集成 GPU 和 CPU 时间到统一分析器（FrameProfiler）
+>
+> #### 2.1 环形缓冲区处理 GPU 异步延迟
+>
+> ```cpp
+> // frame_profiler.hpp
+> #pragma once
+>
+> #include "profiler.hpp"  // 复用前面章节的 CPU Profiler
+> #include <array>
+> #include <string>
+>
+> // ============================================================
+> // GPU 查询结果（简化版 — 不依赖具体图形 API）
+> // ============================================================
+> struct GPUQuerySlot {
+>     std::string name;
+>     int frameIndex = -1;          // 所属帧序号
+>     double cpuSubmitTimeMs = 0.0; // CPU 提交命令时的帧时间（用于火焰图横轴对齐）
+>     double gpuDurationMs = 0.0;   // GPU 执行耗时（从 query 读回）
+>     bool ready = false;
+>     ProfileCategory category = ProfileCategory::Rendering;
+> };
+>
+> // ============================================================
+> // FrameProfiler — 统一 CPU + GPU 的帧级分析器
+> // ============================================================
+> class FrameProfiler {
+> public:
+>     static constexpr size_t kRingBufferSize = 4;  // GPU query 最多延迟 3 帧
+>     static constexpr double kDefaultBudgetMs = 16.67; // 60FPS
+>
+>     FrameProfiler()
+>         : m_frameIndex(0), m_currentWriter(0), m_frameBudgetUs(
+>             static_cast<long long>(kDefaultBudgetMs * 1000.0))
+>     {}
+>
+>     // ---- 每帧入口 ----
+>     void BeginFrame() {
+>         m_frameStartUs = NowUs();
+>         // 用 CPU Profiler 记录 Frame 事件起点
+>         Profiler::Instance().WriteProfile(
+>             {"Frame", m_frameStartUs, m_frameStartUs,
+>              CurrentThreadID(), ProfileCategory::Default});
+>     }
+>
+>     void EndFrame() {
+>         long long now = NowUs();
+>         // 写出 Frame Complete 事件（ph:"X"），Chrome Tracing 自动渲染为条形
+>         m_frameWriter[0] = now; // 临时用；实际由 WriteProfile 处理
+>
+>         // 计算帧耗时并检测超预算
+>         long long frameUs = now - m_frameStartUs;
+>
+>         // 写入 Flame 提示事件（超预算时红色高亮）
+>         auto cat = (frameUs > m_frameBudgetUs)
+>             ? ProfileCategory::Default : ProfileCategory::Default;
+>         // 超预算帧用不同的 name 后缀，方便在火焰图中一眼看到
+>         std::string frameName = "Frame";
+>         if (frameUs > m_frameBudgetUs) {
+>             frameName += " [OVER BUDGET " + std::to_string(frameUs / 1000) + "ms]";
+>         }
+>
+>         Profiler::Instance().WriteProfile(
+>             {frameName, m_frameStartUs, now,
+>              CurrentThreadID(), ProfileCategory::Rendering});
+>
+>         // 轮转环形缓冲区 — 从 N 帧前的 slot 读取 GPU 结果
+>         CollectGPUResults();
+>
+>         // 将本帧的 GPU 提交记录推进环形缓冲区
+>         AdvanceRingBuffer();
+>         m_frameIndex++;
+>     }
+>
+>     // ---- CPU 计时：帧内子事件（仍然用 Profiler 自动记录） ----
+>     // 宏方式：FRAME_PROFILE_SCOPE_CAT(name, cat)
+>     // 此处提供 manual API 版本
+>     void RecordCPUEvent(const std::string& name, long long startUs, long long endUs,
+>                         ProfileCategory cat = ProfileCategory::Default) {
+>         Profiler::Instance().WriteProfile(
+>             {name, startUs, endUs, CurrentThreadID(), cat});
+>     }
+>
+>     // ---- GPU 计时：提交查询 ----
+>     // 在 CPU 提交渲染命令时调用，记录提交时间以供后续对齐
+>     void SubmitGPUQuery(const std::string& name, ProfileCategory cat) {
+>         auto& slot = m_ringBuffer[m_currentWriter];
+>         slot.name = name;
+>         slot.frameIndex = m_frameIndex;
+>         slot.cpuSubmitTimeMs = static_cast<double>(
+>             std::chrono::duration_cast<std::chrono::microseconds>(
+>                 std::chrono::high_resolution_clock::now().time_since_epoch()
+>             ).count()) / 1000.0;
+>         slot.category = cat;
+>         slot.ready = false; // 等待 GPU 完成
+>         m_currentWriter = (m_currentWriter + 1) % kRingBufferSize;
+>     }
+>
+>     // 当 GPU 查询结果可用时，由外部调用填入耗时
+>     void CompleteGPUQuery(const std::string& name, double gpuDurationMs,
+>                           int frameIndex) {
+>         for (auto& slot : m_ringBuffer) {
+>             if (slot.name == name && slot.frameIndex == frameIndex && !slot.ready) {
+>                 slot.gpuDurationMs = gpuDurationMs;
+>                 slot.ready = true;
+>                 break;
+>             }
+>         }
+>     }
+>
+>     // 设置帧预算（微秒）
+>     void SetFrameBudgetUs(long long us) { m_frameBudgetUs = us; }
+>
+> private:
+>     // 收集已就绪的 GPU 结果并写入 JSON
+>     void CollectGPUResults() {
+>         for (auto& slot : m_ringBuffer) {
+>             if (slot.ready && slot.frameIndex >= 0) {
+>                 // GPU 事件写入独立的 Thread（用一个固定的大 tid 值标识）
+>                 constexpr uint32_t kGPUThreadID = 9999;
+>
+>                 long long gpuStartUs = static_cast<long long>(
+>                     slot.cpuSubmitTimeMs * 1000.0);
+>                 long long gpuEndUs = gpuStartUs +
+>                     static_cast<long long>(slot.gpuDurationMs * 1000.0);
+>
+>                 Profiler::Instance().WriteProfile(
+>                     {slot.name, gpuStartUs, gpuEndUs,
+>                      kGPUThreadID, slot.category});
+>
+>                 slot.ready = false; // 消费完毕
+>                 slot.frameIndex = -1;
+>             }
+>         }
+>     }
+>
+>     void AdvanceRingBuffer() {
+>         // 环形缓冲区只需轮流覆盖；CollectGPUResults 已消费就绪 slot
+>     }
+>
+>     static long long NowUs() {
+>         return std::chrono::duration_cast<std::chrono::microseconds>(
+>             std::chrono::high_resolution_clock::now().time_since_epoch()
+>         ).count();
+>     }
+>
+>     static uint32_t CurrentThreadID() {
+>         return static_cast<uint32_t>(
+>             std::hash<std::thread::id>{}(std::this_thread::get_id()));
+>     }
+>
+>     long long m_frameStartUs = 0;
+>     long long m_frameBudgetUs = static_cast<long long>(kDefaultBudgetMs * 1000.0);
+>     long long m_frameWriter[1]{}; // 辅助用
+>     int m_frameIndex = 0;
+>     size_t m_currentWriter = 0;
+>     std::array<GPUQuerySlot, kRingBufferSize> m_ringBuffer;
+> };
+> ```
+>
+> #### 2.2 使用示例
+>
+> ```cpp
+> FrameProfiler g_frameProfiler;
+>
+> void MainLoop() {
+>     Profiler::Instance().BeginSession("GameProfile", "frame_trace.json");
+>
+>     while (isRunning) {
+>         g_frameProfiler.BeginFrame();
+>
+>         // === CPU 阶段 ===
+>         {
+>             PROFILE_SCOPE_CATEGORY("CPU_Update", ProfileCategory::Default);
+>             UpdateGameLogic();
+>         }
+>         {
+>             PROFILE_SCOPE_CATEGORY("CPU_RenderSubmit", ProfileCategory::Rendering);
+>             CullScene();
+>             BuildCommandBuffers();
+>         }
+>
+>         // === GPU 提交（在 RenderThread 上） ===
+>         g_frameProfiler.SubmitGPUQuery("GPU_ShadowPass", ProfileCategory::Rendering);
+>         RenderShadowMap();
+>         // 实际引擎中，GPU query 结果由 RenderThread 回填
+>         g_frameProfiler.CompleteGPUQuery("GPU_ShadowPass",
+>             gpuTimer.GetElapsedMs("ShadowPass"), currentFrame);
+>
+>         g_frameProfiler.EndFrame();
+>
+>         // 如果超过预算，用红色标注 — 已在 EndFrame 内处理
+>     }
+>
+>     Profiler::Instance().EndSession();
+> }
+> ```
+>
+> #### 2.3 FrameBudget 红色高亮实现机制
+>
+> Chrome Tracing 本身不直接支持按阈值着色，这里使用三种互补策略：
+>
+> 1. **事件名称后缀**：超预算帧在 name 中追加 `[OVER BUDGET]`，火焰图中一目了然
+> 2. **cname 覆盖**：可在 `EndFrame` 中将超预算帧的 category 指定为特定颜色（如 `"red"` 对应红色）
+> 3. **额外的 Instant 事件**：超预算时写一条 `ph:"i"` 事件，在时间轴上显示为红色标记点
+>
+> ```cpp
+> // 在 EndFrame 中超预算检测后追加
+> if (frameUs > m_frameBudgetUs) {
+>     // Instant 标记事件 — 在时间轴上显示为红色感叹号
+>     Profiler::Instance().WriteProfile(
+>         {"FrameBudgetExceeded", now, now,
+>          CurrentThreadID(), ProfileCategory::Default});
+>     // 同时输出一条专用的 complete 事件作为红色条
+>     Profiler::Instance().WriteProfile(
+>         {"BudgetOverhead", m_frameStartUs + m_frameBudgetUs, now,
+>          CurrentThreadID(), ProfileCategory::Physics}); // 复用红色
+> }
+> ```
+
+> [!tip]- 练习 3（可选）: 内存分配追踪器
+>
+> #### 3.1 全局 operator new/delete 重载 + malloc/free 拦截
+>
+> ```cpp
+> // memory_profiler.hpp
+> #pragma once
+>
+> #include <cstddef>
+> #include <cstdint>
+> #include <cstdio>
+> #include <chrono>
+> #include <unordered_map>
+> #include <vector>
+> #include <mutex>
+> #include <atomic>
+> #include <algorithm>
+> #include <fstream>
+>
+> // ============================================================
+> // MemoryProfiler — 全局内存分配追踪
+> // ============================================================
+>
+> // 平台相关的栈回溯深度
+> #ifdef _WIN32
+>     #include <windows.h>
+>     #define MEMPROF_STACK_DEPTH 16
+>     #define MEMPROF_CAPTURE_STACK(frames, depth) \
+>         (depth) = CaptureStackBackTrace(0, MEMPROF_STACK_DEPTH, (frames), nullptr)
+>     using StackFrame = void*;
+> #else
+>     #include <execinfo.h>
+>     #define MEMPROF_STACK_DEPTH 16
+>     #define MEMPROF_CAPTURE_STACK(frames, depth) \
+>         (depth) = backtrace((frames), MEMPROF_STACK_DEPTH)
+>     using StackFrame = void*;
+> #endif
+>
+> struct AllocationRecord {
+>     void* ptr;
+>     size_t size;
+>     long long timestampUs;          // 分配时间（微秒）
+>     StackFrame callstack[MEMPROF_STACK_DEPTH];
+>     int stackDepth;
+>     bool isArray;
+> };
+>
+> class MemoryProfiler {
+> public:
+>     static MemoryProfiler& Instance() {
+>         static MemoryProfiler inst;
+>         return inst;
+>     }
+>
+>     // 启用追踪（在 main 最开头调用）
+>     void Enable() { m_enabled.store(true, std::memory_order_release); }
+>     void Disable() { m_enabled.store(false, std::memory_order_release); }
+>
+>     // 记录一次分配
+>     void OnAlloc(void* ptr, size_t size, bool isArray) {
+>         if (!m_enabled.load(std::memory_order_acquire)) return;
+>         if (!ptr) return;
+>
+>         AllocationRecord rec;
+>         rec.ptr = ptr;
+>         rec.size = size;
+>         rec.isArray = isArray;
+>         rec.timestampUs = NowUs();
+>         MEMPROF_CAPTURE_STACK(rec.callstack, rec.stackDepth);
+>
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         m_liveAllocs[ptr] = rec;
+>         m_totalAllocBytes += size;
+>         m_totalAllocCount++;
+>         m_sizesHistogram[size]++;
+>
+>         // 记录到事件流（用于 Chrome Tracing 导出）
+>         m_events.push_back({rec.timestampUs, size, true});
+>     }
+>
+>     // 记录一次释放
+>     void OnFree(void* ptr) {
+>         if (!m_enabled.load(std::memory_order_acquire)) return;
+>         if (!ptr) return;
+>
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         auto it = m_liveAllocs.find(ptr);
+>         if (it != m_liveAllocs.end()) {
+>             m_totalAllocBytes -= it->second.size;
+>             m_liveAllocs.erase(it);
+>         }
+>         m_totalFreeCount++;
+>         m_events.push_back({NowUs(), 0, false});
+>     }
+>
+>     // ---- 报告接口 ----
+>
+>     // 当前总分配量
+>     size_t GetCurrentAllocatedBytes() const { return m_totalAllocBytes; }
+>     size_t GetTotalAllocCount()     const { return m_totalAllocCount; }
+>     size_t GetLiveAllocationCount() const {
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         return m_liveAllocs.size();
+>     }
+>
+>     // 分配热点 — 按大小排序的 Top N
+>     std::vector<std::pair<size_t, size_t>> GetAllocationHotspots(int topN = 10) {
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         std::vector<std::pair<size_t, size_t>> sorted(
+>             m_sizesHistogram.begin(), m_sizesHistogram.end());
+>         std::sort(sorted.begin(), sorted.end(),
+>             [](const auto& a, const auto& b) { return a.second > b.second; });
+>         if (static_cast<int>(sorted.size()) > topN)
+>             sorted.resize(topN);
+>         return sorted;
+>     }
+>
+>     // 泄漏检测 — 程序退出时调用，列出所有未释放的分配
+>     std::vector<AllocationRecord> DetectLeaks() {
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         std::vector<AllocationRecord> leaks;
+>         for (const auto& [ptr, rec] : m_liveAllocs) {
+>             leaks.push_back(rec);
+>         }
+>         std::sort(leaks.begin(), leaks.end(),
+>             [](const auto& a, const auto& b) { return a.size > b.size; });
+>         return leaks;
+>     }
+>
+>     // 输出 Chrome Tracing 格式（ph:"i" 即时事件，展示在独立内存线程行）
+>     void WriteChromeTrace(const std::string& filepath) {
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         std::ofstream out(filepath);
+>
+>         out << "{\"displayTimeUnit\":\"ms\",\"traceEvents\":[\n";
+>
+>         // 内存线程 metadata
+>         out << "{\"name\":\"thread_name\",\"ph\":\"M\",\"pid\":0,\"tid\":8888,"
+>             << "\"args\":{\"name\":\"Memory\"}},\n";
+>
+>         bool first = true;
+>         for (const auto& ev : m_events) {
+>             if (!first) out << ",\n";
+>             first = false;
+>
+>             // ph:"i" = 即时事件（无时长），以圆形标记显示
+>             // 大小缩放为标记半径的粗略映射
+>             size_t sizeKB = ev.isAlloc ? (ev.size / 1024) : 0;
+>             out << "{\"name\":\"" << (ev.isAlloc ? "Alloc" : "Free") << "\","
+>                 << "\"ph\":\"i\","
+>                 << "\"pid\":0,\"tid\":8888,"
+>                 << "\"ts\":" << ev.timestampUs << ","
+>                 << "\"s\":\"t\","
+>                 << "\"args\":{\"size\":" << ev.size
+>                 << ",\"sizeKB\":" << sizeKB << "}"
+>                 << "}";
+>         }
+>
+>         out << "\n]}\n";
+>         out.close();
+>     }
+>
+>     // 打印泄漏报告
+>     void PrintLeakReport(std::ostream& out = std::cerr) {
+>         auto leaks = DetectLeaks();
+>         if (leaks.empty()) {
+>             out << "[MemoryProfiler] No leaks detected.\n";
+>             return;
+>         }
+>         out << "\n========== MEMORY LEAK REPORT ==========\n";
+>         out << "Total leaked allocations: " << leaks.size() << "\n";
+>         size_t totalLeaked = 0;
+>         for (const auto& l : leaks) {
+>             totalLeaked += l.size;
+>             out << "  ptr=" << l.ptr
+>                 << "  size=" << l.size
+>                 << "  isArray=" << (l.isArray ? "true" : "false")
+>                 << "\n";
+>         }
+>         out << "Total leaked bytes: " << totalLeaked << "\n";
+>         out << "==========================================\n";
+>     }
+>
+>     // 打印分配热点
+>     void PrintHotspotReport(std::ostream& out = std::cout) {
+>         auto hotspots = GetAllocationHotspots();
+>         out << "\n========== ALLOCATION HOTSPOTS ==========\n";
+>         for (const auto& [size, count] : hotspots) {
+>             out << "  size=" << size << " bytes  -> " << count << " allocations\n";
+>         }
+>         out << "==========================================\n";
+>     }
+>
+> private:
+>     MemoryProfiler() = default;
+>     ~MemoryProfiler() { PrintLeakReport(); }
+>
+>     static long long NowUs() {
+>         return std::chrono::duration_cast<std::chrono::microseconds>(
+>             std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+>     }
+>
+>     struct EventEntry {
+>         long long timestampUs;
+>         size_t size;
+>         bool isAlloc;
+>     };
+>
+>     std::atomic<bool> m_enabled{false};
+>     mutable std::mutex m_mutex;
+>     std::unordered_map<void*, AllocationRecord> m_liveAllocs;
+>     std::unordered_map<size_t, size_t> m_sizesHistogram; // size->count
+>     std::vector<EventEntry> m_events;
+>
+>     std::atomic<size_t> m_totalAllocBytes{0};
+>     std::atomic<size_t> m_totalAllocCount{0};
+>     std::atomic<size_t> m_totalFreeCount{0};
+> };
+> ```
+>
+> ```cpp
+> // 全局 operator new/delete 重载（放在 memory_profiler.cpp 或独立翻译单元）
+> #include "memory_profiler.hpp"
+>
+> // ---- scalar new/delete ----
+> void* operator new(size_t size) {
+>     void* ptr = std::malloc(size);
+>     if (!ptr) throw std::bad_alloc();
+>     MemoryProfiler::Instance().OnAlloc(ptr, size, false);
+>     return ptr;
+> }
+>
+> void operator delete(void* ptr) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     std::free(ptr);
+> }
+>
+> void operator delete(void* ptr, size_t /*size*/) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     std::free(ptr);
+> }
+>
+> // ---- array new/delete ----
+> void* operator new[](size_t size) {
+>     void* ptr = std::malloc(size);
+>     if (!ptr) throw std::bad_alloc();
+>     MemoryProfiler::Instance().OnAlloc(ptr, size, true);
+>     return ptr;
+> }
+>
+> void operator delete[](void* ptr) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     std::free(ptr);
+> }
+>
+> void operator delete[](void* ptr, size_t /*size*/) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     std::free(ptr);
+> }
+>
+> // ---- aligned new/delete (C++17) ----
+> void* operator new(size_t size, std::align_val_t align) {
+>     void* ptr = ::_aligned_malloc(size, static_cast<size_t>(align));
+>     if (!ptr) throw std::bad_alloc();
+>     MemoryProfiler::Instance().OnAlloc(ptr, size, false);
+>     return ptr;
+> }
+>
+> void operator delete(void* ptr, std::align_val_t /*align*/) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     ::_aligned_free(ptr);
+> }
+>
+> void operator delete(void* ptr, size_t /*size*/, std::align_val_t /*align*/) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     ::_aligned_free(ptr);
+> }
+>
+> void* operator new[](size_t size, std::align_val_t align) {
+>     void* ptr = ::_aligned_malloc(size, static_cast<size_t>(align));
+>     if (!ptr) throw std::bad_alloc();
+>     MemoryProfiler::Instance().OnAlloc(ptr, size, true);
+>     return ptr;
+> }
+>
+> void operator delete[](void* ptr, std::align_val_t /*align*/) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     ::_aligned_free(ptr);
+> }
+>
+> void operator delete[](void* ptr, size_t /*size*/, std::align_val_t /*align*/) noexcept {
+>     MemoryProfiler::Instance().OnFree(ptr);
+>     ::_aligned_free(ptr);
+> }
+> ```
+>
+> #### 3.2 使用示例
+>
+> ```cpp
+> // main.cpp
+> #include "memory_profiler.hpp"
+>
+> int main() {
+>     MemoryProfiler::Instance().Enable();
+>
+>     // 应用程序主循环
+>     for (int i = 0; i < 100; ++i) {
+>         auto* buf = new char[1024];  // 刻意制造泄漏
+>         if (i % 50 == 0) delete[] buf;
+>     }
+>
+>     // 程序退出前输出报告
+>     MemoryProfiler::Instance().PrintHotspotReport();
+>     MemoryProfiler::Instance().WriteChromeTrace("memory_trace.json");
+>
+>     // 注意：DetectLeaks() / PrintLeakReport() 在 ~MemoryProfiler() 中自动调用
+>     // 但由于静态析构顺序问题，建议显式调用
+>     MemoryProfiler::Instance().PrintLeakReport();
+>
+>     MemoryProfiler::Instance().Disable();
+>     return 0;
+> }
+> ```
+>
+> #### 3.3 设计要点与注意事项
+>
+> 1. **线程安全**：使用细粒度锁保护 `m_liveAllocs` 和 `m_events`，热路径上计数使用 `std::atomic` 避免锁竞争
+> 2. **递归保护**：`OnAlloc` 内部可能触发 `std::unordered_map` 的内存分配，形成无限递归。解决方案：
+>    - 使用 `std::pmr::unordered_map` + 预分配内存池，或
+>    - 在 `OnAlloc` 入口处用 `thread_local` 标志位跳过追踪
+> 3. **避免影响性能**：仅在 `ENABLE_MEMORY_PROFILING` 宏下编译，Release 构建中完全移除
+> 4. **Chrome Tracing 输出**：内存事件写在 tid=8888 的虚拟线程上，使用 `ph:"i"` 即时事件；分配大小通过 `args.size` 字段携带
+> 5. **泄漏检测可靠性**：静态对象在 `main` 返回后的析构顺序不确定，`MemoryProfiler` 的析构可能在其他静态对象之前执行，导致误报。建议显式调用 `PrintLeakReport()` 作为 `main` 的最后一步
 
 ## 4. 扩展阅读
 

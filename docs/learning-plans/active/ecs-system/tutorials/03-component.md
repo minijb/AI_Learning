@@ -420,6 +420,172 @@ memcpy 复制: (1,2,3) == (1,2,3) ✓
 - 对比压缩前后的内存占用
 - 分析运行时解压的开销是否值得
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // ========== 2D 射击游戏组件定义（全部 POD） ==========
+>
+> // ---- 运动相关 ----
+> struct Position {       // 8 bytes, align 4
+>     float x = 0, y = 0;
+> };
+> struct Velocity {       // 8 bytes, align 4
+>     float dx = 0, dy = 0;
+> };
+> struct Rotation {       // 4 bytes, align 4 — 弧度制
+>     float angle = 0;
+> };
+> struct AngularVelocity { // 4 bytes, align 4
+>     float radiansPerSec = 0;
+> };
+>
+> // ---- 战斗相关 ----
+> struct Health {         // 8 bytes, align 4
+>     int current = 100, max = 100;
+> };
+> struct Damage {         // 8 bytes, align 4
+>     int amount = 10;
+>     int sourceTeam = 0; // 避免友军伤害
+> };
+> struct Shield {         // 8 bytes, align 4
+>     int current = 50, max = 50;
+>     float rechargeDelay = 3.0f;  // 脱战 3 秒后开始回盾
+> };
+> struct Armor {          // 4 bytes, align 4
+>     float reductionPercent = 0.2f;  // 20% 减伤
+> };
+>
+> // ---- 视觉相关 ----
+> struct Sprite {         // 12 bytes, align 4
+>     int textureId = -1;
+>     int width = 32, height = 32;
+> };
+> struct Animation {      // 16 bytes, align 4
+>     int animSetId = -1;
+>     int currentFrame = 0;
+>     float frameTime = 0.1f;      // 每帧持续时间
+>     float elapsed = 0;            // 当前帧已过时间
+> };
+> struct ParticleEmitter { // 20 bytes, align 4
+>     int particleType = -1;
+>     float emitRate = 10.0f;      // 每秒发射粒子数
+>     float elapsed = 0;
+>     float lifetime = 2.0f;       // 发射器持续时间
+>     bool looping = true;
+> };
+>
+> // ---- 行为相关 ----
+> struct AIState {        // 8 bytes, align 4
+>     enum State { Idle, Patrol, Chase, Attack, Flee } state = Idle;
+>     float stateTimer = 0;        // 当前状态已持续时间
+> };
+> struct PatrolPath {     // 动态大小（std::vector），非严格 POD
+>     std::vector<Position> waypoints;  // 注意：含 vector，不可 memcpy
+>     int currentIdx = 0;
+> };
+> struct Target {         // 12 bytes, align 4
+>     uint32_t entityIndex = -1;   // 用 index 而非完整 Entity 减少大小
+>     float aggroRange = 10.0f;
+> };
+>
+> // 编译期验证
+> static_assert(std::is_trivially_copyable_v<Position>, "");
+> static_assert(std::is_trivially_copyable_v<Health>, "");
+> static_assert(std::is_trivially_copyable_v<Sprite>, "");
+> // PatrolPath 含有 std::vector，不是 trivially copyable——这是合理的设计取舍
+> ```
+>
+> **设计要点**：大多数组件保持在 4-16 字节，一个缓存行（64 字节）可容纳 4-16 个组件。`PatrolPath` 因含 `vector` 不是严格 POD，但这是必要的——路点数量动态变化。实际 ECS 中少量非 POD 组件是可接受的，核心原则是避免虚函数和 `shared_ptr`。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // ========== 版本化组件热迁移方案 ==========
+>
+> // 步骤 1: V1 版本（旧代码）
+> struct Health_V1 { int hp; };
+> ComponentTypeId TYPE_HEALTH_V1 = get_component_type_id<Health_V1>();
+>
+> // 步骤 2: V2 版本（新代码）
+> struct Health_V2 { int current; int max; };
+> ComponentTypeId TYPE_HEALTH_V2 = get_component_type_id<Health_V2>();
+>
+> // 步骤 3: 迁移函数
+> // 在 World 初始化或 tick 开始时调用
+> void migrate_health_v1_to_v2(WorldLike& world) {
+>     // 遍历所有拥有 V1 组件的实体
+>     for (auto e : entities_with<Health_V1>()) {
+>         Health_V1* old = world.get<Health_V1>(e);
+>         // 从 V1 数据构造 V2（hp=100 → current=100, max=100）
+>         Health_V2 newData{old->hp, old->hp};  // 用 V1 的 hp 作为 max
+>         world.add<Health_V2>(e, newData);
+>         world.remove<Health_V1>(e);           // 移除旧版本
+>     }
+>     // 迁移完成后，所有 System 只查询 V2——旧 V1 代码可废弃
+> }
+>
+> // 步骤 4: System 过渡期兼容
+> // 如果无法一次性迁移所有实体，System 需要同时检查两个版本：
+> void damage_system_compat(WorldLike& world, Entity e, int dmg) {
+>     auto* h2 = world.get<Health_V2>(e);
+>     if (h2) {
+>         h2->current -= dmg;
+>     } else {
+>         auto* h1 = world.get<Health_V1>(e);
+>         if (h1) h1->hp -= dmg;
+>     }
+> }
+> ```
+>
+> **核心思路**：
+> - `ComponentTypeId` 按类型分配 → `Health_V1` 和 `Health_V2` 获得**不同的类型 ID**
+> - 新旧组件在存储中**完全隔离**——两个不同的 `ComponentStorage` 实例
+> - 迁移是逐步的：新 System 同时读 V1/V2，后台线程迁移数据，最后移除 V1 支持
+> - 这对服务器热更新至关重要：不需要停服即可升级数据格式
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // ========== 位域压缩方案（棋类游戏示例） ==========
+>
+> // 原始方案（每个组件独立）：Position 8B + Owner 8B + PieceType 4B = 20 bytes/实体
+> struct Position { float x, y; };  // 8 bytes
+> struct Owner    { int player; };    // 4 bytes
+> struct PieceType { int type; };     // 4 bytes
+>
+> // 压缩方案：一个 uint32_t 编码所有信息
+> struct CompactPiece {
+>     uint32_t data;  // 4 bytes —— 压缩比 5:1
+>     // 位布局（32 位）：
+>     // [31:24] Row       — 8 位（0-255，棋盘最大 255 格）
+>     // [23:16] Col       — 8 位
+>     // [15:12] Owner     — 4 位（0-15 个玩家）
+>     // [11:8]  Type      — 4 位（16 种棋子）
+>     // [7:4]   State     — 4 位（正常/被吃/升变/...)
+>     // [3:0]   预留       — 4 位
+>
+>     int row()        const { return (data >> 24) & 0xFF; }
+>     int col()        const { return (data >> 16) & 0xFF; }
+>     int owner()      const { return (data >> 12) & 0xF; }
+>     int piece_type() const { return (data >> 8)  & 0xF; }
+>
+>     void set_row(int r) { data = (data & ~0xFF000000u) | (uint32_t(r) << 24); }
+>     void set_col(int c) { data = (data & ~0x00FF0000u) | (uint32_t(c) << 16); }
+> };
+> ```
+>
+> **压缩 vs 原始对比**：
+> | 指标 | 原始方案 | 位域压缩 |
+> |------|---------|---------|
+> | 每实体字节 | 20 B | 4 B |
+> | 10000 实体 | 200 KB | 40 KB |
+> | 缓存行利用率 | 3.2 实体/行 | 16 实体/行 |
+> | 解压开销/字段 | ~0 ns（直接 load） | ~2-3 条指令（shift+mask） |
+>
+> **是否值得**：
+> - **值得的场景**：数据量大（百万级）、访问频率高（每帧遍历）、字段值域小（像棋类游戏的 8×8 棋盘）
+> - **不值得的场景**：字段需要浮点精度（位置用 float 而非 int）、字段值域大（无法用位域表示）、System 频繁修改单个字段（解压+重压开销 > 节省的内存带宽）
+> - **工程实践**：大多数游戏不需要这种极致优化——先用普通 struct，profiling 发现瓶颈后再考虑
 ---
 
 ## 4. 扩展阅读

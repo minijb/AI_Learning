@@ -550,6 +550,179 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **光源审计模板：**
+>
+> ```
+> 场景: [名称] | 帧预算: 16.67ms (60fps)
+>
+> 光源统计:
+> ┌──────────┬──────┬────────┬──────────┬─────────┬──────────────┐
+> │ 类型     │ 数量 │ 投射阴影│ 阴影分辨率│ 范围(m) │ 备注         │
+> ├──────────┼──────┼────────┼──────────┼─────────┼──────────────┤
+> │Directional│  1   │   是   │  2048×4  │ 无限    │ 主光源(必须)  │
+> │ Point    │  23  │   5    │  1024    │ 10-50   │ 5 个有阴影!   │
+> │ Spot     │  8   │   2    │  512     │ 8-30    │ 2 个有阴影!   │
+> │ Area     │  4   │   0    │  N/A     │ 3-10    │ 补光(无阴影)  │
+> └──────────┴──────┴────────┴──────────┴─────────┴──────────────┘
+>
+> 3 个可能不必要的阴影光源:
+>
+> 1. "WallTorch_PointLight_03" — 墙上火炬，范围 5m
+>    阴影几乎不可见（太小太暗），可禁用阴影 → 节省 1 个 Shadow Map 渲染
+>
+> 2. "Hallway_FillLight" — 走廊补光，范围 8m
+>    不投射主阴影，且 3 个方向光已覆盖阴影 → 禁用阴影
+>
+> 3. "Exterior_Ambient_Spot" — 室外环境 Spot，范围 50m
+>    范围太大但亮度低，几乎不产生可见阴影 → 禁用阴影，Range 降到 30m
+>
+> 估算节省:
+>   每减少 1 个阴影光源 = 减少 1 次 Shadow Map 渲染 Pass
+>   @ 1024 Shadow Map, 场景 500 物体 → 约 1-2ms GPU 时间
+>   减少 3 个 → 节约 3-6ms GPU 时间
+> ```
+>
+> **查找"不必要阴影"的启发式规则**：
+> - 灯光 Range < 5m 且亮度 < 1.0 → 阴影几乎不可见
+> - 补光 / Fill Light → 通常不需要阴影
+> - 在其他光源 Shadow Map 范围内的重叠光源 → 阴影被覆盖
+> - 快速移动或闪烁的光源 → 阴影反而显得奇怪
+
+> [!tip]- 练习 2 参考答案
+> **Cascade Shadow Map 调整步骤和预期结果：**
+>
+> **Unity 操作**：
+> 1. 选中 Directional Light → Inspector → Shadow Type
+> 2. 将 Cascades 从 4 降到 2
+> 3. 在 Quality Settings 中调整 Cascade 分辨率：
+>    - Cascade 0: 2048 (保持)
+>    - Cascade 1: 512 (从 1024 降低)
+> 4. Shadow Distance: 从 100m 降到 60m
+>
+> **UE 操作**：
+> 1. Directional Light → Cascaded Shadow Maps
+> 2. Dynamic Shadow Cascades: 4 → 2
+> 3. Cascade Distribution Exponent: 调整使 Cascade 1 覆盖更近
+> 4. Shadow Distance: 100m → 60m (或 `r.Shadow.DistanceScale 0.6`)
+>
+> **预期帧率变化**（1080p, 典型场景）：
+> ```
+> 配置                    Shadow Map 渲染   帧时间     vs 默认
+> ─────────────────────────────────────────────────────────────
+> 默认(4 cascade, 100m)   4× Shadow Pass    ~4.5ms    基准
+> 2 cascade, 100m         2× Shadow Pass    ~3.2ms    -30%
+> 2 cascade, 60m          2× Shadow Pass    ~2.1ms    -53%
+> 2 cascade, 60m, 低分辨率 2× (2048+512)   ~1.8ms    -60%
+> ```
+>
+> **可接受的视觉妥协点**：
+> - 远景阴影消失 → 用 Distance Field Shadows 或 Contact Shadows 补偿
+> - Cascade 边缘更明显 → 增加 Cascade Blend 区域
+> - 远景阴影锯齿 → 提高 Shadow Filter Quality 但不提高分辨率
+>
+> **最佳实践**：Shadow Distance = Camera Far Clip × 30~50%。如果玩家很少看到 100m 外的阴影，减少到 50-60m 是零成本优化。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Unity Compute Shader 实现 Tiled Light Culling 的关键架构：**
+>
+> ```hlsl
+> // TiledLightCulling.compute — Unity 中的 Tiled Light Culling
+> // 所需输入 Buffer:
+> //   StructuredBuffer<float4> _LightsPositionRange;  // xyz=pos, w=range
+> //   StructuredBuffer<float4> _LightsColor;           // rgb=color, a=intensity
+> //   Texture2D<float> _DepthTexture;                  // 深度缓冲
+> //   float4x4 _InvProjectionMatrix;                   // 逆投影矩阵
+> //
+> // 输出 Buffer:
+> //   RWStructuredBuffer<uint> _LightIndexList;  // 所有 Tile 的光源索引(扁平)
+> //   RWStructuredBuffer<uint2> _LightGrid;      // x=offset, y=count per tile
+>
+> #define TILE_SIZE 16
+> #define MAX_LIGHTS_PER_TILE 64
+>
+> float LinearEyeDepth(float z) {
+>     // 将非线性深度缓冲值转为线性眼空间深度
+>     return 1.0 / (_ZBufferParams.z * z + _ZBufferParams.w);
+> }
+>
+> [numthreads(TILE_SIZE, TILE_SIZE, 1)]
+> void CSMain(uint3 groupID : SV_GroupID, uint3 threadID : SV_DispatchThreadID) {
+>     uint2 tileID = groupID.xy;
+>     uint tileIndex = tileID.y * _TileCountX + tileID.x;
+>
+>     // Step 1: 在 LDS 中计算 Tile 的 min/max 深度
+>     groupshared uint gsMinDepth;
+>     groupshared uint gsMaxDepth;
+>
+>     if (threadID.x == 0 && threadID.y == 0) {
+>         gsMinDepth = 0xFFFFFFFF;
+>         gsMaxDepth = 0;
+>     }
+>     GroupMemoryBarrierWithGroupSync();
+>
+>     float depth = _DepthTexture[threadID.xy].r;
+>     uint depthAsUint = asuint(depth);
+>     InterlockedMin(gsMinDepth, depthAsUint);
+>     InterlockedMax(gsMaxDepth, depthAsUint);
+>     GroupMemoryBarrierWithGroupSync();
+>
+>     float minDepth = LinearEyeDepth(asfloat(gsMinDepth));
+>     float maxDepth = LinearEyeDepth(asfloat(gsMaxDepth));
+>
+>     // Step 2: 构建 Tile 的视锥体
+>     // (从 tileID 和深度范围计算 4 个侧面的平面方程)
+>
+>     // Step 3: 遍历所有光源 → 保存影响此 Tile 的索引
+>     if (threadID.x == 0 && threadID.y == 0) {
+>         uint lightIndices[MAX_LIGHTS_PER_TILE];
+>         uint lightCount = 0;
+>
+>         for (uint i = 0; i < _LightCount; i++) {
+>             // 球-视锥体相交测试 (或简化为球-AABB 测试)
+>             float3 lightPos = _LightsPositionRange[i].xyz;
+>             float range = _LightsPositionRange[i].w;
+>
+>             if (/* light affects this tile */) {
+>                 lightIndices[lightCount++] = i;
+>                 if (lightCount >= MAX_LIGHTS_PER_TILE) break;
+>             }
+>         }
+>
+>         // Step 4: 写入全局光源索引列表
+>         uint offset;
+>         InterlockedAdd(_GlobalIndexCounter, lightCount, offset);
+>         _LightGrid[tileIndex] = uint2(offset, lightCount);
+>         for (uint j = 0; j < lightCount; j++) {
+>             _LightIndexList[offset + j] = lightIndices[j];
+>         }
+>     }
+> }
+> ```
+>
+> **在 Shader 中使用**：
+> ```hlsl
+> // Fragment Shader 中读取 Tile 的光源列表:
+> uint2 tileID = uint2(floor(i.screenPos.xy / TILE_SIZE));
+> uint tileIndex = tileID.y * _TileCountX + tileID.x;
+> uint2 gridData = _LightGrid[tileIndex];
+> uint lightOffset = gridData.x;
+> uint lightCount  = gridData.y;
+>
+> float3 lighting = float3(0,0,0);
+> for (uint i = 0; i < lightCount; i++) {
+>     uint lightIdx = _LightIndexList[lightOffset + i];
+>     lighting += ComputeLight(lightIdx, worldPos, normal, viewDir);
+> }
+> ```
+>
+> **预期提升**：100 个 Point Light 场景，无 Light Culling → ~30ms，有 Tiled Light Culling → ~5ms（约 6× 提升，因为每个像素从处理 100 个光降到平均 3-5 个）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Olsson et al. — Clustered Deferred and Forward Shading** (HPG 2012)：Clustered Shading 的原始论文

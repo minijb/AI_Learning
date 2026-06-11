@@ -1163,6 +1163,541 @@ public record StockTick(string Symbol, decimal Price, long Volume, DateTime Time
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：事件式温度传感器系统
+>   
+> ```csharp
+> using System;
+> 
+> // ============================================
+> // TemperatureChangedEventArgs
+> // ============================================
+> public class TemperatureChangedEventArgs : EventArgs
+> {
+>     public double Temperature { get; }
+>     public DateTime Timestamp { get; }
+> 
+>     public TemperatureChangedEventArgs(double temperature, DateTime timestamp)
+>     {
+>         Temperature = temperature;
+>         Timestamp = timestamp;
+>     }
+> }
+> 
+> // ============================================
+> // TemperatureSensor（Subject）
+> // ============================================
+> public class TemperatureSensor
+> {
+>     private double _temperature;
+> 
+>     // 声明事件
+>     public event EventHandler<TemperatureChangedEventArgs>? TemperatureChanged;
+> 
+>     public double Temperature
+>     {
+>         get => _temperature;
+>         set
+>         {
+>             if (Math.Abs(_temperature - value) > 0.01)
+>             {
+>                 _temperature = value;
+>                 OnTemperatureChanged(value);
+>             }
+>         }
+>     }
+> 
+>     // 触发事件的受保护虚方法（派生类可重写）
+>     protected virtual void OnTemperatureChanged(double newTemp)
+>     {
+>         Console.WriteLine($"[Sensor] 温度变化: {newTemp:F1}°C @ {DateTime.Now:HH:mm:ss}");
+>         TemperatureChanged?.Invoke(this,
+>             new TemperatureChangedEventArgs(newTemp, DateTime.Now));
+>     }
+> 
+>     // 便捷方法：直接更新温度并触发通知
+>     public void UpdateTemperature(double newTemp)
+>     {
+>         Temperature = newTemp;
+>     }
+> }
+> 
+> // ============================================
+> // Display（Observer）— 显示当前温度
+> // ============================================
+> public class Display
+> {
+>     private readonly string _name;
+> 
+>     public Display(string name) => _name = name;
+> 
+>     // 事件处理方法
+>     public void OnTemperatureChanged(object? sender, TemperatureChangedEventArgs e)
+>     {
+>         Console.WriteLine($"  [{_name}] 当前温度: {e.Temperature:F1}°C ({e.Timestamp:HH:mm:ss})");
+>     }
+> }
+> 
+> // ============================================
+> // Alarm（Observer）— 高温警报
+> // ============================================
+> public class Alarm
+> {
+>     private readonly double _threshold;
+>     private readonly string _label;
+> 
+>     public Alarm(double threshold, string label = "警报")
+>     {
+>         _threshold = threshold;
+>         _label = label;
+>     }
+> 
+>     public void OnTemperatureChanged(object? sender, TemperatureChangedEventArgs e)
+>     {
+>         if (e.Temperature >= _threshold)
+>         {
+>             Console.WriteLine($"  [{_label}] ⚠ 高温警报！当前 {e.Temperature:F1}°C，超过阈值 {_threshold}°C！");
+>         }
+>         else
+>         {
+>             Console.WriteLine($"  [{_label}] 温度正常 ({e.Temperature:F1}°C < {_threshold}°C)");
+>         }
+>     }
+> }
+> 
+> // ============================================
+> // 客户端代码——验证 3 次温度变化
+> // ============================================
+> Console.WriteLine("=== 温度监控系统（event 实现）===\n");
+> 
+> var sensor = new TemperatureSensor();
+> 
+> // 创建观察者
+> var mainDisplay = new Display("主屏幕");
+> var alarm = new Alarm(40, "高温");
+> 
+> // 订阅事件
+> sensor.TemperatureChanged += mainDisplay.OnTemperatureChanged;
+> sensor.TemperatureChanged += alarm.OnTemperatureChanged;
+> 
+> // 改变温度 3 次
+> Console.WriteLine("--- 温度变化 1 ---");
+> sensor.UpdateTemperature(25.0);
+> 
+> Console.WriteLine("\n--- 温度变化 2 ---");
+> sensor.UpdateTemperature(38.5);
+> 
+> Console.WriteLine("\n--- 温度变化 3 ---");
+> sensor.UpdateTemperature(42.8);
+> 
+> // 测试取消订阅
+> Console.WriteLine("\n--- 取消 Alarm 订阅后 ---");
+> sensor.TemperatureChanged -= alarm.OnTemperatureChanged;
+> sensor.UpdateTemperature(45.0); // Alarm 不再收到通知
+> 
+> /* 预期输出:
+> === 温度监控系统（event 实现）===
+> 
+> --- 温度变化 1 ---
+> [Sensor] 温度变化: 25.0°C @ 15:30:01
+>   [主屏幕] 当前温度: 25.0°C (15:30:01)
+>   [高温] 温度正常 (25.0°C < 40°C)
+> 
+> --- 温度变化 2 ---
+> [Sensor] 温度变化: 38.5°C @ 15:30:02
+>   [主屏幕] 当前温度: 38.5°C (15:30:02)
+>   [高温] 温度正常 (38.5°C < 40°C)
+> 
+> --- 温度变化 3 ---
+> [Sensor] 温度变化: 42.8°C @ 15:30:03
+>   [主屏幕] 当前温度: 42.8°C (15:30:03)
+>   [高温] ⚠ 高温警报！当前 42.8°C，超过阈值 40°C！
+> 
+> --- 取消 Alarm 订阅后 ---
+> [Sensor] 温度变化: 45.0°C @ 15:30:04
+>   [主屏幕] 当前温度: 45.0°C (15:30:04)
+> */
+> ```
+>
+> **关键点：**
+> - `event EventHandler<T>` 是 C# 观察者模式的一等公民——编译器自动生成 `add`/`remove` 访问器，线程安全
+> - `OnTemperatureChanged` 作为 `protected virtual` 方法——遵循 .NET 事件模式，派生类可扩展
+> - `Temperature` setter 中检测值变化后才触发事件——避免不必要的通知
+> - 取消订阅用 `-=`——忘记取消是观察者模式最常见的 bug（内存泄漏）
+
+> [!tip]- 练习 2 参考答案：弱事件模式防止内存泄漏
+>   
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+> 
+> // ============================================
+> // WeakEvent — 基于 WeakReference 的事件系统
+> // ============================================
+> public class WeakEvent
+> {
+>     private readonly List<WeakReference<Delegate>> _handlers = new();
+> 
+>     public void AddHandler(Delegate handler)
+>     {
+>         // 防止重复添加同一个目标的方法
+>         RemoveCollectedHandlers();
+>         // 检查是否已存在（比较目标和方法）
+>         foreach (var wr in _handlers)
+>         {
+>             if (wr.TryGetTarget(out var existing) && existing == handler)
+>                 return;
+>         }
+>         _handlers.Add(new WeakReference<Delegate>(handler));
+>     }
+> 
+>     public void RemoveHandler(Delegate handler)
+>     {
+>         for (int i = _handlers.Count - 1; i >= 0; i--)
+>         {
+>             if (_handlers[i].TryGetTarget(out var existing) && existing == handler)
+>             {
+>                 _handlers.RemoveAt(i);
+>                 return;
+>             }
+>         }
+>     }
+> 
+>     public void Invoke(params object[] args)
+>     {
+>         var deadRefs = new List<int>();
+> 
+>         for (int i = 0; i < _handlers.Count; i++)
+>         {
+>             if (_handlers[i].TryGetTarget(out var handler))
+>             {
+>                 try
+>                 {
+>                     handler.DynamicInvoke(args);
+>                 }
+>                 catch (Exception ex)
+>                 {
+>                     Console.WriteLine($"  [WeakEvent] Handler 执行异常: {ex.Message}");
+>                 }
+>             }
+>             else
+>             {
+>                 deadRefs.Add(i);
+>             }
+>         }
+> 
+>         // 清理已回收的引用（从后往前删除）
+>         for (int i = deadRefs.Count - 1; i >= 0; i--)
+>         {
+>             _handlers.RemoveAt(deadRefs[i]);
+>         }
+>     }
+> 
+>     private void RemoveCollectedHandlers()
+>     {
+>         _handlers.RemoveAll(wr => !wr.TryGetTarget(out _));
+>     }
+> 
+>     public int AliveHandlerCount
+>     {
+>         get
+>         {
+>             int count = 0;
+>             foreach (var wr in _handlers)
+>                 if (wr.TryGetTarget(out _)) count++;
+>             return count;
+>         }
+>     }
+> }
+> 
+> // ============================================
+> // Subject — 使用 WeakEvent 替代普通 event
+> // ============================================
+> public class WeakEventSubject
+> {
+>     private readonly WeakEvent _onDataChanged = new();
+> 
+>     // 提供 AddHandler/RemoveHandler 而非 event
+>     public void AddDataChangedHandler(Delegate handler)
+>         => _onDataChanged.AddHandler(handler);
+> 
+>     public void RemoveDataChangedHandler(Delegate handler)
+>         => _onDataChanged.RemoveHandler(handler);
+> 
+>     public void Fire(string data)
+>     {
+>         Console.WriteLine($"[Subject] Fire: {data}, 存活 Handler: {_onDataChanged.AliveHandlerCount}");
+>         _onDataChanged.Invoke(this, data);
+>     }
+> }
+> 
+> // ============================================
+> // Observer — 短生命周期对象
+> // ============================================
+> public class WeakEventObserver
+> {
+>     public static int InstanceCount;
+>     private readonly int _id;
+> 
+>     public WeakEventObserver()
+>     {
+>         _id = ++InstanceCount;
+>         Console.WriteLine($"  [Observer #{_id}] 创建");
+>     }
+> 
+>     ~WeakEventObserver()
+>     {
+>         Console.WriteLine($"  [Observer #{_id}] 被 GC 回收");
+>     }
+> 
+>     public void OnDataChanged(object? sender, string data)
+>     {
+>         Console.WriteLine($"  [Observer #{_id}] 收到数据: {data}");
+>     }
+> }
+> 
+> // ============================================
+> // 测试代码：验证 GC 后 Observer 不再收到通知
+> // ============================================
+> static void TestWeakEvent()
+> {
+>     Console.WriteLine("=== 弱事件模式（WeakEvent）===\n");
+> 
+>     var subject = new WeakEventSubject();
+> 
+>     // 创建 Observer 并订阅
+>     Console.WriteLine("[创建] Subject 和 Observer");
+>     var observer = new WeakEventObserver();
+>     subject.AddDataChangedHandler(
+>         new Action<object?, string>(observer.OnDataChanged));
+> 
+>     // 触发事件——Observer 能收到
+>     Console.WriteLine("[触发] Subject.Fire() → Observer.OnEvent 被调用");
+>     subject.Fire("Hello");
+> 
+>     // 让 Observer 超出作用域 + 强制 GC
+>     Console.WriteLine("\n[GC] Observer 超出作用域，强制 GC");
+>     observer = null!;
+>     GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+>     GC.WaitForPendingFinalizers();
+>     // 再触发一次确保清理
+>     GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true);
+> 
+>     // 再次触发——Observer 不应收到通知
+>     Console.WriteLine("\n[再触发] Subject.Fire() → Observer 不再收到通知");
+>     subject.Fire("World");
+> 
+>     Console.WriteLine($"\n存活 Handler 数: {subject.AliveHandlerCount} (期望: 0)");
+> }
+> ```
+>
+> **关键点：**
+> - `WeakReference<Delegate>` 允许 GC 在 Observer 没有其他强引用时回收它
+> - `Invoke` 时跳过已回收的引用并清理空槽——防止 `_handlers` 列表膨胀
+> - 注意：`GC.Collect()` 在生产代码中不推荐手动调用，此处仅用于测试验证
+> - 局限性：匿名 lambda 闭包可能捕获外部变量（被隐式持有引用），导致 `WeakReference` 无法按预期工作
+> - 生产级方案：WPF 的 `WeakEventManager` 或 `System.WeakReference<T>` + `ConditionalWeakTable`
+
+> [!tip]- 练习 3 参考答案：`IObservable<T>` 股票行情推送
+>   
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> 
+> // ============================================
+> // StockTick — 不可变数据记录
+> // ============================================
+> public record StockTick(string Symbol, decimal Price, long Volume, DateTime Timestamp);
+> 
+> // ============================================
+> // StockTicker — IObservable<StockTick> 实现
+> // ============================================
+> public class StockTicker : IObservable<StockTick>
+> {
+>     private readonly List<IObserver<StockTick>> _observers = new();
+> 
+>     public IDisposable Subscribe(IObserver<StockTick> observer)
+>     {
+>         if (!_observers.Contains(observer))
+>             _observers.Add(observer);
+> 
+>         Console.WriteLine($"  [Ticker] + {observer.GetType().Name} 订阅了行情");
+> 
+>         // 返回 Unsubscriber（调用 Dispose 取消订阅）
+>         return new Unsubscriber(_observers, observer);
+>     }
+> 
+>     // 推送一条 tick
+>     public void PushTick(StockTick tick)
+>     {
+>         Console.WriteLine($"\n[Ticker] {tick.Symbol} → {tick.Price:C} ({tick.Timestamp:HH:mm:ss})");
+> 
+>         foreach (var observer in _observers.ToArray())
+>         {
+>             observer.OnNext(tick);
+>         }
+>     }
+> 
+>     // 通知所有观察者：数据流结束
+>     public void EndStream()
+>     {
+>         foreach (var observer in _observers.ToArray())
+>         {
+>             observer.OnCompleted();
+>         }
+>         _observers.Clear();
+>     }
+> 
+>     // 通知所有观察者：发生错误
+>     public void NotifyError(Exception error)
+>     {
+>         foreach (var observer in _observers.ToArray())
+>         {
+>             observer.OnError(error);
+>         }
+>     }
+> 
+>     private class Unsubscriber : IDisposable
+>     {
+>         private readonly List<IObserver<StockTick>> _observers;
+>         private readonly IObserver<StockTick> _observer;
+> 
+>         public Unsubscriber(List<IObserver<StockTick>> observers, IObserver<StockTick> observer)
+>         {
+>             _observers = observers;
+>             _observer = observer;
+>         }
+> 
+>         public void Dispose()
+>         {
+>             if (_observers.Contains(_observer))
+>             {
+>                 _observers.Remove(_observer);
+>                 Console.WriteLine($"  [Ticker] - {_observer.GetType().Name} 取消订阅");
+>             }
+>         }
+>     }
+> }
+> 
+> // ============================================
+> // PriceFilterObserver — 只关心特定 Symbol
+> // ============================================
+> public class PriceFilterObserver : IObserver<StockTick>
+> {
+>     private readonly string _targetSymbol;
+>     private readonly string _label;
+> 
+>     public PriceFilterObserver(string targetSymbol, string label)
+>     {
+>         _targetSymbol = targetSymbol;
+>         _label = label;
+>     }
+> 
+>     public void OnNext(StockTick tick)
+>     {
+>         if (tick.Symbol != _targetSymbol) return; // 过滤无关 Symbol
+>         Console.WriteLine($"  [{_label}] {tick.Symbol} → {tick.Price:C}");
+>     }
+> 
+>     public void OnCompleted()
+>         => Console.WriteLine($"  [{_label}] 数据流结束");
+> 
+>     public void OnError(Exception error)
+>         => Console.WriteLine($"  [{_label}] 错误: {error.Message}");
+> }
+> 
+> // ============================================
+> // ThrottleObserver — 同一 Symbol 至少间隔 2 秒
+> // ============================================
+> public class ThrottleObserver : IObserver<StockTick>
+> {
+>     private readonly Dictionary<string, DateTime> _lastNotification = new();
+>     private readonly TimeSpan _minInterval;
+>     private readonly string _label;
+> 
+>     public ThrottleObserver(TimeSpan minInterval, string label)
+>     {
+>         _minInterval = minInterval;
+>         _label = label;
+>     }
+> 
+>     public void OnNext(StockTick tick)
+>     {
+>         var now = DateTime.Now;
+>         if (_lastNotification.TryGetValue(tick.Symbol, out var lastTime) &&
+>             (now - lastTime) < _minInterval)
+>         {
+>             Console.WriteLine($"  [{_label}] {tick.Symbol} → (限流中，距上次 {Math.Round((now - lastTime).TotalSeconds, 1)}s)");
+>             return; // 跳过——间隔不足
+>         }
+> 
+>         _lastNotification[tick.Symbol] = now;
+>         Console.WriteLine($"  [{_label}] {tick.Symbol} → {tick.Price:C} (放行)");
+>     }
+> 
+>     public void OnCompleted()
+>         => Console.WriteLine($"  [{_label}] 数据流结束");
+> 
+>     public void OnError(Exception error)
+>         => Console.WriteLine($"  [{_label}] 错误: {error.Message}");
+> }
+> 
+> // ============================================
+> // 客户端演示：混合 Symbol + 过滤 + 限流
+> // ============================================
+> static async Task TestStockTicker()
+> {
+>     Console.WriteLine("=== IObservable<T> 股票行情推送 ===\n");
+> 
+>     var ticker = new StockTicker();
+> 
+>     // 创建观察者
+>     var msftFilter = new PriceFilterObserver("MSFT", "MSFT过滤器");
+>     var throttle = new ThrottleObserver(TimeSpan.FromSeconds(2), "限流器");
+> 
+>     // 订阅
+>     var sub1 = ticker.Subscribe(msftFilter);
+>     var sub2 = ticker.Subscribe(throttle);
+> 
+>     // 推送混合数据
+>     var now = DateTime.Now;
+> 
+>     // MSFT 快速推送 3 次（限流器只放行第 1 次）
+>     ticker.PushTick(new StockTick("MSFT", 100m, 1000, now));
+>     ticker.PushTick(new StockTick("MSFT", 101m, 2000, now.AddMilliseconds(500)));
+>     ticker.PushTick(new StockTick("MSFT", 102m, 1500, now.AddMilliseconds(1200)));
+> 
+>     // AAPL 推送 2 次
+>     ticker.PushTick(new StockTick("AAPL", 180m, 5000, now.AddMilliseconds(1500)));
+>     ticker.PushTick(new StockTick("AAPL", 181m, 3000, now.AddMilliseconds(2500)));
+> 
+>     // MSFT 再次推送（距上次超过 2 秒）
+>     ticker.PushTick(new StockTick("MSFT", 105m, 3000, now.AddSeconds(3)));
+> 
+>     // 结束数据流
+>     Console.WriteLine("\n--- 结束数据流 ---");
+>     ticker.EndStream();
+> 
+>     /* 关键验证点:
+>      * - MSFT过滤器 收到所有 MSFT 的 tick（4条）
+>      * - 限流器 对 MSFT 只放行第 1 次（900ms 间隔不足）、放行最后 1 次（>2s）
+>      * - 限流器 对 AAPL 只放行第 1 次（1s 间隔不足）
+>      */
+> }
+> ```
+>
+> **关键设计要点：**
+> - `IObserver<T>` 的三个方法：`OnNext`（数据推送）、`OnCompleted`（序列结束）、`OnError`（异常）
+> - `Subscribe()` 返回 `IDisposable` —— 调用 `Dispose()` 取消订阅，这是 Rx 风格的标准做法
+> - `PriceFilterObserver` 在 `OnNext` 中做符号过滤——只有匹配的 Symbol 才输出
+> - `ThrottleObserver` 用 `Dictionary<string, DateTime>` 记录每个 Symbol 的最后通知时间，实现每 Symbol 独立限流
+> - 遍历 `_observers.ToArray()` 快照——防止通知过程中集合被修改
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 必读

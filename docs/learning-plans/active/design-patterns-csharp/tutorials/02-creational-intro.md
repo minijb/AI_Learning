@@ -306,6 +306,181 @@ public static class LoggerFactory
 从 `appsettings.json` 读取 Logger 类型配置，用反射创建实例。思考如何处理配置错误的情况。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 实现三种导出器和 `ExporterFactory`：
+>
+> ```csharp
+> public interface IExporter
+> {
+>     void Export(string data, string outputPath);
+> }
+>
+> public class PdfExporter : IExporter
+> {
+>     public void Export(string data, string outputPath)
+>     {
+>         // 实际实现中会使用 PDF 库（如 iTextSharp、PdfSharp）
+>         Console.WriteLine($"[PDF] 导出数据到 {outputPath}");
+>         Console.WriteLine($"[PDF] 内容预览: {data[..Math.Min(50, data.Length)]}...");
+>         // 模拟写入文件
+>         File.WriteAllText(outputPath, $"%PDF-1.4\n...{data}...\n%%EOF");
+>     }
+> }
+>
+> public class ExcelExporter : IExporter
+> {
+>     public void Export(string data, string outputPath)
+>     {
+>         Console.WriteLine($"[Excel] 导出数据到 {outputPath}");
+>         // 实际实现中会使用 EPPlus 或 ClosedXML
+>         File.WriteAllText(outputPath, $"<Workbook><Sheet>{data}</Sheet></Workbook>");
+>     }
+> }
+>
+> public class CsvExporter : IExporter
+> {
+>     public void Export(string data, string outputPath)
+>     {
+>         Console.WriteLine($"[CSV] 导出数据到 {outputPath}");
+>         // CSV 格式：多行用 Environment.NewLine 分隔
+>         var csvContent = string.Join(Environment.NewLine,
+>             data.Split('\n').Select(line => $"\"{line.Trim()}\""));
+>         File.WriteAllText(outputPath, csvContent);
+>     }
+> }
+>
+> // 简单工厂
+> public static class ExporterFactory
+> {
+>     public static IExporter Create(string format)
+>     {
+>         return format.ToLowerInvariant() switch
+>         {
+>             "pdf"   => new PdfExporter(),
+>             "excel" => new ExcelExporter(),
+>             "csv"   => new CsvExporter(),
+>             _ => throw new ArgumentException($"Unknown export format: {format}")
+>         };
+>     }
+> }
+>
+> // === 使用 ===
+> var exporter = ExporterFactory.Create("csv");
+> exporter.Export("Name,Age,City\nAlice,30,NYC", "output.csv");
+> ```
+
+> [!tip]- 练习 2 参考答案
+> 用字典注册取代 `switch`，符合 OCP——新增 Logger 只需注册，无需修改工厂：
+>
+> ```csharp
+> public static class LoggerFactory
+> {
+>     private static readonly Dictionary<string, Func<ILogger>> _creators = new();
+>
+>     // 注册新的 Logger 类型 — 可在程序启动时调用
+>     public static void Register(string type, Func<ILogger> creator)
+>     {
+>         if (string.IsNullOrWhiteSpace(type))
+>             throw new ArgumentException("Type cannot be empty.", nameof(type));
+>         _creators[type.ToLowerInvariant()] = creator
+>             ?? throw new ArgumentNullException(nameof(creator));
+>     }
+>
+>     public static ILogger Create(string type)
+>     {
+>         if (_creators.TryGetValue(type.ToLowerInvariant(), out var creator))
+>             return creator();
+>
+>         throw new ArgumentException(
+>             $"Unknown logger type: {type}. Available: {string.Join(", ", _creators.Keys)}");
+>     }
+>
+>     // 批量注册默认 Logger
+>     public static void RegisterDefaults()
+>     {
+>         Register("console", () => new ConsoleLogger());
+>         Register("file",    () => new FileLogger("app.log"));
+>         Register("null",    () => new NullLogger());
+>     }
+> }
+>
+> // === 使用示例 ===
+> LoggerFactory.RegisterDefaults();
+> var logger = LoggerFactory.Create("console");
+> logger.Log("Hello from dictionary-based factory!");
+>
+> // 扩展：新增 DatabaseLogger — 不改 LoggerFactory 代码
+> LoggerFactory.Register("database", () => new DatabaseLogger("connStr"));
+> ```
+>
+> **OCP 体现：** 新增 Logger 只需调一次 `Register`，`Create` 方法无需任何修改。字典键用小写实现大小写不敏感匹配，错误信息列出可用类型便于调试。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 从 `appsettings.json` 读取 Logger 配置，使用反射创建实例：
+>
+> ```csharp
+> using Microsoft.Extensions.Configuration;
+>
+> // appsettings.json 示例内容:
+> // {
+> //   "Logging": {
+> //     "LoggerType": "ConsoleLogger, MyApp",
+> //     "FilePath": "logs/app.log"
+> //   }
+> // }
+>
+> public static class ConfigDrivenLoggerFactory
+> {
+>     public static ILogger CreateFromConfig()
+>     {
+>         var config = new ConfigurationBuilder()
+>             .SetBasePath(Directory.GetCurrentDirectory())
+>             .AddJsonFile("appsettings.json", optional: false)
+>             .Build();
+>
+>         var typeName = config["Logging:LoggerType"];
+>         if (string.IsNullOrWhiteSpace(typeName))
+>             throw new InvalidOperationException(
+>                 "Logging:LoggerType is missing in appsettings.json");
+>
+>         // 类型名称格式: "Namespace.ClassName, AssemblyName"
+>         var type = Type.GetType(typeName);
+>         if (type == null)
+>             throw new InvalidOperationException(
+>                 $"Cannot find type: {typeName}. Ensure the assembly is loaded.");
+>
+>         if (!typeof(ILogger).IsAssignableFrom(type))
+>             throw new InvalidOperationException(
+>                 $"{type.FullName} does not implement ILogger.");
+>
+>         // 检查是否有接受 filePath 参数的构造函数
+>         var filePath = config["Logging:FilePath"];
+>         if (filePath != null)
+>         {
+>             var ctorWithPath = type.GetConstructor(new[] { typeof(string) });
+>             if (ctorWithPath != null)
+>                 return (ILogger)ctorWithPath.Invoke(new object[] { filePath });
+>         }
+>
+>         // 降级：无参构造函数
+>         return (ILogger)Activator.CreateInstance(type)!;
+>     }
+> }
+> ```
+>
+> **错误处理策略：**
+> - 配置缺失 → 抛 `InvalidOperationException` 并说明缺失的键名
+> - 类型未找到 → 检查程序集名称是否正确、是否已加载
+> - 类型不匹配 → 验证 `IsAssignableFrom`，发现不兼容立即抛异常
+> - **生产环境建议：** 为关键组件（如日志）提供默认回退（Fallback Logger），确保即使配置错误系统也不会完全无日志
+>
+> > [!warning] 反射的性能开销
+> > `Activator.CreateInstance` 可比直接 `new` 慢 10-50 倍。如果 Logger 被高频创建（如每次请求），应使用 `Expression<Func<ILogger>>` 编译表达式树后缓存，或使用 Source Generator 在编译期生成工厂代码。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

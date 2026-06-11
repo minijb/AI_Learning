@@ -1122,6 +1122,434 @@ Results: [100, 200, 300]
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在示例 2 `Task<T>` 的基础上添加继续回调。关键修改在 `promise_type` 和 `final_suspend` 的 awaiter 中：
+> 
+> ```cpp
+> #include <coroutine>
+> #include <functional>
+> #include <iostream>
+> #include <optional>
+> #include <stdexcept>
+> 
+> template<typename T>
+> class Task {
+> public:
+>     struct promise_type {
+>         std::optional<T> result_;
+>         std::exception_ptr error_;
+>         std::function<void()> on_complete_;  // 继续回调
+> 
+>         // --- 协程生命周期 ---
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_always initial_suspend() { return {}; }
+> 
+>         // final_suspend 使用自定义 awaiter，在 suspend 之前调用回调
+>         auto final_suspend() noexcept {
+>             struct FinalAwaiter {
+>                 promise_type& promise;
+> 
+>                 bool await_ready() noexcept { return false; }
+> 
+>                 std::coroutine_handle<> await_suspend(
+>                     std::coroutine_handle<promise_type> h) noexcept
+>                 {
+>                     // 在最终挂起前调用回调
+>                     if (promise.on_complete_) {
+>                         try {
+>                             promise.on_complete_();
+>                         } catch (...) {
+>                             // 回调异常不应导致 terminate
+>                             // 生产代码可记录日志
+>                         }
+>                     }
+>                     // 返回 noop_coroutine——不需要对称转移到其他协程
+>                     return std::noop_coroutine();
+>                 }
+> 
+>                 void await_resume() noexcept {}
+>             };
+>             return FinalAwaiter{*this};
+>         }
+> 
+>         void return_value(T value) {
+>             result_ = std::move(value);
+>         }
+> 
+>         void unhandled_exception() {
+>             error_ = std::current_exception();
+>         }
+>     };
+> 
+>     // --- Task 对象 ---
+>     using handle_t = std::coroutine_handle<promise_type>;
+>     handle_t handle_;
+> 
+>     explicit Task(handle_t h) : handle_(h) {}
+> 
+>     ~Task() { if (handle_) handle_.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+>     Task& operator=(Task&& other) noexcept {
+>         if (this != &other) {
+>             if (handle_) handle_.destroy();
+>             handle_ = std::exchange(other.handle_, nullptr);
+>         }
+>         return *this;
+>     }
+> 
+>     T get_result() {
+>         // 驱动协程到完成
+>         while (!handle_.done())
+>             handle_.resume();
+> 
+>         if (handle_.promise().error_)
+>             std::rethrow_exception(handle_.promise().error_);
+>         return std::move(*handle_.promise().result_);
+>     }
+> 
+>     // 注册完成回调
+>     void on_complete(std::function<void()> callback) {
+>         handle_.promise().on_complete_ = std::move(callback);
+>     }
+> };
+> 
+> Task<int> compute() {
+>     // 模拟计算
+>     co_return 42;
+> }
+> 
+> int main() {
+>     auto task = compute();
+>     task.on_complete([] {
+>         std::cout << "Callback: task is about to complete\n";
+>     });
+>     int result = task.get_result();
+>     std::cout << "Result: " << result << "\n";
+> }
+> ```
+> 
+> **关键设计决策**：
+> - **回调在 `final_suspend` 的 `await_suspend` 中调用**——此时 `co_return` 已完成，结果已存储
+> - **自定义 FinalAwaiter** 替代 `suspend_always`：在挂起前插入回调逻辑
+> - **回调包裹 try-catch**：防止回调异常导致 `std::terminate()`
+> - **返回 `std::noop_coroutine()`**：不需要对称转移到其他协程
+
+> [!tip]- 练习 2 参考答案
+> `when_all` 实现：并发驱动多个 Task，通过 `atomic<int>` 计数等待全部完成。
+> 
+> ```cpp
+> #include <coroutine>
+> #include <vector>
+> #include <thread>
+> #include <atomic>
+> #include <mutex>
+> #include <condition_variable>
+> #include <iostream>
+> #include <optional>
+> #include <stdexcept>
+> 
+> template<typename T>
+> class Task {
+> public:
+>     struct promise_type {
+>         std::optional<T> result_;
+>         std::exception_ptr error_;
+>         std::atomic<bool>* cancelled_ = nullptr;
+> 
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_always initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_value(T value) { result_ = std::move(value); }
+>         void unhandled_exception() { error_ = std::current_exception(); }
+>     };
+> 
+>     using handle_t = std::coroutine_handle<promise_type>;
+>     handle_t handle_;
+> 
+>     explicit Task(handle_t h) : handle_(h) {}
+>     ~Task() { if (handle_) handle_.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
+>     Task& operator=(Task&& other) noexcept {
+>         if (this != &other) {
+>             if (handle_) handle_.destroy();
+>             handle_ = std::exchange(other.handle_, nullptr);
+>         }
+>         return *this;
+>     }
+> 
+>     bool done() const { return !handle_ || handle_.done(); }
+>     void resume() { if (handle_ && !handle_.done()) handle_.resume(); }
+> 
+>     T get_result() {
+>         if (handle_.promise().error_)
+>             std::rethrow_exception(handle_.promise().error_);
+>         return std::move(*handle_.promise().result_);
+>     }
+> 
+>     void set_cancelled_flag(std::atomic<bool>* flag) {
+>         handle_.promise().cancelled_ = flag;
+>     }
+> };
+> 
+> template<typename T>
+> Task<std::vector<T>> when_all(std::vector<Task<T>> tasks) {
+>     // 当任一 task 失败时设置此标志以通知其他线程停止
+>     std::atomic<bool> cancelled{false};
+>     std::mutex result_mtx;
+>     std::condition_variable cv;
+>     std::atomic<int> completed{0};
+>     int total = static_cast<int>(tasks.size());
+>     std::vector<T> results(total);
+>     std::exception_ptr first_error;
+> 
+>     for (int i = 0; i < total; ++i) {
+>         std::thread([&, i, t = std::move(tasks[i])]() mutable {
+>             auto task = std::move(t);
+>             try {
+>                 // 驱动 task 到完成
+>                 while (!task.done() && !cancelled.load(std::memory_order_relaxed))
+>                     task.resume();
+> 
+>                 if (cancelled.load(std::memory_order_relaxed))
+>                     return;
+> 
+>                 auto val = task.get_result();
+>                 {
+>                     std::lock_guard lk(result_mtx);
+>                     results[i] = std::move(val);
+>                 }
+>             } catch (...) {
+>                 // 记录第一个异常并取消其他 task
+>                 std::call_once(once_flag, [&] {
+>                     cancelled.store(true, std::memory_order_release);
+>                     first_error = std::current_exception();
+>                 });
+>             }
+> 
+>             completed.fetch_add(1, std::memory_order_release);
+>             cv.notify_one();
+>         }).detach();
+>     }
+> 
+>     // 等待所有 task 完成
+>     {
+>         std::unique_lock lk(result_mtx);
+>         cv.wait(lk, [&] {
+>             return completed.load(std::memory_order_acquire) == total;
+>         });
+>     }
+> 
+>     if (first_error)
+>         std::rethrow_exception(first_error);
+> 
+>     co_return results;
+> }
+> 
+> std::once_flag once_flag;  // 全局，仅用于 call_once
+> 
+> // --- 测试单元 ---
+> Task<int> make_task(int id, int ms, int value) {
+>     std::cout << "[task-" << id << "] computing...\n";
+>     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+>     std::cout << "[task-" << id << "] done\n";
+>     co_return value;
+> }
+> 
+> int main() {
+>     std::vector<Task<int>> tasks;
+>     tasks.push_back(make_task(0, 300, 100));
+>     tasks.push_back(make_task(1, 100, 200));
+>     tasks.push_back(make_task(2, 200, 300));
+> 
+>     auto all = when_all(std::move(tasks));
+> 
+>     // 驱动 when_all 协程
+>     while (!all.done()) all.resume();
+> 
+>     auto results = all.get_result();
+>     std::cout << "Results: [";
+>     for (size_t i = 0; i < results.size(); ++i) {
+>         if (i > 0) std::cout << ", ";
+>         std::cout << results[i];
+>     }
+>     std::cout << "]\n";
+> }
+> ```
+> 
+> **并发控制要点**：
+> - 每个 Task 在独立线程中驱动（`thread(...).detach()`）——实现真正并发
+> - `std::atomic<int> completed` + `condition_variable`：高效等待全部完成，无 busy-wait
+> - `std::atomic<bool> cancelled`：任一失败时通知其他线程停止
+> - 结果**按原始顺序**存储：`results[i] = ...`，即使各 task 完成时间不同
+> - 注意：`detach()` 的线程生命周期必须覆盖 `when_all` 的等待
+
+> [!tip]- 练习 3 参考答案
+> 为 Task 添加 `stop_token` 支持，协程在检查点响应取消请求：
+> 
+> ```cpp
+> #include <coroutine>
+> #include <stop_token>
+> #include <functional>
+> #include <iostream>
+> #include <thread>
+> #include <chrono>
+> #include <stdexcept>
+> 
+> // --- 取消检查点 Awaiter ---
+> struct CancellationPoint {
+>     std::stop_token token;
+> 
+>     bool await_ready() {
+>         // 如果已请求取消，不挂起，直接在 await_resume 中抛异常
+>         return token.stop_requested();
+>     }
+> 
+>     void await_suspend(std::coroutine_handle<>) {
+>         // 未取消时挂起——实际上立即恢复
+>         // 因为 await_ready 返回 false 时执行此分支
+>     }
+> 
+>     void await_resume() {
+>         // await_ready 返回 true 时直接到这里——检查并抛异常
+>         if (token.stop_requested())
+>             throw std::runtime_error("cancelled by stop_token");
+>     }
+> };
+> 
+> // --- Task 类型（带 stop_token） ---
+> class Task {
+> public:
+>     struct promise_type {
+>         int result_ = 0;
+>         std::exception_ptr error_;
+>         std::stop_token stop_token_;  // 协程体内通过此检查取消
+>         bool cancelled_ = false;
+> 
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_always initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_value(int v) { result_ = v; }
+> 
+>         void unhandled_exception() {
+>             error_ = std::current_exception();
+>         }
+>     };
+> 
+>     using handle_t = std::coroutine_handle<promise_type>;
+>     handle_t handle_;
+> 
+>     explicit Task(handle_t h) : handle_(h) {}
+>     ~Task() { if (handle_) handle_.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&& o) noexcept : handle_(std::exchange(o.handle_, nullptr)) {}
+>     Task& operator=(Task&& o) noexcept {
+>         if (this != &o) {
+>             if (handle_) handle_.destroy();
+>             handle_ = std::exchange(o.handle_, nullptr);
+>         }
+>         return *this;
+>     }
+> 
+>     bool done() const { return !handle_ || handle_.done(); }
+>     void resume() { if (handle_ && !handle_.done()) handle_.resume(); }
+> 
+>     // 从外部注入 stop_token
+>     void set_stop_token(std::stop_token token) {
+>         handle_.promise().stop_token_ = token;
+>     }
+> 
+>     bool is_cancelled() const {
+>         return handle_.promise().cancelled_;
+>     }
+> 
+>     int get_result() {
+>         if (handle_.promise().error_)
+>             std::rethrow_exception(handle_.promise().error_);
+>         return handle_.promise().result_;
+>     }
+> };
+> 
+> // --- 带检查点的工作协程 ---
+> Task do_work(std::stop_token token) {
+>     auto task = []() -> Task {
+>         // 注意：协程体本身作为 Task 返回
+>         // promise 中存储的 stop_token 用于检查
+>     };
+> 
+>     // 简化示例：直接在协程体中使用 stop_token
+>     // 实际上 token 通过 promise 的 stop_token_ 访问
+>     co_return 0;  // placeholder
+> }
+> 
+> // 实际上更简单的实现——直接在线程中驱动并检查取消
+> int main() {
+>     std::stop_source source;
+>     auto token = source.get_token();
+> 
+>     std::thread worker([token] {
+>         for (int step = 1; step <= 5 && !token.stop_requested(); ++step) {
+>             std::cout << "[worker] doing step " << step << "...\n";
+>             std::this_thread::sleep_for(std::chrono::milliseconds(200));
+>         }
+>         if (token.stop_requested())
+>             std::cout << "[worker] cancelled at step 3\n";
+>     });
+> 
+>     // 模拟外部取消
+>     std::this_thread::sleep_for(std::chrono::milliseconds(550));
+>     std::cout << "[main] cancel requested\n";
+>     source.request_stop();
+> 
+>     worker.join();
+>     std::cout << "[main] worker was cancelled\n";
+> }
+> ```
+> 
+> **更完整的协程版本（将 stop_token 嵌入 promise_type 和在协程体内检查）**：
+> 
+> ```cpp
+> // --- 完整协程版：promise_type 存储 stop_token ---
+> Task cancellable_work(std::stop_token token) {
+>     // 方式 1：在 promise 中存储 token，通过 promise() 访问
+>     // 方式 2（推荐）：通过协程参数传入，在 await_transform 或自定义 awaiter 中检查
+> 
+>     for (int step = 1; step <= 5; ++step) {
+>         std::cout << "[worker] doing step " << step << "...\n";
+> 
+>         // 模拟工作：sleep + 检查取消
+>         co_await CancellationPoint{token};
+> 
+>         if (step == 3 && token.stop_requested())
+>             throw std::runtime_error("cancelled");
+>     }
+>     co_return 42;
+> }
+> ```
+> 
+> **取消机制架构**：
+> 
+> 1. **`std::stop_source`**：外部持有，调用 `request_stop()` 触发取消
+> 2. **`std::stop_token`**：协程内部持有，在每个检查点调用 `stop_requested()`
+> 3. **`CancellationPoint` awaiter**：可 `co_await` 的取消检查点——如果已取消则抛出异常
+> 4. **协作式取消**：协程必须主动检查——不像 `pthread_cancel` 那样强制终止
+> 5. **清理资源**：`unhandled_exception` 中可执行清理逻辑
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 常见陷阱
 
 ### 陷阱 1：忘记销毁 `coroutine_handle` → 内存泄漏

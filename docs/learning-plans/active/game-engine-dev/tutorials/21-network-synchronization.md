@@ -2026,6 +2026,777 @@ WorldState& GetHistoricalState(uint32_t tick) {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1：RTT 平滑估计 (EWMA)
+>
+> 基于 `udp_client.cpp` 添加 EWMA RTT 平滑和网络抖动模拟。
+>
+> ```cpp
+> // ============================================================
+> // udp_client_ewma.cpp — 带 EWMA RTT 平滑 + 抖动模拟的客户端
+> // ============================================================
+> #include "udp_socket.h"
+> #include <chrono>
+> #include <thread>
+> #include <random>
+> #include <cmath>
+>
+> struct PacketHeader {
+>     uint32_t sequence;
+>     uint32_t timestamp_ms;
+> };
+>
+> // ——— EWMA RTT 估计器 ———
+> class RttEstimator {
+> public:
+>     static constexpr float ALPHA = 0.125f;   // RTT 平滑系数
+>     static constexpr float BETA  = 0.25f;    // 方差平滑系数
+>     static constexpr float K     = 4.0f;     // RTO 倍数
+>     static constexpr float MIN_RTO_MS = 50.0f;
+>     static constexpr float MAX_RTO_MS = 3000.0f;
+>
+>     void AddSample(float measured_rtt_ms) {
+>         if (first_sample_) {
+>             // 首次测量直接初始化，避免从 0 开始
+>             smoothed_rtt_ = measured_rtt_ms;
+>             rtt_variance_ = measured_rtt_ms * 0.5f;
+>             first_sample_ = false;
+>         } else {
+>             float diff = measured_rtt_ms - smoothed_rtt_;
+>             smoothed_rtt_ += ALPHA * diff;
+>             // 使用 fabsf(diff) 而非 diff 的平方，计算成本更低
+>             rtt_variance_ += BETA * (std::fabs(diff) - rtt_variance_);
+>         }
+>         rto_ = std::clamp(smoothed_rtt_ + K * rtt_variance_, MIN_RTO_MS, MAX_RTO_MS);
+>     }
+>
+>     float SmoothedRtt() const { return smoothed_rtt_; }
+>     float RttVariance() const { return rtt_variance_; }
+>     float Rto()          const { return rto_; }
+>
+> private:
+>     float smoothed_rtt_ = 0.0f;
+>     float rtt_variance_ = 0.0f;
+>     float rto_          = MIN_RTO_MS;
+>     bool  first_sample_ = true;
+> };
+>
+> // ——— 网络抖动模拟器 ———
+> class JitterSimulator {
+> public:
+>     JitterSimulator(float base_delay_ms, float jitter_range_ms)
+>         : base_delay_(base_delay_ms)
+>         , jitter_range_(jitter_range_ms)
+>         , rng_(std::random_device{}())
+>         , dist_(0.0f, 1.0f) {}
+>
+>     // 返回模拟抖动后的延迟，范围 [base - range/2, base + range/2]
+>     float ApplyJitter(float original_rtt_ms) {
+>         float jitter = (dist_(rng_) - 0.5f) * jitter_range_;
+>         return original_rtt_ms + jitter;
+>     }
+>
+>     // 模拟丢包，概率 0..1
+>     bool ShouldDrop(float drop_probability = 0.05f) {
+>         return dist_(rng_) < drop_probability;
+>     }
+>
+> private:
+>     float base_delay_;
+>     float jitter_range_;
+>     std::mt19937 rng_;
+>     std::uniform_real_distribution<float> dist_;
+> };
+>
+> int main() {
+>     NetworkInit net_init;
+>
+>     UDPSocket client;
+>     if (!client.Create()) return 1;
+>     if (!client.SetNonBlocking()) return 1;
+>
+>     NetworkAddress server_addr("127.0.0.1", 7777);
+>     std::cout << "[Client] Connecting to " << server_addr.ToString() << "\n";
+>
+>     uint32_t sequence = 0;
+>     char recv_buffer[1024];
+>
+>     RttEstimator rtt_estimator;
+>     // 模拟 20ms 基础延迟 + ±10ms 抖动
+>     JitterSimulator jitter(20.0f, 10.0f);
+>
+>     // 滑动窗口统计原始 RTT（用于对比平滑效果）
+>     static constexpr int WINDOW = 10;
+>     float raw_rtt_window[WINDOW] = {};
+>     int window_idx = 0;
+>
+>     while (true) {
+>         // 构造心跳包
+>         PacketHeader header;
+>         header.sequence = sequence++;
+>         header.timestamp_ms = static_cast<uint32_t>(
+>             std::chrono::duration_cast<std::chrono::milliseconds>(
+>                 std::chrono::steady_clock::now().time_since_epoch()
+>             ).count()
+>         );
+>
+>         const char* payload = "Hello Server!";
+>         char send_buffer[256];
+>         memcpy(send_buffer, &header, sizeof(header));
+>         memcpy(send_buffer + sizeof(header), payload, strlen(payload));
+>
+>         client.SendTo(send_buffer, sizeof(header) + strlen(payload), server_addr);
+>
+>         // 等待响应
+>         auto send_time = std::chrono::steady_clock::now();
+>         bool received = false;
+>
+>         while (!received) {
+>             NetworkAddress from;
+>             int len = client.RecvFrom(recv_buffer, sizeof(recv_buffer), from);
+>
+>             if (len > 0) {
+>                 auto recv_time = std::chrono::steady_clock::now();
+>                 float raw_rtt = std::chrono::duration<float, std::milli>(
+>                     recv_time - send_time).count();
+>
+>                 // 应用抖动模拟
+>                 float jittered_rtt = jitter.ApplyJitter(raw_rtt);
+>                 rtt_estimator.AddSample(jittered_rtt);
+>
+>                 // 记录原始 RTT 用于对比
+>                 raw_rtt_window[window_idx % WINDOW] = jittered_rtt;
+>                 window_idx++;
+>
+>                 PacketHeader* resp = (PacketHeader*)recv_buffer;
+>                 std::cout << "[Client] seq=" << resp->sequence
+>                           << " | raw_rtt=" << jittered_rtt << "ms"
+>                           << " | smoothed=" << rtt_estimator.SmoothedRtt() << "ms"
+>                           << " | var=" << rtt_estimator.RttVariance() << "ms"
+>                           << " | RTO=" << rtt_estimator.Rto() << "ms\n";
+>
+>                 received = true;
+>             }
+>
+>             auto elapsed = std::chrono::steady_clock::now() - send_time;
+>             if (elapsed > std::chrono::milliseconds(1500)) {
+>                 std::cout << "[Client] Timeout for seq=" << header.sequence << "\n";
+>                 break;
+>             }
+>
+>             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+>         }
+>
+>         // 每 WINDOW 次打印对比统计
+>         if (window_idx > 0 && window_idx % WINDOW == 0) {
+>             float raw_avg = 0.0f;
+>             for (int i = 0; i < WINDOW; i++) raw_avg += raw_rtt_window[i];
+>             raw_avg /= WINDOW;
+>             std::cout << "--- Window avg: raw=" << raw_avg
+>                       << "ms, smoothed=" << rtt_estimator.SmoothedRtt()
+>                       << "ms, RTO=" << rtt_estimator.Rto() << "ms ---\n";
+>         }
+>
+>         std::this_thread::sleep_for(std::chrono::seconds(1));
+>     }
+>     return 0;
+> }
+> ```
+>
+> **关键说明：**
+>
+> - 首次测量用实际 RTT 初始化 `smoothed_rtt_`，避免从 0 开始的冷启动偏差
+> - `fabsf(diff)` 替代平方，节省浮点运算——游戏网络层需要极低开销
+> - `RTO` 被钳制在 `[50ms, 3000ms]`，防止极端值导致超时过长或过短
+> - `JitterSimulator` 可调 base_delay / jitter_range 观察不同网络条件下的平滑效果
+
+> [!tip]- 练习 2：增量快照同步 (Delta Compression)
+>
+> 在 `SnapshotServer` 基础上添加客户端 ACK、基准帧管理、位掩码差分序列化、带宽统计。
+>
+> ```cpp
+> // ============================================================
+> // delta_snapshot.h — 增量快照同步核心数据结构
+> // ============================================================
+> #pragma once
+> #include <cstdint>
+> #include <vector>
+> #include <cstring>
+>
+> // 实体字段位掩码定义
+> enum class EntityField : uint16_t {
+>     POSITION   = 1 << 0,   // 位置 (12 bytes: 3×float)
+>     VELOCITY   = 1 << 1,   // 速度 (12 bytes)
+>     HEALTH     = 1 << 2,   // 生命值 (4 bytes)
+>     ROTATION   = 1 << 3,   // 朝向 (4 bytes: 1×float yaw)
+>     TIMESTAMP  = 1 << 4,   // 时间戳 (4 bytes)
+>     ALL        = 0xFFFF,
+> };
+>
+> inline uint16_t operator|(EntityField a, EntityField b) {
+>     return static_cast<uint16_t>(a) | static_cast<uint16_t>(b);
+> }
+>
+> inline bool HasField(uint16_t mask, EntityField f) {
+>     return (mask & static_cast<uint16_t>(f)) != 0;
+> }
+>
+> // 字段字节数（用于带宽统计）
+> static constexpr int FIELD_SIZE_POSITION  = 12;
+> static constexpr int FIELD_SIZE_VELOCITY  = 12;
+> static constexpr int FIELD_SIZE_HEALTH    = 4;
+> static constexpr int FIELD_SIZE_ROTATION  = 4;
+> static constexpr int FIELD_SIZE_TIMESTAMP = 4;
+> static constexpr int FULL_SNAPSHOT_PER_ENTITY =
+>     FIELD_SIZE_POSITION + FIELD_SIZE_VELOCITY + FIELD_SIZE_HEALTH
+>     + FIELD_SIZE_ROTATION + FIELD_SIZE_TIMESTAMP;  // = 36 bytes/entity
+>
+> // 单个实体的增量
+> struct EntityDelta {
+>     uint32_t entity_id;
+>     uint16_t changed_mask;
+>     // 只包含变化字段的数据（按掩码顺序序列化）
+>     std::vector<uint8_t> data;
+> };
+>
+> // 增量快照包
+> struct DeltaSnapshot {
+>     uint32_t baseline_tick;    // 基准帧号（客户端确认过的）
+>     uint32_t delta_tick;       // 当前帧号
+>     std::vector<EntityDelta> deltas;
+> };
+>
+> // ============================================================
+> // 服务器端：记录基准帧、计算差分、统计带宽
+> // ============================================================
+> #include "udp_socket.h"
+> #include <map>
+> #include <unordered_map>
+> #include <deque>
+> #include <chrono>
+>
+> // 服务器端保存的完整实体状态（用于差分对比）
+> struct ServerEntityState {
+>     uint32_t entity_id;
+>     float pos_x, pos_y, pos_z;
+>     float vel_x, vel_y, vel_z;
+>     float health;
+>     float rotation_yaw;
+>     uint32_t timestamp_ms;
+> };
+>
+> // 每个客户端连接的基准帧快照
+> struct ClientBaseline {
+>     uint32_t acked_tick = 0;
+>     std::unordered_map<uint32_t, ServerEntityState> entities; // 客户端"看到的"最后一帧
+> };
+>
+> class DeltaSnapshotServer {
+> public:
+>     static constexpr float TICK_RATE = 20.0f;
+>     static constexpr float TICK_DT   = 1.0f / TICK_RATE;
+>
+>     // —— 带宽统计 ——
+>     struct BandwidthStats {
+>         uint64_t full_snapshot_bytes   = 0;  // 累计完整快照字节
+>         uint64_t delta_snapshot_bytes  = 0;  // 累计增量快照字节
+>         uint64_t total_packets         = 0;
+>
+>         void RecordDelta(size_t bytes) {
+>             delta_snapshot_bytes += bytes;
+>             full_snapshot_bytes += simulated_full_bytes_; // 假设同一帧发完整快照
+>             total_packets++;
+>         }
+>
+>         void SetSimulatedFullBytes(size_t bytes) { simulated_full_bytes_ = bytes; }
+>
+>         float SavingsPercent() const {
+>             if (full_snapshot_bytes == 0) return 0.0f;
+>             return (1.0f - (float)delta_snapshot_bytes / (float)full_snapshot_bytes) * 100.0f;
+>         }
+>
+>         void Print() const {
+>             std::cout << "Full snapshot (simulated): " << full_snapshot_bytes << " bytes\n";
+>             std::cout << "Delta snapshot (actual):  " << delta_snapshot_bytes << " bytes\n";
+>             std::cout << "Savings: " << SavingsPercent() << "%\n";
+>         }
+>
+>     private:
+>         size_t simulated_full_bytes_ = 0;
+>     };
+>
+>     // ——— 核心方法 ———
+>
+>     // 序列化完整快照（基准帧）
+>     static void SerializeFullSnapshot(const std::vector<ServerEntityState>& entities,
+>                                        std::vector<uint8_t>& out) {
+>         out.clear();
+>         for (const auto& e : entities) {
+>             AppendU32(out, e.entity_id);
+>             AppendFloat(out, e.pos_x);
+>             AppendFloat(out, e.pos_y);
+>             AppendFloat(out, e.pos_z);
+>             AppendFloat(out, e.vel_x);
+>             AppendFloat(out, e.vel_y);
+>             AppendFloat(out, e.vel_z);
+>             AppendFloat(out, e.health);
+>             AppendFloat(out, e.rotation_yaw);
+>             AppendU32(out, e.timestamp_ms);
+>         }
+>     }
+>
+>     // 对指定客户端计算增量快照
+>     static DeltaSnapshot ComputeDelta(
+>         const std::vector<ServerEntityState>& current,
+>         ClientBaseline& baseline,
+>         uint32_t delta_tick)
+>     {
+>         DeltaSnapshot snap;
+>         snap.baseline_tick = baseline.acked_tick;
+>         snap.delta_tick = delta_tick;
+>
+>         for (const auto& cur : current) {
+>             EntityDelta delta;
+>             delta.entity_id = cur.entity_id;
+>             delta.changed_mask = 0;
+>
+>             auto it = baseline.entities.find(cur.entity_id);
+>
+>             if (it == baseline.entities.end()) {
+>                 // 新实体：发送全部字段
+>                 delta.changed_mask = static_cast<uint16_t>(EntityField::ALL);
+>                 SerializeEntityFields(cur, delta.changed_mask, delta.data);
+>             } else {
+>                 const auto& prev = it->second;
+>                 // 逐字段比较，只标记变化的
+>                 if (prev.pos_x != cur.pos_x || prev.pos_y != cur.pos_y || prev.pos_z != cur.pos_z)
+>                     delta.changed_mask |= EntityField::POSITION;
+>                 if (prev.vel_x != cur.vel_x || prev.vel_y != cur.vel_y || prev.vel_z != cur.vel_z)
+>                     delta.changed_mask |= EntityField::VELOCITY;
+>                 if (prev.health != cur.health)
+>                     delta.changed_mask |= EntityField::HEALTH;
+>                 if (prev.rotation_yaw != cur.rotation_yaw)
+>                     delta.changed_mask |= EntityField::ROTATION;
+>                 if (prev.timestamp_ms != cur.timestamp_ms)
+>                     delta.changed_mask |= EntityField::TIMESTAMP;
+>
+>                 if (delta.changed_mask != 0) {
+>                     SerializeEntityFields(cur, delta.changed_mask, delta.data);
+>                 }
+>             }
+>
+>             if (delta.changed_mask != 0) {
+>                 snap.deltas.push_back(delta);
+>             }
+>
+>             // 更新基线
+>             baseline.entities[cur.entity_id] = cur;
+>         }
+>
+>         // 清理基准中已不存在的实体（已销毁）
+>         for (auto it = baseline.entities.begin(); it != baseline.entities.end(); ) {
+>             bool found = false;
+>             for (const auto& cur : current) {
+>                 if (cur.entity_id == it->first) { found = true; break; }
+>             }
+>             if (!found) {
+>                 it = baseline.entities.erase(it);
+>             } else {
+>                 ++it;
+>             }
+>         }
+>
+>         baseline.acked_tick = delta_tick;
+>         return snap;
+>     }
+>
+>     // 序列化增量快照为网络字节流
+>     static void SerializeDeltaSnapshot(const DeltaSnapshot& snap, std::vector<uint8_t>& out) {
+>         out.clear();
+>         AppendU32(out, snap.baseline_tick);
+>         AppendU32(out, snap.delta_tick);
+>         AppendU16(out, static_cast<uint16_t>(snap.deltas.size()));
+>
+>         for (const auto& delta : snap.deltas) {
+>             AppendU32(out, delta.entity_id);
+>             AppendU16(out, delta.changed_mask);
+>             // 变化的字段数据直接追加
+>             out.insert(out.end(), delta.data.begin(), delta.data.end());
+>         }
+>     }
+>
+>     // 客户端反序列化
+>     static void DeserializeDeltaSnapshot(const uint8_t* data, size_t len,
+>                                           DeltaSnapshot& snap) {
+>         size_t off = 0;
+>         snap.baseline_tick = ReadU32(data, off); off += 4;
+>         snap.delta_tick    = ReadU32(data, off); off += 4;
+>         uint16_t count     = ReadU16(data, off); off += 2;
+>
+>         snap.deltas.resize(count);
+>         for (auto& delta : snap.deltas) {
+>             delta.entity_id    = ReadU32(data, off); off += 4;
+>             delta.changed_mask = ReadU16(data, off); off += 2;
+>
+>             // 根据掩码计算数据长度
+>             int field_bytes = 0;
+>             if (HasField(delta.changed_mask, EntityField::POSITION))  field_bytes += FIELD_SIZE_POSITION;
+>             if (HasField(delta.changed_mask, EntityField::VELOCITY))  field_bytes += FIELD_SIZE_VELOCITY;
+>             if (HasField(delta.changed_mask, EntityField::HEALTH))    field_bytes += FIELD_SIZE_HEALTH;
+>             if (HasField(delta.changed_mask, EntityField::ROTATION))  field_bytes += FIELD_SIZE_ROTATION;
+>             if (HasField(delta.changed_mask, EntityField::TIMESTAMP)) field_bytes += FIELD_SIZE_TIMESTAMP;
+>
+>             delta.data.assign(data + off, data + off + field_bytes);
+>             off += field_bytes;
+>         }
+>     }
+>
+> private:
+>     // ——— 辅助序列化/反序列化 ———
+>     static void AppendU32(std::vector<uint8_t>& v, uint32_t val) {
+>         v.push_back(val & 0xFF);
+>         v.push_back((val >> 8) & 0xFF);
+>         v.push_back((val >> 16) & 0xFF);
+>         v.push_back((val >> 24) & 0xFF);
+>     }
+>     static void AppendU16(std::vector<uint8_t>& v, uint16_t val) {
+>         v.push_back(val & 0xFF);
+>         v.push_back((val >> 8) & 0xFF);
+>     }
+>     static void AppendFloat(std::vector<uint8_t>& v, float val) {
+>         uint32_t bits;
+>         memcpy(&bits, &val, 4);
+>         AppendU32(v, bits);
+>     }
+>     static uint32_t ReadU32(const uint8_t* data, size_t off) {
+>         return data[off] | (data[off+1] << 8) | (data[off+2] << 16) | (data[off+3] << 24);
+>     }
+>     static uint16_t ReadU16(const uint8_t* data, size_t off) {
+>         return data[off] | (data[off+1] << 8);
+>     }
+>
+>     // 按掩码顺序序列化实体字段
+>     static void SerializeEntityFields(const ServerEntityState& e, uint16_t mask,
+>                                        std::vector<uint8_t>& out) {
+>         if (HasField(mask, EntityField::POSITION)) {
+>             AppendFloat(out, e.pos_x);
+>             AppendFloat(out, e.pos_y);
+>             AppendFloat(out, e.pos_z);
+>         }
+>         if (HasField(mask, EntityField::VELOCITY)) {
+>             AppendFloat(out, e.vel_x);
+>             AppendFloat(out, e.vel_y);
+>             AppendFloat(out, e.vel_z);
+>         }
+>         if (HasField(mask, EntityField::HEALTH))
+>             AppendFloat(out, e.health);
+>         if (HasField(mask, EntityField::ROTATION))
+>             AppendFloat(out, e.rotation_yaw);
+>         if (HasField(mask, EntityField::TIMESTAMP))
+>             AppendU32(out, e.timestamp_ms);
+>     }
+> };
+>
+> // ============================================================
+> // 客户端 ACK 机制集成示例
+> // ============================================================
+> // 在 SnapshotClient::ReceiveSnapshots() 中，每收到一个快照即发送 ACK：
+> //
+> // void SendAck(uint32_t received_tick) {
+> //     uint8_t packet[7];
+> //     packet[0] = (uint8_t)MsgType::CLIENT_ACK;
+> //     memcpy(packet + 1, &received_tick, 4);
+> //     packet[5] = 0; packet[6] = 0; // 填充
+> //     socket_.SendTo(packet, 7, server_addr_);
+> // }
+> //
+> // 服务器端处理 ACK：
+> // case MsgType::CLIENT_ACK:
+> //     uint32_t acked_tick;
+> //     memcpy(&acked_tick, buffer + 1, 4);
+> //     baseline.acked_tick = acked_tick;  // 更新该客户端的基准帧
+> //     break;
+>
+> // ============================================================
+> // 带宽统计演示
+> // ============================================================
+> // int main() {
+> //     NetworkInit net_init;
+> //     DeltaSnapshotServer::BandwidthStats stats;
+> //
+> //     // 模拟 5 帧：设置完整快照大小
+> //     int entity_count = 5;
+> //     size_t full_bytes_per_tick = entity_count * FULL_SNAPSHOT_PER_ENTITY; // 180 bytes
+> //     stats.SetSimulatedFullBytes(full_bytes_per_tick);
+> //
+> //     // 模拟增量发送（实际 serialized delta 大小取决于变化量）
+> //     // 假设只有 1 个实体的位置变了：delta = header + entity_id + mask + 12 bytes pos
+> //     size_t delta_bytes_per_tick = 4 + 4 + 2 + 4 + 2 + 12; // ~28 bytes
+> //
+> //     for (int i = 0; i < 5; i++) {
+> //         stats.RecordDelta(delta_bytes_per_tick);
+> //     }
+> //     stats.Print();
+> //     // 输出: Full snapshot (simulated): 900 bytes
+> //     //       Delta snapshot (actual):  140 bytes
+> //     //       Savings: 84.4%
+> // }
+> ```
+>
+> **关键说明：**
+>
+> - `changed_mask` 用位掩码标记变化字段，发送端只序列化 `mask` 为 1 的字段，接收端按相同顺序还原
+> - 新增实体会设置 `ALL` 掩码，发送完整状态；消失的实体会从 baseline 中移除
+> - `serialize`/`deserialize` 必须严格对称——字段顺序和类型一致，否则解码错位
+> - 真正的生产环境会使用 `BitWriter`/`BitReader`（教程 2.2 已有），这里用字节流是为了可读性
+> - 带宽节省率取决于实体变化率：大量静止实体时可达 90%+；全员移动时也有 ~50%（减少了 `entity_id` 之外的不变字段）
+
+> [!tip]- 练习 3（可选）：延迟补偿命中判定
+>
+> 扩展 `PredictiveServer`，添加射击请求处理、历史状态环缓冲区、服务器端回滚射线检测。
+>
+> ```cpp
+> // ============================================================
+> // lag_compensation.h — 延迟补偿命中判定
+> // ============================================================
+> #pragma once
+> #include <array>
+> #include <vector>
+> #include <cmath>
+> #include <cstring>
+> #include <algorithm>
+>
+> static constexpr int HISTORY_SIZE = 128;   // ~2 秒 @ 60Hz
+> static constexpr float MAX_LAG_COMP_MS = 200.0f; // 最大回滚时间
+> static constexpr int MAX_LAG_COMP_TICKS =
+>     static_cast<int>(MAX_LAG_COMP_MS / (1000.0f / 60.0f)); // ≈12 ticks
+>
+> struct Vec3 {
+>     float x, y, z;
+>     Vec3(float x=0, float y=0, float z=0) : x(x), y(y), z(z) {}
+>     Vec3 operator+(const Vec3& o) const { return {x+o.x, y+o.y, z+o.z}; }
+>     Vec3 operator-(const Vec3& o) const { return {x-o.x, y-o.y, z-o.z}; }
+>     Vec3 operator*(float s) const { return {x*s, y*s, z*s}; }
+>     float Dot(const Vec3& o) const { return x*o.x + y*o.y + z*o.z; }
+>     float LengthSq() const { return Dot(*this); }
+>     float Length() const { return std::sqrt(LengthSq()); }
+>     Vec3 Normalized() const {
+>         float len = Length();
+>         return len > 0.0001f ? (*this * (1.0f / len)) : Vec3{};
+>     }
+> };
+>
+> // 世界状态快照（存入历史缓冲区）
+> struct WorldState {
+>     uint32_t tick;
+>     // 所有非 shooter 实体的位置 + 碰撞体半径
+>     struct EntityRecord {
+>         uint32_t entity_id;
+>         Vec3 position;
+>         float hit_radius;  // 碰撞球半径
+>     };
+>     std::vector<EntityRecord> entities;
+> };
+>
+> // 客户端射击请求
+> struct FireRequest {
+>     uint32_t client_tick;     // 客户端射击时的本地 tick
+>     uint32_t shooter_entity_id;
+>     Vec3 shoot_origin;
+>     Vec3 shoot_direction;     // 单位向量
+>     float max_distance;
+> };
+>
+> // 射击结果
+> struct HitResult {
+>     bool hit;
+>     uint32_t hit_entity_id;
+>     Vec3 hit_point;
+>     uint32_t hit_tick;  // 实际判定用的历史 tick
+> };
+>
+> // ============================================================
+> // 服务器端：历史状态环缓冲区 + 回滚判定
+> // ============================================================
+> class LagCompensationServer {
+> public:
+>     // ——— 历史状态管理 ———
+>
+>     void RecordWorldState(uint32_t tick, const std::vector<WorldState::EntityRecord>& entities) {
+>         WorldState& state = state_history_[tick % HISTORY_SIZE];
+>         state.tick = tick;
+>         state.entities = entities;
+>     }
+>
+>     const WorldState* GetHistoricalState(uint32_t tick) const {
+>         const WorldState& state = state_history_[tick % HISTORY_SIZE];
+>         if (state.tick != tick) return nullptr; // 已被覆盖或未写入
+>         return &state;
+>     }
+>
+>     // ——— 射线球体检测 ———
+>     // 射线: origin + t * direction, t ∈ [0, max_dist]
+>     // 球体: center, radius
+>     // 返回 t >= 0 或 -1 表示未击中
+>     static float RaySphereIntersect(const Vec3& origin, const Vec3& dir,
+>                                      const Vec3& center, float radius) {
+>         Vec3 oc = origin - center;
+>         float a = dir.Dot(dir);          // 应为 1.0（单位向量）
+>         float b = 2.0f * oc.Dot(dir);
+>         float c = oc.Dot(oc) - radius * radius;
+>         float discriminant = b * b - 4.0f * a * c;
+>
+>         if (discriminant < 0.0f) return -1.0f;
+>
+>         float sqrt_d = std::sqrt(discriminant);
+>         float t1 = (-b - sqrt_d) / (2.0f * a);
+>         float t2 = (-b + sqrt_d) / (2.0f * a);
+>
+>         // 返回最近的正面交点
+>         if (t1 >= 0.0f) return t1;
+>         if (t2 >= 0.0f) return t2;
+>         return -1.0f;
+>     }
+>
+>     // ——— 带延迟补偿的命中判定 ———
+>
+>     HitResult ProcessFireRequest(const FireRequest& req, uint32_t server_receive_tick) {
+>         HitResult result{};
+>         result.hit = false;
+>         result.hit_entity_id = 0;
+>         result.hit_tick = req.client_tick;
+>
+>         // 1. 计算客户端请求的 tick 是否在可回滚范围内
+>         int tick_delta = static_cast<int>(server_receive_tick) - static_cast<int>(req.client_tick);
+>         if (tick_delta < 0 || tick_delta > MAX_LAG_COMP_TICKS) {
+>             // 超出回滚时间窗口：要么太旧（被覆盖），要么是未来 tick（作弊/时钟不同步）
+>             // 退化处理：使用当前 tick 判定
+>             result.hit_tick = server_receive_tick;
+>             return DoHitTest(req, server_receive_tick);
+>         }
+>
+>         // 2. 获取历史状态
+>         const WorldState* hist = GetHistoricalState(req.client_tick);
+>         if (!hist) {
+>             // 状态已被覆盖，无法回滚——使用当前状态判定
+>             // 这会导致客户端看到"明明瞄准了却没打中"的情况
+>             result.hit_tick = server_receive_tick;
+>             return DoHitTest(req, server_receive_tick);
+>         }
+>
+>         // 3. 在历史状态下执行射线检测（排除 shooter 自身）
+>         return DoHitTestAgainst(req, *hist);
+>     }
+>
+> private:
+>     HitResult DoHitTestAgainst(const FireRequest& req, const WorldState& hist) {
+>         HitResult result{};
+>         result.hit = false;
+>         result.hit_tick = hist.tick;
+>
+>         float closest_t = req.max_distance;
+>         Vec3 dir_norm = req.shoot_direction.Normalized();
+>
+>         for (const auto& ent : hist.entities) {
+>             if (ent.entity_id == req.shooter_entity_id) continue; // 排除自身
+>
+>             float t = RaySphereIntersect(req.shoot_origin, dir_norm,
+>                                           ent.position, ent.hit_radius);
+>             if (t >= 0.0f && t < closest_t) {
+>                 closest_t = t;
+>                 result.hit = true;
+>                 result.hit_entity_id = ent.entity_id;
+>                 result.hit_point = req.shoot_origin + dir_norm * t;
+>             }
+>         }
+>         return result;
+>     }
+>
+>     // 无回滚的简单判定（当前 tick）
+>     HitResult DoHitTest(const FireRequest& req, uint32_t current_tick) {
+>         const WorldState* cur = GetHistoricalState(current_tick);
+>         if (!cur) return {};
+>         return DoHitTestAgainst(req, *cur);
+>     }
+>
+>     std::array<WorldState, HISTORY_SIZE> state_history_;
+> };
+>
+> // ============================================================
+> // 集成到 PredictiveServer 的示例
+> // ============================================================
+> //
+> // 在 PredictiveServer 中添加：
+> //   LagCompensationServer lag_comp_;
+> //
+> // 每帧 Update() 后记录历史：
+> //   void RecordHistory() {
+> //       std::vector<WorldState::EntityRecord> records;
+> //       for (const auto& [hash, player] : players_) {
+> //           records.push_back({
+> //               player.entity_id,
+> //               Vec3{player.state.position.x, 0, player.state.position.y},
+> //               0.5f  // 碰撞半径
+> //           });
+> //       }
+> //       // 添加"靶子"实体
+> //       records.push_back({TARGET_ENTITY_ID, Vec3{10.0f, 0, 5.0f}, 1.0f});
+> //       lag_comp_.RecordWorldState(current_tick_, records);
+> //   }
+> //
+> // 收到射击请求时处理:
+> //   case MsgType::FIRE_REQUEST:
+> //       FireRequest req;
+> //       memcpy(&req, buffer + 1, sizeof(req));  // 见下方结构
+> //       HitResult hit = lag_comp_.ProcessFireRequest(req, current_tick_);
+> //       // 广播结果给所有客户端
+> //       break;
+>
+> // ============================================================
+> // 客户端发送射击请求
+> // ============================================================
+> //
+> // void SendFireRequest(const Vec3& origin, const Vec3& dir) {
+> //     uint8_t packet[1 + sizeof(FireRequest)];
+> //     packet[0] = (uint8_t)MsgType::FIRE_REQUEST;
+> //
+> //     FireRequest req;
+> //     req.client_tick = local_tick_;          // 客户端当前 tick
+> //     req.shooter_entity_id = entity_id_;
+> //     req.shoot_origin = origin;
+> //     req.shoot_direction = dir;
+> //     req.max_distance = 100.0f;
+> //
+> //     memcpy(packet + 1, &req, sizeof(req));
+> //     socket_.SendTo(packet, 1 + sizeof(req), server_addr_);
+> // }
+>
+> // ============================================================
+> // 集成测试：静态靶子命中判定
+> // ============================================================
+> //
+> // 场景：
+> //   - 靶子 entity_id=999，位置 (10, 0, 5)，碰撞半径 1.0
+> //   - 客户端 A 在 tick=100 时射击 origin=(0,0,0) dir=(0.89, 0, 0.45)
+> //   - 由于 80ms 网络延迟，服务器在 tick=105 收到请求
+> //   - 服务器回滚到 tick=100 的历史状态
+> //   - 判定结果：命中靶子，hit_point≈(10, 0, 5)
+> //
+> // 预期日志：
+> //   [Client] Fire! tick=100 origin=(0,0,0) dir=(0.89,0,0.45)
+> //   [Server] Recv fire from entity=1 client_tick=100 (server_tick=105)
+> //   [Server] Lag comp: rewound 5 ticks (100→105), hit entity 999!
+> //   [Client] Hit confirmed! entity=999 point=(10.0,0,5.0)
+> ```
+>
+> **关键说明：**
+>
+> - `tick % HISTORY_SIZE` 是典型的环缓冲区索引方式；通过存储 `tick` 字段验证是否被覆盖
+> - `MAX_LAG_COMP_MS = 200ms` 限制了最大回滚时间：超出窗口的射击直接使用当前状态判定（防止滥用）
+> - 射线-球体检测用解析几何公式，避免了需要在历史缓冲区中存储完整碰撞几何体
+> - 实际游戏中还需要处理：弹道扩散（随机种子存储在请求中）、穿墙检测（需要碰撞网格回滚）、延迟补偿作弊（故意延迟发送以利用回滚机制）
+> - 这里使用 `Vec3` 替代教程中的 `Vector3`/`Vector2` 以支持 3D 射击场景
 ## 4. 扩展阅读
 
 ### 经典论文与文章

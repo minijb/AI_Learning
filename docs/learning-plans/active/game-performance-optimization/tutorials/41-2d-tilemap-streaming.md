@@ -749,6 +749,170 @@ int main() {
 3. 对比：同步生成 100 个 Chunk vs 异步生成 100 个 Chunk 的帧时间分布
 4. 验证：异步版本是否消除了帧尖峰（Frame Spikes）
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **视距性能对比实验记录模板：**
+>
+> | viewDistanceChunks | Active Chunks | 帧时间 (ms) | 纹理/Mesh 内存 (MB) | 备注 |
+> |-------------------|---------------|-------------|---------------------|------|
+> | 1 | 9 (3×3) | 0.5-1.0 | ~5 | 视距过小，边缘可见未加载区域 |
+> | 2 | 25 (5×5) | 1.0-1.5 | ~12 | 适合移动端 |
+> | 3 | 49 (7×7) | 1.5-2.5 | ~25 | **推荐值**（桌面端） |
+> | 5 | 121 (11×11) | 4-6 | ~60 | Chunk 管理开销开始显现 |
+> | 8 | 289 (17×17) | 10-15 | ~150 | 大量 Chunk，GC/遍历开销显著 |
+> | 12 | 625 (25×25) | 20-30 | ~300+ | 接近不可用（除非 Chunk 极小） |
+>
+> **折线图分析要点**：
+> - 曲线通常呈**指数增长**：Active Chunks 数 = (2d+1)²，随 d 平方增长
+> - 帧时间首先线性增长（Tile 填充开销），然后超出 GPU 预算后加速恶化
+> - **最优视距判定**：帧时间 < 目标帧预算的 30%（16.6ms × 0.3 ≈ 5ms）的最大 d 值
+> - 移动端通常 d=2，PC 端 d=3-4
+>
+> **关键洞察**：Active Chunks 数不是唯一因素——每个 Chunk 内的 Tile 密度、Animated Tile 占比、碰撞体复杂度都会影响曲线形状。
+
+> [!tip]- 练习 2 参考答案
+> **Composite Collider 碰撞性能验证步骤：**
+>
+> ```csharp
+> // 测量脚本 — CollisionBenchmark.cs
+> using UnityEngine;
+> using UnityEngine.Tilemaps;
+>
+> public class CollisionBenchmark : MonoBehaviour
+> {
+>     [SerializeField] private Tilemap tilemap;
+>     [SerializeField] private TilemapCollider2D tilemapCollider;
+>     [SerializeField] private CompositeCollider2D compositeCollider;
+>
+>     private void Start()
+>     {
+>         // 模式 1: 禁用 Composite，仅 TilemapCollider2D
+>         // 这会为每个 Tile 创建独立碰撞体
+>         if (compositeCollider) compositeCollider.enabled = false;
+>
+>         int individualCount = tilemapCollider.GetShapes(
+>             new List<PhysicsShape2D>()); // 获取碰撞形状数量
+>         Debug.Log($"无 Composite: {individualCount} 个独立碰撞体");
+>
+>         float time1 = MeasureCollisionTime();
+>         Debug.Log($"碰撞检测耗时: {time1:F3} ms");
+>
+>         // 模式 2: 启用 Composite
+>         if (compositeCollider)
+>         {
+>             compositeCollider.enabled = true;
+>             compositeCollider.GenerateGeometry(); // 强制重新生成
+>         }
+>
+>         int mergedCount = compositeCollider ? compositeCollider.pathCount : 0;
+>         Debug.Log($"启用 Composite: {mergedCount} 个合并路径");
+>
+>         float time2 = MeasureCollisionTime();
+>         Debug.Log($"碰撞检测耗时: {time2:F3} ms");
+>         Debug.Log($"提升: {(time1 - time2) / time1 * 100:F1}%");
+>     }
+>
+>     private float MeasureCollisionTime()
+>     {
+>         var sw = System.Diagnostics.Stopwatch.StartNew();
+>         // 模拟 100 个移动物体
+>         Physics2D.Simulate(Time.fixedDeltaTime); // 预热
+>
+>         sw.Restart();
+>         for (int i = 0; i < 10; i++)
+>         {
+>             Physics2D.Simulate(Time.fixedDeltaTime);
+>         }
+>         sw.Stop();
+>         return sw.ElapsedMilliseconds / 10f;
+>     }
+> }
+> ```
+>
+> **预期结果**（100×100 Tilemap，~8000 个墙壁 Tile）：
+> - 无 Composite：~8000 个独立 Box Collider → 碰撞 Broad Phase 在 O(N²₍_c₎) 上消耗 ~3-5ms
+> - 有 Composite：合并为 ~50-200 个多边形路径 → Broad Phase 开销降到 ~0.2-0.5ms
+> - **改善幅度**：通常 80-95%，取决于 Tile 布局（连续墙壁合并效果好，孤立方块效果差）
+>
+> **注意事项**：
+> - Composite 的 `Geometry Type` 设为 `Polygons`（精度更高）或 `Outlines`（更高效）
+> - 修改 Tilemap 后需要调用 `compositeCollider.GenerateGeometry()` 刷新
+> - Composite Collider 是 Rigidbody2D 的附属，需确保 Tilemap 的 Rigidbody 设为 `Static`
+
+> [!tip]- 练习 3 参考答案（可选）
+> **异步 Chunk 生成实现：**
+>
+> ```csharp
+> // 方案 1: 协程 — 每 8 行让出控制权
+> private IEnumerator GenerateChunkAsync(Chunk chunk)
+> {
+>     int chunkSize = 16;
+>     var positions = new Vector3Int[chunkSize * chunkSize];
+>     var tiles = new TileBase[chunkSize * chunkSize];
+>
+>     for (int y = 0; y < chunkSize; y++)
+>     {
+>         for (int x = 0; x < chunkSize; x++)
+>         {
+>             int index = y * chunkSize + x;
+>             positions[index] = new Vector3Int(
+>                 chunk.gridCoord.x * chunkSize + x,
+>                 chunk.gridCoord.y * chunkSize + y, 0);
+>             tiles[index] = GenerateTile(positions[index]);
+>         }
+>         // 每 8 行让出控制权，避免主线程卡顿
+>         if (y % 8 == 7) yield return null;
+>     }
+>
+>     chunk.tilemap.SetTiles(positions, tiles);
+>     chunk.isGenerated = true;
+> }
+>
+> // 方案 2: UniTask（需引入 Cysharp.Threading.Tasks）
+> #if UNITASK_ENABLED
+> private async UniTask GenerateChunkAsync_UniTask(Chunk chunk)
+> {
+>     var data = await UniTask.RunOnThreadPool(() =>
+>     {
+>         // 在后台线程计算 Tile 数据
+>         var tileData = new (Vector3Int pos, TileBase tile)[256];
+>         for (int y = 0; y < 16; y++)
+>         for (int x = 0; x < 16; x++)
+>         {
+>             int i = y * 16 + x;
+>             var pos = new Vector3Int(
+>                 chunk.gridCoord.x * 16 + x,
+>                 chunk.gridCoord.y * 16 + y, 0);
+>             tileData[i] = (pos, GenerateTile(pos));
+>         }
+>         return tileData;
+>     });
+>
+>     // 回到主线程设置 Tile（SetTiles 必须在主线程）
+>     var positions = new Vector3Int[data.Length];
+>     var tiles = new TileBase[data.Length];
+>     for (int i = 0; i < data.Length; i++)
+>     {
+>         positions[i] = data[i].pos;
+>         tiles[i] = data[i].tile;
+>     }
+>     chunk.tilemap.SetTiles(positions, tiles);
+>     chunk.isGenerated = true;
+> }
+> #endif
+> ```
+>
+> **帧时间分布对比**：
+> - 同步生成 100 个 Chunk：多次 >50ms 的帧尖峰（每个 Chunk ~0.5ms，累积在单帧）
+> - 协程异步生成：每帧最多 ~2ms（受让出控制权和 maxChunksPerFrame 控制），无尖峰
+> - UniTask 方案：主线程几乎不受影响（<0.1ms），所有计算在后台线程
+>
+> **关键**：`SetTiles` 必须在主线程调用。异步方案的核心是将数据计算和 Tile 设置分离——计算放后台，设置放主线程。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

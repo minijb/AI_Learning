@@ -598,6 +598,499 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：实现基本池分配器
+> ```cpp
+> #include <iostream>
+> #include <cstdlib>
+> #include <cstdint>
+> #include <cstring>
+> #include <cassert>
+> #include <vector>
+>
+> class SimplePoolAllocator {
+> public:
+>     SimplePoolAllocator() = default;
+>
+>     SimplePoolAllocator(const SimplePoolAllocator&) = delete;
+>     SimplePoolAllocator& operator=(const SimplePoolAllocator&) = delete;
+>
+>     SimplePoolAllocator(SimplePoolAllocator&& other) noexcept {
+>         *this = std::move(other);
+>     }
+>     SimplePoolAllocator& operator=(SimplePoolAllocator&& other) noexcept {
+>         if (this != &other) {
+>             destroy();
+>             memory_    = other.memory_;
+>             free_head_ = other.free_head_;
+>             slot_size_ = other.slot_size_;
+>             num_slots_ = other.num_slots_;
+>             other.memory_    = nullptr;
+>             other.free_head_ = nullptr;
+>             other.num_slots_ = 0;
+>         }
+>         return *this;
+>     }
+>
+>     void create(size_t slot_size, size_t num_slots) {
+>         destroy();
+>
+>         // 确保 slot 至少能容纳一个指针（侵入式自由链表）
+>         if (slot_size < sizeof(void*))
+>             slot_size = sizeof(void*);
+>
+>         // 对齐到 alignof(std::max_align_t)
+>         slot_size_ = (slot_size + alignof(std::max_align_t) - 1)
+>                      & ~(alignof(std::max_align_t) - 1);
+>
+>         num_slots_ = num_slots;
+>         size_t total = slot_size_ * num_slots_;
+>
+>         memory_ = static_cast<char*>(
+>             std::aligned_alloc(alignof(std::max_align_t), total));
+>         if (!memory_)
+>             throw std::bad_alloc();
+>
+>         // 初始化侵入式自由链表
+>         free_head_ = reinterpret_cast<void**>(memory_);
+>         for (size_t i = 0; i < num_slots_ - 1; ++i) {
+>             void** curr = reinterpret_cast<void**>(memory_ + i * slot_size_);
+>             void** next = reinterpret_cast<void**>(memory_ + (i + 1) * slot_size_);
+>             *curr = next;
+>         }
+>         void** last = reinterpret_cast<void**>(
+>             memory_ + (num_slots_ - 1) * slot_size_);
+>         *last = nullptr;
+>     }
+>
+>     void* allocate() {
+>         if (!free_head_) {
+>             std::cerr << "[SimplePool] OOM!\n";
+>             return nullptr;
+>         }
+>         void** slot = free_head_;
+>         free_head_ = static_cast<void**>(*slot);  // 取下一空闲 slot
+>         return static_cast<void*>(slot);
+>     }
+>
+>     void deallocate(void* ptr) {
+>         if (!ptr) return;
+>         assert(owns(ptr) && "Pointer not from this pool!");
+>
+>         // 插回链表头部
+>         void** slot = static_cast<void**>(ptr);
+>         *slot = free_head_;
+>         free_head_ = slot;
+>     }
+>
+>     void destroy() {
+>         if (memory_) {
+>             std::free(memory_);
+>             memory_ = nullptr;
+>         }
+>         free_head_ = nullptr;
+>         num_slots_ = 0;
+>         slot_size_ = 0;
+>     }
+>
+>     bool owns(void* p) const {
+>         if (!memory_ || !p) return false;
+>         uintptr_t addr  = reinterpret_cast<uintptr_t>(p);
+>         uintptr_t start = reinterpret_cast<uintptr_t>(memory_);
+>         uintptr_t end   = start + slot_size_ * num_slots_;
+>         if (addr < start || addr >= end) return false;
+>         return (addr - start) % slot_size_ == 0;
+>     }
+>
+>     size_t slot_size() const { return slot_size_; }
+>     size_t num_slots() const { return num_slots_; }
+>     size_t capacity()  const { return slot_size_ * num_slots_; }
+>
+>     ~SimplePoolAllocator() { destroy(); }
+>
+> private:
+>     char*   memory_    = nullptr;
+>     void**  free_head_ = nullptr;
+>     size_t  slot_size_ = 0;
+>     size_t  num_slots_ = 0;
+> };
+>
+> // ============ 测试 ============
+> int main() {
+>     constexpr size_t NUM_SLOTS = 8;
+>     constexpr size_t SLOT_SIZE = 64;
+>
+>     SimplePoolAllocator pool;
+>     pool.create(SLOT_SIZE, NUM_SLOTS);
+>     std::cout << "Pool: " << pool.num_slots() << " slots of "
+>               << pool.slot_size() << "B\n";
+>
+>     // 测试 1：分配所有 slot
+>     std::cout << "\n=== Test 1: Allocate all ===\n";
+>     std::vector<void*> ptrs;
+>     for (size_t i = 0; i < NUM_SLOTS; ++i) {
+>         void* p = pool.allocate();
+>         assert(p && "allocation should succeed");
+>         ptrs.push_back(p);
+>         std::cout << "  alloc #" << i << " → " << p
+>                   << " (in pool: " << pool.owns(p) << ")\n";
+>         // 写入数据验证可写
+>         std::memset(p, static_cast<int>(i), 16);
+>     }
+>
+>     // 验证每个指针不同且在池范围内
+>     for (size_t i = 0; i < ptrs.size(); ++i) {
+>         assert(pool.owns(ptrs[i]));
+>         for (size_t j = i + 1; j < ptrs.size(); ++j) {
+>             assert(ptrs[i] != ptrs[j] && "pointers must be distinct");
+>         }
+>     }
+>     std::cout << "  ✓ All pointers distinct and in-range\n";
+>
+>     // 测试 2：超出容量返回 nullptr
+>     std::cout << "\n=== Test 2: Overflow ===\n";
+>     void* overflow = pool.allocate();
+>     std::cout << "  overflow → " << (overflow ? "non-null (FAIL)" : "nullptr (OK)") << "\n";
+>     assert(!overflow);
+>
+>     // 测试 3：释放一半后重新分配，验证复用
+>     std::cout << "\n=== Test 3: Free half, re-allocate ===\n";
+>     for (size_t i = 0; i < NUM_SLOTS; i += 2) {
+>         pool.deallocate(ptrs[i]);
+>         std::cout << "  free #" << i << " (" << ptrs[i] << ")\n";
+>     }
+>
+>     for (size_t i = 0; i < NUM_SLOTS / 2; ++i) {
+>         void* p = pool.allocate();
+>         assert(p && "should reuse freed slot");
+>         std::cout << "  re-alloc #" << i << " → " << p << "\n";
+>         // 验证复用了刚释放的 slot（LIFO 顺序，所以应该是逆序）
+>         bool found = false;
+>         for (size_t j = 0; j < NUM_SLOTS; j += 2) {
+>             if (ptrs[j] == p) { found = true; break; }
+>         }
+>         assert(found && "re-allocated pointer should be one of the freed ones");
+>     }
+>     std::cout << "  ✓ Freed slots reused\n";
+>
+>     // 释放剩余
+>     for (size_t i = 1; i < NUM_SLOTS; i += 2) {
+>         pool.deallocate(ptrs[i]);
+>     }
+>
+>     pool.destroy();
+>     std::cout << "\nAll tests passed!\n";
+>     return 0;
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：基准测试
+> ```cpp
+> #include <iostream>
+> #include <chrono>
+> #include <cstdlib>
+> #include <iomanip>
+> #include <vector>
+>
+> // ── 复用练习 1 的 SimplePoolAllocator（全部代码见练习 1）──
+> // 此处省略类定义，假设 SimplePoolAllocator 已可用
+>
+> constexpr size_t NUM_OPS = 500'000;
+> constexpr size_t SLOT_SIZES[] = {16, 64, 256, 1024};
+>
+> // 辅助：运行基准
+> template<typename AllocFn, typename FreeFn>
+> double benchmark(const char* label, AllocFn alloc_fn, FreeFn free_fn) {
+>     // 预热
+>     for (size_t i = 0; i < 1000; ++i) {
+>         void* p = alloc_fn();
+>         free_fn(p);
+>     }
+>
+>     auto start = std::chrono::high_resolution_clock::now();
+>     for (size_t i = 0; i < NUM_OPS; ++i) {
+>         void* p = alloc_fn();
+>         free_fn(p);
+>     }
+>     auto end = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration_cast<std::chrono::nanoseconds>(
+>         end - start).count() / (double)NUM_OPS;
+> }
+>
+> int main() {
+>     std::cout << "=== Pool Allocator Benchmark ===\n";
+>     std::cout << "Operations: " << NUM_OPS << " (alloc+free pairs)\n\n";
+>
+>     // 表头
+>     std::cout << std::left
+>               << std::setw(12) << "Slot Size"
+>               << std::setw(16) << "Pool ns/op"
+>               << std::setw(16) << "malloc ns/op"
+>               << std::setw(16) << "new/delete ns/op"
+>               << std::setw(10) << "Speedup\n";
+>     std::cout << std::string(70, '-') << "\n";
+>
+>     for (auto slot_size : SLOT_SIZES) {
+>         // 为 pool 准备足够大的容量
+>         SimplePoolAllocator pool;
+>         pool.create(slot_size, NUM_OPS + 10);
+>
+>         double pool_ns = benchmark("Pool", [&]() { return pool.allocate(); },
+>                                    [&](void* p) { pool.deallocate(p); });
+>
+>         double malloc_ns = benchmark("malloc", [&]() { return std::malloc(slot_size); },
+>                                      [](void* p) { std::free(p); });
+>
+>         double new_ns = benchmark("new", [&]() {
+>             return ::operator new(slot_size);
+>         }, [](void* p) { ::operator delete(p); });
+>
+>         double speedup = malloc_ns / pool_ns;
+>
+>         std::cout << std::left  << std::fixed << std::setprecision(1)
+>                   << std::setw(12) << (std::to_string(slot_size) + "B")
+>                   << std::setw(16) << pool_ns
+>                   << std::setw(16) << malloc_ns
+>                   << std::setw(16) << new_ns
+>                   << std::setw(9)  << speedup << "x\n";
+>     }
+>
+>     std::cout << "\n分析：池分配器 O(1) 链表操作，无系统调用，无锁竞争。\n"
+>               << "  malloc 每次都需要查找空闲块、合并碎片、可能向 OS 申请新页。\n"
+>               << "  在 16B-256B 范围池分配器通常快 5-15 倍。\n"
+>               << "  在 1024B 时差距缩小，因为 malloc 的大块分配路径也优化较好。\n";
+>
+>     return 0;
+> }
+> ```
+
+> [!info]- 思考题 3 参考答案：无锁池分配器（Treiber Stack）
+> ```cpp
+> #include <iostream>
+> #include <atomic>
+> #include <cstdlib>
+> #include <cstdint>
+> #include <chrono>
+> #include <thread>
+> #include <vector>
+> #include <mutex>
+> #include <iomanip>
+>
+> // ============ 无锁池分配器（Treiber Stack） ============
+> class LockFreePoolAllocator {
+> public:
+>     void create(size_t slot_size, size_t num_slots) {
+>         destroy();
+>
+>         if (slot_size < sizeof(void*))
+>             slot_size = sizeof(void*);
+>         slot_size_ = (slot_size + alignof(std::max_align_t) - 1)
+>                      & ~(alignof(std::max_align_t) - 1);
+>         num_slots_ = num_slots;
+>
+>         memory_ = static_cast<char*>(
+>             std::aligned_alloc(alignof(std::max_align_t),
+>                                slot_size_ * num_slots_));
+>         if (!memory_) throw std::bad_alloc();
+>
+>         // 初始化自由链表
+>         Node* prev = nullptr;
+>         for (size_t i = 0; i < num_slots_; ++i) {
+>             Node* node = reinterpret_cast<Node*>(memory_ + i * slot_size_);
+>             node->next.store(prev, std::memory_order_relaxed);
+>             prev = node;
+>         }
+>         head_.store(prev, std::memory_order_release);
+>     }
+>
+>     void* allocate() {
+>         Node* old_head = head_.load(std::memory_order_acquire);
+>         while (old_head) {
+>             Node* next = old_head->next.load(std::memory_order_relaxed);
+>             if (head_.compare_exchange_weak(old_head, next,
+>                     std::memory_order_release,
+>                     std::memory_order_acquire)) {
+>                 return static_cast<void*>(old_head);
+>             }
+>             // CAS 失败 → old_head 已被更新，重试
+>         }
+>         std::cerr << "[LockFreePool] OOM!\n";
+>         return nullptr;
+>     }
+>
+>     void deallocate(void* ptr) {
+>         if (!ptr) return;
+>         Node* node = static_cast<Node*>(ptr);
+>         Node* old_head = head_.load(std::memory_order_acquire);
+>         do {
+>             node->next.store(old_head, std::memory_order_relaxed);
+>         } while (!head_.compare_exchange_weak(old_head, node,
+>                     std::memory_order_release,
+>                     std::memory_order_acquire));
+>     }
+>
+>     void destroy() {
+>         if (memory_) std::free(memory_);
+>         memory_ = nullptr;
+>         head_.store(nullptr);
+>     }
+>
+>     ~LockFreePoolAllocator() { destroy(); }
+>
+> private:
+>     struct alignas(alignof(std::max_align_t)) Node {
+>         std::atomic<Node*> next{nullptr};
+>     };
+>
+>     char*  memory_    = nullptr;
+>     size_t slot_size_ = 0;
+>     size_t num_slots_ = 0;
+>     std::atomic<Node*> head_{nullptr};
+> };
+>
+> // ============ 加锁版本（对比用） ============
+> class MutexPoolAllocator {
+> public:
+>     void create(size_t slot_size, size_t num_slots) {
+>         if (slot_size < sizeof(void*)) slot_size = sizeof(void*);
+>         slot_size_ = (slot_size + alignof(std::max_align_t) - 1)
+>                      & ~(alignof(std::max_align_t) - 1);
+>         num_slots_ = num_slots;
+>
+>         memory_ = static_cast<char*>(
+>             std::aligned_alloc(alignof(std::max_align_t),
+>                                slot_size_ * num_slots_));
+>         if (!memory_) throw std::bad_alloc();
+>
+>         // 普通链表
+>         free_head_ = reinterpret_cast<void**>(memory_);
+>         for (size_t i = 0; i < num_slots_ - 1; ++i) {
+>             void** curr = reinterpret_cast<void**>(memory_ + i * slot_size_);
+>             void** next = reinterpret_cast<void**>(memory_ + (i + 1) * slot_size_);
+>             *curr = next;
+>         }
+>         void** last = reinterpret_cast<void**>(memory_ + (num_slots_ - 1) * slot_size_);
+>         *last = nullptr;
+>     }
+>
+>     void* allocate() {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         if (!free_head_) return nullptr;
+>         void** slot = free_head_;
+>         free_head_ = static_cast<void**>(*slot);
+>         return static_cast<void*>(slot);
+>     }
+>
+>     void deallocate(void* ptr) {
+>         if (!ptr) return;
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         void** slot = static_cast<void**>(ptr);
+>         *slot = free_head_;
+>         free_head_ = slot;
+>     }
+>
+>     void destroy() { if (memory_) std::free(memory_); memory_ = nullptr; }
+>     ~MutexPoolAllocator() { destroy(); }
+>
+> private:
+>     char*   memory_    = nullptr;
+>     void**  free_head_ = nullptr;
+>     size_t  slot_size_ = 0;
+>     size_t  num_slots_ = 0;
+>     std::mutex mutex_;
+> };
+>
+> // ============ 基准测试 ============
+> constexpr size_t NUM_OPS   = 1'000'000;
+> constexpr size_t SLOT_SIZE = 64;
+> constexpr size_t NUM_THREADS = 4;
+> constexpr size_t OPS_PER_THREAD = NUM_OPS / NUM_THREADS;
+>
+> template<typename Pool>
+> double bench_single_thread(Pool& pool) {
+>     auto start = std::chrono::high_resolution_clock::now();
+>     for (size_t i = 0; i < NUM_OPS; ++i) {
+>         void* p = pool.allocate();
+>         pool.deallocate(p);
+>     }
+>     auto end = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration_cast<std::chrono::nanoseconds>(
+>         end - start).count() / (double)NUM_OPS;
+> }
+>
+> template<typename Pool>
+> double bench_multi_thread(Pool& pool) {
+>     std::vector<std::thread> threads;
+>     auto start = std::chrono::high_resolution_clock::now();
+>
+>     for (size_t t = 0; t < NUM_THREADS; ++t) {
+>         threads.emplace_back([&pool]() {
+>             for (size_t i = 0; i < OPS_PER_THREAD; ++i) {
+>                 void* p = pool.allocate();
+>                 pool.deallocate(p);
+>             }
+>         });
+>     }
+>
+>     for (auto& t : threads) t.join();
+>
+>     auto end = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration_cast<std::chrono::nanoseconds>(
+>         end - start).count() / (double)NUM_OPS;
+> }
+>
+> int main() {
+>     std::cout << "=== Lock-Free Pool Allocator Benchmark ===\n";
+>     std::cout << "Slot size: " << SLOT_SIZE << "B, Ops: " << NUM_OPS << "\n\n";
+>
+>     // 单线程对比
+>     {
+>         LockFreePoolAllocator lf_pool;
+>         lf_pool.create(SLOT_SIZE, NUM_OPS + 10);
+>         double lf_ns = bench_single_thread(lf_pool);
+>
+>         MutexPoolAllocator mutex_pool;
+>         mutex_pool.create(SLOT_SIZE, NUM_OPS + 10);
+>         double mutex_ns = bench_single_thread(mutex_pool);
+>
+>         std::cout << std::fixed << std::setprecision(1);
+>         std::cout << "--- Single-thread ---\n";
+>         std::cout << "Lock-free: " << lf_ns    << " ns/op\n";
+>         std::cout << "Mutex:     " << mutex_ns << " ns/op\n";
+>         std::cout << "Ratio:     " << mutex_ns / lf_ns << "x (lock-free faster)\n\n";
+>     }
+>
+>     // 多线程对比
+>     {
+>         LockFreePoolAllocator lf_pool;
+>         lf_pool.create(SLOT_SIZE, NUM_OPS + 10);
+>         double lf_ns = bench_multi_thread(lf_pool);
+>
+>         MutexPoolAllocator mutex_pool;
+>         mutex_pool.create(SLOT_SIZE, NUM_OPS + 10);
+>         double mutex_ns = bench_multi_thread(mutex_pool);
+>
+>         std::cout << "--- Multi-thread (" << NUM_THREADS << " threads) ---\n";
+>         std::cout << "Lock-free: " << lf_ns    << " ns/op\n";
+>         std::cout << "Mutex:     " << mutex_ns << " ns/op\n";
+>         std::cout << "Ratio:     " << mutex_ns / lf_ns << "x (lock-free faster)\n\n";
+>     }
+>
+>     std::cout << "分析：单线程下无锁 CAS 与 mutex 性能接近（CAS 也需内存屏障），\n"
+>               << "  但多线程下无锁版本避免了 mutex 的内核态切换，\n"
+>               << "  在 4 线程场景下通常快 2-5 倍。\n"
+>               << "  ABA 问题在本场景（槽内分配）中自然避免：\n"
+>               << "  槽被分配后必须等用户释放才能再次出现在自由链表中。\n";
+>
+>     return 0;
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Andrei Alexandrescu**: *Modern C++ Design*, Chapter 4 — 经典的小型对象分配器设计

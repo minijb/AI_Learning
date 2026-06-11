@@ -487,6 +487,404 @@ SpatialGridBlob
 ```
 在 Job 中使用该 BlobAsset 进行快速邻近查询（替代运行时构建哈希表）。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using Unity.Entities;
+> using Unity.Collections;
+> using Unity.Mathematics;
+> using UnityEngine;
+>
+> // === BlobAsset 数据结构 ===
+> public struct WeaponConfigBlob
+> {
+>     public float Damage;
+>     public float Range;
+>     public float FireRate;
+>     public float ProjectileSpeed;
+> }
+>
+> // === 引用组件 ===
+> public struct WeaponConfig : IComponentData
+> {
+>     public BlobAssetReference<WeaponConfigBlob> Config;
+> }
+>
+> // === 中间数据组件（Baking 期间） ===
+> public struct WeaponConfigTag : IComponentData { }
+>
+> public struct WeaponConfigData : IComponentData
+> {
+>     public float Damage;
+>     public float Range;
+>     public float FireRate;
+>     public float ProjectileSpeed;
+> }
+>
+> // === Authoring ===
+> public class WeaponConfigAuthoring : MonoBehaviour
+> {
+>     public float Damage = 25f;
+>     public float Range = 50f;
+>     public float FireRate = 0.2f;
+>     public float ProjectileSpeed = 100f;
+>
+>     class Baker : Baker<WeaponConfigAuthoring>
+>     {
+>         public override void Bake(WeaponConfigAuthoring authoring)
+>         {
+>             var entity = GetEntity(TransformUsageFlags.None);
+>
+>             // 标记需要后处理
+>             AddComponent<WeaponConfigTag>(entity);
+>             AddComponent(entity, new WeaponConfigData
+>             {
+>                 Damage = authoring.Damage,
+>                 Range = authoring.Range,
+>                 FireRate = authoring.FireRate,
+>                 ProjectileSpeed = authoring.ProjectileSpeed
+>             });
+>         }
+>     }
+> }
+>
+> // === BakingSystem：生成 BlobAsset ===
+> [WorldSystemFilter(WorldSystemFilterFlags.BakingSystem)]
+> public partial struct WeaponConfigBakingSystem : ISystem
+> {
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         var ecb = new EntityCommandBuffer(Allocator.Temp);
+>
+>         foreach (var (configData, entity) in
+>                  SystemAPI.Query<RefRO<WeaponConfigData>>()
+>                      .WithAll<WeaponConfigTag>()
+>                      .WithEntityAccess())
+>         {
+>             // 创建 BlobAsset
+>             using var blobBuilder = new BlobBuilder(Allocator.Temp);
+>             ref var root = ref blobBuilder.ConstructRoot<WeaponConfigBlob>();
+>
+>             root.Damage = configData.ValueRO.Damage;
+>             root.Range = configData.ValueRO.Range;
+>             root.FireRate = configData.ValueRO.FireRate;
+>             root.ProjectileSpeed = configData.ValueRO.ProjectileSpeed;
+>
+>             var blobRef = blobBuilder.CreateBlobAssetReference<WeaponConfigBlob>(Allocator.Persistent);
+>
+>             // 替换中间数据为引用组件
+>             ecb.RemoveComponent<WeaponConfigTag>(entity);
+>             ecb.RemoveComponent<WeaponConfigData>(entity);
+>             ecb.AddComponent(entity, new WeaponConfig { Config = blobRef });
+>         }
+>
+>         ecb.Playback(state.EntityManager);
+>         ecb.Dispose();
+>     }
+> }
+>
+> // === 运行时 WeaponSystem 使用 BlobAsset ===
+> [BurstCompile]
+> public partial struct WeaponSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float deltaTime = SystemAPI.Time.DeltaTime;
+>
+>         foreach (var (weapon, config, cooldown) in
+>                  SystemAPI.Query<RefRW<Weapon>, RefRO<WeaponConfig>, RefRW<WeaponCooldown>>())
+>         {
+>             // 通过 .Config.Value 访问 Blob 中的只读数据
+>             ref var cfg = ref config.ValueRO.Config.Value;
+>
+>             cooldown.ValueRW.Remaining -= deltaTime;
+>             if (cooldown.ValueRO.Remaining <= 0f)
+>             {
+>                 // 开火：使用 Blob 中的参数
+>                 cooldown.ValueRW.Remaining = cfg.FireRate;
+>                 // 发射逻辑使用 cfg.Damage, cfg.Range, cfg.ProjectileSpeed...
+>             }
+>         }
+>     }
+> }
+>
+> public struct WeaponCooldown : IComponentData
+> {
+>     public float Remaining;
+> }
+> ```
+>
+> **设计要点：**
+> - Authoring 在 Inspector 中可编辑 → Baker 转成中间数据 → BakingSystem 后处理生成 BlobAsset
+> - BakingSystem 使用 `[WorldSystemFilter(WorldSystemFilterFlags.BakingSystem)]` 只在 Baking 时运行
+> - 运行时通过 `config.ValueRO.Config.Value` 访问（两次解引用：组件引用 → BlobAssetReference → Blob 数据）
+> - BlobAsset 不可变 → 天然线程安全，可在多个 Job 中并发读取
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using Unity.Entities;
+> using Unity.Collections;
+> using Unity.Mathematics;
+>
+> // === BlobAsset 数据结构（多层嵌套） ===
+> public struct SkillTreeBlob
+> {
+>     public BlobString Name;
+>     public BlobArray<SkillNode> Skills;
+> }
+>
+> public struct SkillNode
+> {
+>     public FixedString32Bytes SkillId;
+>     public int UnlockCost;
+>     public BlobArray<int> Children; // 子技能在 Skills 数组中的索引
+> }
+>
+> // === 工厂方法构造技能树 ===
+> public static class SkillTreeFactory
+> {
+>     public static BlobAssetReference<SkillTreeBlob> CreateWarriorTree()
+>     {
+>         using var builder = new BlobBuilder(Allocator.Temp);
+>         ref var root = ref builder.ConstructRoot<SkillTreeBlob>();
+>
+>         builder.AllocateString(ref root.Name, "Warrior");
+>
+>         // 分配技能数组
+>         var skills = builder.Allocate(ref root.Skills, 5);
+>
+>         // Skill 0: 重击（根技能，解锁 Skill 1 和 Skill 2）
+>         skills[0] = new SkillNode
+>         {
+>             SkillId = "HeavyStrike",
+>             UnlockCost = 0
+>         };
+>         var children0 = builder.Allocate(ref skills[0].Children, 2);
+>         children0[0] = 1; // → 旋风斩
+>         children0[1] = 2; // → 盾击
+>
+>         // Skill 1: 旋风斩（子技能，解锁 Skill 3）
+>         skills[1] = new SkillNode
+>         {
+>             SkillId = "Whirlwind",
+>             UnlockCost = 3
+>         };
+>         var children1 = builder.Allocate(ref skills[1].Children, 1);
+>         children1[0] = 3; // → 剑刃风暴
+>
+>         // Skill 2: 盾击（子技能，解锁 Skill 4）
+>         skills[2] = new SkillNode
+>         {
+>             SkillId = "ShieldBash",
+>             UnlockCost = 2
+>         };
+>         var children2 = builder.Allocate(ref skills[2].Children, 1);
+>         children2[0] = 4; // → 神圣壁垒
+>
+>         // Skill 3: 剑刃风暴（叶子节点）
+>         skills[3] = new SkillNode
+>         {
+>             SkillId = "BladeStorm",
+>             UnlockCost = 5
+>         };
+>         var children3 = builder.Allocate(ref skills[3].Children, 0); // 无子节点
+>
+>         // Skill 4: 神圣壁垒（叶子节点）
+>         skills[4] = new SkillNode
+>         {
+>             SkillId = "HolyBulwark",
+>             UnlockCost = 4
+>         };
+>         var children4 = builder.Allocate(ref skills[4].Children, 0);
+>
+>         return builder.CreateBlobAssetReference<SkillTreeBlob>(Allocator.Persistent);
+>     }
+> }
+>
+> // === 遍历技能树（BFS 示例） ===
+> [BurstCompile]
+> public partial struct SkillTreeTraversalSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         foreach (var tree in SystemAPI.Query<RefRO<SkillTreeBlobRef>>())
+>         {
+>             ref var blob = ref tree.ValueRO.Data.Value;
+>             ref var skills = ref blob.Skills;
+>
+>             // 使用 NativeQueue 做 BFS 遍历
+>             var queue = new NativeQueue<int>(Allocator.Temp);
+>             queue.Enqueue(0); // 从根技能开始
+>
+>             while (queue.TryDequeue(out int skillIndex))
+>             {
+>                 ref var node = ref skills[skillIndex];
+>
+>                 // 打印技能信息
+>                 // Debug.Log($"Skill: {node.SkillId}, Cost: {node.UnlockCost}");
+>
+>                 // 将子节点入队
+>                 ref var children = ref node.Children;
+>                 for (int i = 0; i < children.Length; i++)
+>                 {
+>                     queue.Enqueue(children[i]);
+>                 }
+>             }
+>
+>             queue.Dispose();
+>         }
+>     }
+> }
+>
+> public struct SkillTreeBlobRef : IComponentData
+> {
+>     public BlobAssetReference<SkillTreeBlob> Data;
+> }
+> ```
+>
+> **多层 BlobArray 要点：**
+> - `BlobArray<int>` 存储的是**索引**而非引用（BlobAsset 不支持嵌套引用）
+> - 每个 `Children` 数组必须单独调用 `builder.Allocate()` 分配
+> - 遍历时用索引回查 `Skills` 数组获取实际节点
+> - BFS/DFS 需要辅助数据结构（`NativeQueue`/`NativeList`）——不能用递归（Burst 限制）
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> using Unity.Entities;
+> using Unity.Collections;
+> using Unity.Mathematics;
+>
+> // === 空间网格 BlobAsset 结构 ===
+> public struct SpatialGridBlob
+> {
+>     public int GridSizeX;
+>     public int GridSizeY;
+>     public float CellSize;
+>     public BlobArray<GridCell> Cells;
+> }
+>
+> public struct GridCell
+> {
+>     public int CellIndex;
+>     public int2 GridCoord;
+>     public BlobArray<int> NeighborIndices; // 相邻 Cell 的索引（包含自身）
+> }
+>
+> // === 工厂方法：预计算网格邻接关系 ===
+> public static class SpatialGridFactory
+> {
+>     public static BlobAssetReference<SpatialGridBlob> Create(
+>         int gridSizeX, int gridSizeY, float cellSize)
+>     {
+>         using var builder = new BlobBuilder(Allocator.Temp);
+>         ref var root = ref builder.ConstructRoot<SpatialGridBlob>();
+>
+>         root.GridSizeX = gridSizeX;
+>         root.GridSizeY = gridSizeY;
+>         root.CellSize = cellSize;
+>
+>         int totalCells = gridSizeX * gridSizeY;
+>         var cells = builder.Allocate(ref root.Cells, totalCells);
+>
+>         // 预计算每个 Cell 的邻居
+>         var tempNeighbors = new NativeList<int>(9, Allocator.Temp);
+>
+>         for (int y = 0; y < gridSizeY; y++)
+>         {
+>             for (int x = 0; x < gridSizeX; x++)
+>             {
+>                 int cellIdx = y * gridSizeX + x;
+>                 cells[cellIdx].GridCoord = new int2(x, y);
+>
+>                 tempNeighbors.Clear();
+>
+>                 // 3×3 邻域（包含自身）
+>                 for (int dy = -1; dy <= 1; dy++)
+>                 {
+>                     for (int dx = -1; dx <= 1; dx++)
+>                     {
+>                         int nx = x + dx;
+>                         int ny = y + dy;
+>                         if (nx >= 0 && nx < gridSizeX && ny >= 0 && ny < gridSizeY)
+>                         {
+>                             tempNeighbors.Add(ny * gridSizeX + nx);
+>                         }
+>                     }
+>                 }
+>
+>                 // 分配邻居数组
+>                 var neighbors = builder.Allocate(ref cells[cellIdx].NeighborIndices,
+>                     tempNeighbors.Length);
+>                 for (int i = 0; i < tempNeighbors.Length; i++)
+>                 {
+>                     neighbors[i] = tempNeighbors[i];
+>                 }
+>             }
+>         }
+>
+>         tempNeighbors.Dispose();
+>         return builder.CreateBlobAssetReference<SpatialGridBlob>(Allocator.Persistent);
+>     }
+> }
+>
+> // === Job 中使用预计算网格进行邻近查询 ===
+> [BurstCompile]
+> public partial struct SpatialQueryWithBlobJob : IJobEntity
+> {
+>     public BlobAssetReference<SpatialGridBlob> Grid;
+>     [ReadOnly] public NativeMultiHashMap<int, Entity> SpatialMap;
+>
+>     void Execute(
+>         in LocalTransform transform,
+>         in Entity entity,
+>         in QueryRadius radius)
+>     {
+>         ref var grid = ref Grid.Value;
+>
+>         // 计算当前 Cell 索引
+>         int cx = (int)math.floor(transform.Position.x / grid.CellSize);
+>         int cy = (int)math.floor(transform.Position.z / grid.CellSize); // 2D 示例
+>         cx = math.clamp(cx, 0, grid.GridSizeX - 1);
+>         cy = math.clamp(cy, 0, grid.GridSizeY - 1);
+>         int cellIdx = cy * grid.GridSizeX + cx;
+>
+>         // 遍历当前 Cell 及其预计算邻居
+>         ref var neighbors = ref grid.Cells[cellIdx].NeighborIndices;
+>         for (int ni = 0; ni < neighbors.Length; ni++)
+>         {
+>             int neighborIdx = neighbors[ni];
+>
+>             if (SpatialMap.TryGetFirstValue(neighborIdx, out Entity other, out var iter))
+>             {
+>                 do
+>                 {
+>                     if (other == entity) continue;
+>                     // 精确距离检测
+>                     // float dist = math.distance(transform.Position, otherPos);
+>                     // if (dist < radius.Value) { /* 碰撞响应 */ }
+>                 }
+>                 while (SpatialMap.TryGetNextValue(out other, ref iter));
+>             }
+>         }
+>     }
+> }
+>
+> public struct QueryRadius : IComponentData
+> {
+>     public float Value;
+> }
+> ```
+>
+> **BlobAsset 空间网格的优势：**
+> - 邻接关系在 Baking 时**预计算一次**，运行时直接查表（零 CPU 开销）
+> - 不需要运行时构建哈希表键（节省 `cellX * prime ^ cellZ * prime` 计算）
+> - `BlobArray<int>` 存储邻居索引使遍历极快（连续内存、缓存友好）
+> - 适用于固定大小的地图网格（如 RTS 地图、寻路网格）
+> - 边界 Cell 的邻居数 < 9（自动处理地图边界）
 ---
 
 ## 4. 扩展阅读

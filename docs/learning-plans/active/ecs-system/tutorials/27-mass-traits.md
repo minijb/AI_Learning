@@ -553,6 +553,504 @@ void SpawnCrowdFromTrait(
 - 编写 `UPatrolPathProcessor`：读取 ZoneGraph 提供的路径点，驱动实体沿车道巡逻移动
 - 在 ZoneGraph 编辑器中绘制闭合巡逻路线，验证实体沿路线循环移动
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **UMassNPCTrait：包含 Stats、Dialogue、VendorTag 的完整 NPC 模板**：
+>
+> ```cpp
+> // === MassNPCTrait.h ===
+> #pragma once
+> #include "MassEntityTraitBase.h"
+> #include "MassNPCTrait.generated.h"
+>
+> // NPC 属性 Fragment
+> USTRUCT()
+> struct FMassNPCStatsFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     float Health = 100.0f;
+>
+>     UPROPERTY()
+>     float MaxHealth = 100.0f;
+>
+>     UPROPERTY()
+>     float Mana = 50.0f;
+>
+>     UPROPERTY()
+>     float MaxMana = 50.0f;
+>
+>     UPROPERTY()
+>     int32 Level = 1;
+> };
+>
+> // 对话 Fragment——每位 NPC 独有（内容可能不同）
+> USTRUCT()
+> struct FMassNPCDialogueFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     TArray<FString> DialogueLines;
+>
+>     UPROPERTY()
+>     bool bCanTalk = true;
+> };
+>
+> // 商人标记——零数据 Tag
+> USTRUCT()
+> struct FMassNPCVendorTag : public FMassTag
+> {
+>     GENERATED_BODY()
+> };
+>
+> // 通用 NPC 标记
+> USTRUCT()
+> struct FMassNPCTag : public FMassTag
+> {
+>     GENERATED_BODY()
+> };
+>
+> // === UMassNPCTrait ===
+> UCLASS(meta = (DisplayName = "NPC Trait"))
+> class UMassNPCTrait : public UMassEntityTraitBase
+> {
+>     GENERATED_BODY()
+>
+> public:
+>     // 编辑器可调参数
+>     UPROPERTY(EditAnywhere, Category = "Stats")
+>     float DefaultHealth = 100.0f;
+>
+>     UPROPERTY(EditAnywhere, Category = "Stats")
+>     float DefaultMana = 50.0f;
+>
+>     UPROPERTY(EditAnywhere, Category = "Stats")
+>     int32 DefaultLevel = 1;
+>
+>     UPROPERTY(EditAnywhere, Category = "Dialogue")
+>     TArray<FString> DefaultDialogueLines;
+>
+>     UPROPERTY(EditAnywhere, Category = "Role")
+>     bool bIsVendor = false;  // 是否为商人
+>
+> protected:
+>     virtual void BuildTemplate(
+>         FMassEntityTemplateBuildContext& BuildContext,
+>         const UWorld& World) const override;
+> };
+>
+> // === MassNPCTrait.cpp ===
+> #include "MassNPCTrait.h"
+> #include "MassEntityTemplateRegistry.h"
+> #include "MassCommonFragments.h"
+>
+> void UMassNPCTrait::BuildTemplate(
+>     FMassEntityTemplateBuildContext& BuildContext,
+>     const UWorld& World) const
+> {
+>     // 1. 声明实体需要的 Fragment
+>     BuildContext.AddFragment<FTransformFragment>();           // 基础 Transform
+>     BuildContext.AddFragment<FMassNPCStatsFragment>();        // 属性
+>     BuildContext.AddFragment<FMassNPCDialogueFragment>();     // 对话数据
+>     BuildContext.AddTag<FMassNPCTag>();                       // NPC 通用标记
+>
+>     // 2. 设置属性默认值
+>     BuildContext.GetFragmentMutable<FMassNPCStatsFragment>()
+>         .Health = DefaultHealth;
+>     BuildContext.GetFragmentMutable<FMassNPCStatsFragment>()
+>         .MaxHealth = DefaultHealth;
+>     BuildContext.GetFragmentMutable<FMassNPCStatsFragment>()
+>         .Mana = DefaultMana;
+>     BuildContext.GetFragmentMutable<FMassNPCStatsFragment>()
+>         .MaxMana = DefaultMana;
+>     BuildContext.GetFragmentMutable<FMassNPCStatsFragment>()
+>         .Level = DefaultLevel;
+>
+>     // 3. 设置对话默认值
+>     FMassNPCDialogueFragment& Dialogue =
+>         BuildContext.GetFragmentMutable<FMassNPCDialogueFragment>();
+>     Dialogue.DialogueLines = DefaultDialogueLines;
+>     Dialogue.bCanTalk = true;
+>
+>     // 4. 条件性添加商人 Tag
+>     if (bIsVendor)
+>     {
+>         BuildContext.AddTag<FMassNPCVendorTag>();
+>     }
+> }
+> ```
+> **关键点**：
+> - `bIsVendor` 控制在模板构建时是否添加 `FMassNPCVendorTag`——非商人 NPC 不会携带此 Tag，Processor 可通过查询是否包含该 Tag 来区分处理逻辑。
+> - `FMassNPCDialogueFragment` 包含 `TArray<FString>`——UE 反射系统支持 TArray 序列化，但注意此类动态数组不适合高频遍历场景（应作为初始化数据在生成时设置一次）。
+> - `BuildContext.AddTag` 添加的标记在运行时通过位掩码快速过滤，零运行时开销。
+
+> [!tip]- 练习 2 参考答案
+> **三个 MassEntityConfigAsset + USquadSpawner 三角阵型生成**：
+>
+> ```cpp
+> // === 首先创建三个 Trait 类 ===
+>
+> // 1. UWarriorTrait
+> UCLASS(meta = (DisplayName = "Warrior Trait"))
+> class UWarriorTrait : public UMassEntityTraitBase
+> {
+>     GENERATED_BODY()
+> public:
+>     UPROPERTY(EditAnywhere) float Health = 150.0f;
+>     UPROPERTY(EditAnywhere) float AttackPower = 25.0f;
+>     UPROPERTY(EditAnywhere) float Speed = 180.0f;
+>
+> protected:
+>     virtual void BuildTemplate(FMassEntityTemplateBuildContext& BuildContext,
+>         const UWorld& World) const override
+>     {
+>         BuildContext.AddFragment<FTransformFragment>();
+>         BuildContext.AddFragment<FMassCharacterStatsFragment>();
+>         BuildContext.AddTag<FMassWarriorTag>();
+>
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .Health = Health;
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .MaxHealth = Health;
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .AttackPower = AttackPower;
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .Speed = Speed;
+>     }
+> };
+>
+> // 2. UArcherTrait（低生命、高攻击范围）
+> UCLASS(meta = (DisplayName = "Archer Trait"))
+> class UArcherTrait : public UMassEntityTraitBase
+> {
+>     GENERATED_BODY()
+> public:
+>     UPROPERTY(EditAnywhere) float Health = 80.0f;
+>     UPROPERTY(EditAnywhere) float AttackPower = 35.0f;
+>     UPROPERTY(EditAnywhere) float AttackRange = 800.0f;
+>
+> protected:
+>     virtual void BuildTemplate(FMassEntityTemplateBuildContext& BuildContext,
+>         const UWorld& World) const override
+>     {
+>         BuildContext.AddFragment<FTransformFragment>();
+>         BuildContext.AddFragment<FMassCharacterStatsFragment>();
+>         BuildContext.AddTag<FMassArcherTag>();
+>
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .Health = Health;
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .MaxHealth = Health;
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .AttackPower = AttackPower;
+>     }
+> };
+>
+> // 3. UHealerTrait（中等生命、治疗能力）
+> UCLASS(meta = (DisplayName = "Healer Trait"))
+> class UHealerTrait : public UMassEntityTraitBase
+> {
+>     GENERATED_BODY()
+> public:
+>     UPROPERTY(EditAnywhere) float Health = 100.0f;
+>     UPROPERTY(EditAnywhere) float HealAmount = 15.0f;
+>     UPROPERTY(EditAnywhere) float HealRadius = 500.0f;
+>
+> protected:
+>     virtual void BuildTemplate(FMassEntityTemplateBuildContext& BuildContext,
+>         const UWorld& World) const override
+>     {
+>         BuildContext.AddFragment<FTransformFragment>();
+>         BuildContext.AddFragment<FMassCharacterStatsFragment>();
+>         BuildContext.AddTag<FMassHealerTag>();
+>
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .Health = Health;
+>         BuildContext.GetFragmentMutable<FMassCharacterStatsFragment>()
+>             .MaxHealth = Health;
+>     }
+> };
+>
+> // === 编辑器配置流程 ===
+> // 1. 编译上述 Trait C++ 代码
+> // 2. 在 Content Browser → Miscellaneous → Data Asset → MassEntityConfigAsset
+> // 3. 创建 DA_Warrior, DA_Archer, DA_Healer 三个资产
+> // 4. 分别添加对应的 Trait 到每个 ConfigAsset 的 Traits 列表
+> // 5. 在 Details 面板调整参数
+>
+> // === USquadSpawner: C++ 侧读取 Config 生成实体 ===
+> UCLASS()
+> class USquadSpawner : public UObject
+> {
+>     GENERATED_BODY()
+> public:
+>     UPROPERTY(EditAnywhere)
+>     UMassEntityConfigAsset* WarriorConfig;
+>
+>     UPROPERTY(EditAnywhere)
+>     UMassEntityConfigAsset* ArcherConfig;
+>
+>     UPROPERTY(EditAnywhere)
+>     UMassEntityConfigAsset* HealerConfig;
+>
+>     UPROPERTY(EditAnywhere)
+>     int32 SquadSize = 10;
+>
+>     // 三角阵型的三个顶点偏移（相对中心）
+>     UPROPERTY(EditAnywhere)
+>     FVector WarriorOffset = FVector(0.0f, 200.0f, 0.0f);   // 前排中央
+>
+>     UPROPERTY(EditAnywhere)
+>     FVector ArcherOffset = FVector(-300.0f, -150.0f, 0.0f); // 后排左
+>
+>     UPROPERTY(EditAnywhere)
+>     FVector HealerOffset = FVector(300.0f, -150.0f, 0.0f);  // 后排右
+>
+>     void SpawnSquad(FMassEntityManager& EntityManager, FVector CenterLocation)
+>     {
+>         check(WarriorConfig && ArcherConfig && HealerConfig);
+>
+>         // 获取或构建模板
+>         const FMassEntityTemplate* WarriorTemplate =
+>             WarriorConfig->GetOrCreateEntityTemplate(*World);
+>         const FMassEntityTemplate* ArcherTemplate =
+>             ArcherConfig->GetOrCreateEntityTemplate(*World);
+>         const FMassEntityTemplate* HealerTemplate =
+>             HealerConfig->GetOrCreateEntityTemplate(*World);
+>
+>         // 批量生成 Warriors（前排）
+>         TArray<FMassEntityHandle> Warriors;
+>         EntityManager.BatchCreateEntities(
+>             WarriorTemplate->GetArchetype(), SquadSize, Warriors);
+>         PlaceEntitiesInFormation(EntityManager, Warriors,
+>             CenterLocation + WarriorOffset, FVector(100.0f, 0.0f, 0.0f));
+>
+>         // 批量生成 Archers（后排左）
+>         TArray<FMassEntityHandle> Archers;
+>         EntityManager.BatchCreateEntities(
+>             ArcherTemplate->GetArchetype(), SquadSize, Archers);
+>         PlaceEntitiesInFormation(EntityManager, Archers,
+>             CenterLocation + ArcherOffset, FVector(50.0f, -120.0f, 0.0f));
+>
+>         // 批量生成 Healers（后排右）
+>         TArray<FMassEntityHandle> Healers;
+>         EntityManager.BatchCreateEntities(
+>             HealerTemplate->GetArchetype(), SquadSize, Healers);
+>         PlaceEntitiesInFormation(EntityManager, Healers,
+>             CenterLocation + HealerOffset, FVector(-50.0f, -120.0f, 0.0f));
+>
+>         UE_LOG(LogTemp, Log,
+>             TEXT("Squad spawned: %d Warriors + %d Archers + %d Healers"),
+>             Warriors.Num(), Archers.Num(), Healers.Num());
+>     }
+>
+> private:
+>     // 将实体按行排列（三角阵型内部微调）
+>     void PlaceEntitiesInFormation(FMassEntityManager& EntityManager,
+>         const TArray<FMassEntityHandle>& Entities,
+>         FVector Center, FVector PerEntityOffset)
+>     {
+>         for (int32 i = 0; i < Entities.Num(); ++i)
+>         {
+>             FVector Loc = Center + PerEntityOffset * i;
+>             FMassTransformFragment& Transform =
+>                 EntityManager.GetFragmentDataChecked<FMassTransformFragment>(Entities[i]);
+>             Transform.Location = Loc;
+>         }
+>     }
+> };
+> ```
+> **关键点**：
+> - `MassEntityConfigAsset` 是 Data Asset——它封装了 Trait 组合，通过 `GetOrCreateEntityTemplate()` 获得运行时模板。
+> - 三角阵型通过三个 Offset 定义顶点，每个顶点的实体在各自方向上微偏移排列。
+> - 使用 `BatchCreateEntities(Archetype, Count, OutArray)` 批量创建，一次调用生成所有同类型实体。
+
+> [!tip]- 练习 3 参考答案
+> **UMassZoneGraphPatrolTrait + UPatrolPathProcessor**：
+>
+> ```cpp
+> // === UMassZoneGraphPatrolTrait.h ===
+> #pragma once
+> #include "MassEntityTraitBase.h"
+> #include "MassZoneGraphPatrolTrait.generated.h"
+>
+> // 巡逻配置 Fragment
+> USTRUCT()
+> struct FMassPatrolConfigFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     float PatrolSpeed = 250.0f;
+>
+>     UPROPERTY()
+>     float WaitTimeAtWaypoint = 1.0f;  // 在路径点停留时间
+>
+>     UPROPERTY()
+>     float CurrentWaitTime = 0.0f;
+>
+>     UPROPERTY()
+>     bool bIsWaiting = false;
+> };
+>
+> UCLASS(meta = (DisplayName = "ZoneGraph Patrol Trait"))
+> class UMassZoneGraphPatrolTrait : public UMassEntityTraitBase
+> {
+>     GENERATED_BODY()
+>
+> public:
+>     UPROPERTY(EditAnywhere, Category = "Patrol")
+>     float DefaultPatrolSpeed = 250.0f;
+>
+>     UPROPERTY(EditAnywhere, Category = "Patrol")
+>     float WaitTime = 1.0f;
+>
+>     // ZoneGraph 车道过滤
+>     UPROPERTY(EditAnywhere, Category = "ZoneGraph")
+>     FZoneGraphTagFilter LaneFilter;
+>
+> protected:
+>     virtual void BuildTemplate(
+>         FMassEntityTemplateBuildContext& BuildContext,
+>         const UWorld& World) const override;
+> };
+>
+> // === UMassZoneGraphPatrolTrait.cpp ===
+> #include "MassZoneGraphPatrolTrait.h"
+> #include "MassEntityTemplateRegistry.h"
+> #include "ZoneGraphSubsystem.h"
+>
+> void UMassZoneGraphPatrolTrait::BuildTemplate(
+>     FMassEntityTemplateBuildContext& BuildContext,
+>     const UWorld& World) const
+> {
+>     // 添加 ZoneGraph 相关 Fragment（由 Mass AI 模块提供）
+>     BuildContext.AddFragment<FMassZoneGraphLaneLocationFragment>();
+>     BuildContext.AddFragment<FMassZoneGraphPathFragment>();
+>     BuildContext.AddFragment<FMassZoneGraphShortPathFragment>();
+>
+>     // 添加巡逻自定义数据
+>     BuildContext.AddFragment<FMassPatrolConfigFragment>();
+>     BuildContext.AddFragment<FTransformFragment>();
+>
+>     // 设置默认值
+>     BuildContext.GetFragmentMutable<FMassPatrolConfigFragment>()
+>         .PatrolSpeed = DefaultPatrolSpeed;
+>     BuildContext.GetFragmentMutable<FMassPatrolConfigFragment>()
+>         .WaitTimeAtWaypoint = WaitTime;
+>
+>     // 添加 Tag 标记为巡逻实体
+>     BuildContext.AddTag<FMassPedestrianTag>();
+> }
+>
+> // === UPatrolPathProcessor ===
+> UCLASS()
+> class UPatrolPathProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UPatrolPathProcessor();
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery PatrolQuery;
+> };
+>
+> UPatrolPathProcessor::UPatrolPathProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Movement;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UPatrolPathProcessor::ConfigureQueries()
+> {
+>     // 需要 ZoneGraph 位置、路径和巡逻配置
+>     PatrolQuery.AddRequirement<FMassZoneGraphLaneLocationFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PatrolQuery.AddRequirement<FMassZoneGraphPathFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PatrolQuery.AddRequirement<FMassZoneGraphShortPathFragment>(
+>         EMassFragmentAccess::ReadOnly);
+>     PatrolQuery.AddRequirement<FMassPatrolConfigFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PatrolQuery.AddRequirement<FTransformFragment>(
+>         EMassFragmentAccess::ReadWrite);
+>     PatrolQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UPatrolPathProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     const float DeltaTime = Context.GetDeltaTimeSeconds();
+>
+>     PatrolQuery.ForEachEntityChunk(EntityManager, Context,
+>         [DeltaTime](FMassExecutionContext& Context)
+>         {
+>             TArrayView<FMassZoneGraphLaneLocationFragment> LaneLocations =
+>                 Context.GetMutableFragmentView<FMassZoneGraphLaneLocationFragment>();
+>             TArrayView<FMassZoneGraphPathFragment> Paths =
+>                 Context.GetMutableFragmentView<FMassZoneGraphPathFragment>();
+>             TArrayView<FMassPatrolConfigFragment> PatrolConfigs =
+>                 Context.GetMutableFragmentView<FMassPatrolConfigFragment>();
+>             TArrayView<FTransformFragment> Transforms =
+>                 Context.GetMutableFragmentView<FTransformFragment>();
+>
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 FMassPatrolConfigFragment& Config = PatrolConfigs[i];
+>
+>                 // 如果在等待阶段，倒计时
+>                 if (Config.bIsWaiting)
+>                 {
+>                     Config.CurrentWaitTime -= DeltaTime;
+>                     if (Config.CurrentWaitTime <= 0.0f)
+>                     {
+>                         Config.bIsWaiting = false;
+>                         // 请求移动到下一个路径点
+>                         // Paths[i].AdvanceToNextWaypoint();
+>                     }
+>                     continue; // 等待中不移动
+>                 }
+>
+>                 // 沿车道移动：从 LaneLocation 获取当前位置沿车道方向
+>                 // ZoneGraph 的 LaneLocation 包含 DistanceAlongLane 信息
+>                 // 这里展示核心逻辑（实际依赖 ZoneGraph API）
+>                 float DistanceAlongLane = LaneLocations[i].DistanceAlongLane;
+>                 DistanceAlongLane += Config.PatrolSpeed * DeltaTime;
+>
+>                 // 如果到达车道终点或路径点，触发等待
+>                 // if (DistanceAlongLane >= LaneLocations[i].LaneLength)
+>                 // {
+>                 //     Config.bIsWaiting = true;
+>                 //     Config.CurrentWaitTime = Config.WaitTimeAtWaypoint;
+>                 //     DistanceAlongLane = LaneLocations[i].LaneLength;
+>                 // }
+>
+>                 // 更新车道位置
+>                 LaneLocations[i].DistanceAlongLane = DistanceAlongLane;
+>
+>                 // ZoneGraph 系统会根据 LaneLocation 自动更新实体 Transform
+>                 // （在 MassZoneGraphNavigationProcessor 中处理）
+>             }
+>         });
+> }
+> ```
+> **关键点**：
+> - ZoneGraph 集成依赖 `FMassZoneGraphLaneLocationFragment`（当前车道位置）、`FMassZoneGraphPathFragment`（路径规划）和 `FMassZoneGraphShortPathFragment`（动态避障短路径）三个 Fragment。
+> - 巡逻逻辑由 `FMassPatrolConfigFragment` 携带配置（速度、等待时间），Processor 驱动实体沿车道移动。
+> - 实际项目中 ZoneGraph 的数据（车道结构、路径点）由 `UZoneGraphSubsystem` 管理。Processor 通过 `DistanceAlongLane` 参数控制实体在车道上的位置，UE 的 `MassZoneGraphNavigationProcessor` 会将车道位置同步回 `FTransformFragment`。
+> - 编辑器中用 ZoneGraph 编辑器绘制闭合路线，Trait 通过 `FZoneGraphTagFilter` 筛选特定类型的车道。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

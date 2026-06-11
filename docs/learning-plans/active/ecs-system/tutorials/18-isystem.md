@@ -506,6 +506,225 @@ SimulationSystemGroup
 - 匹配的 Chunk 数量
 - 每个 Chunk 中的 Entity 数量（Chunk 利用率）
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Jobs;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> // 旧版 foreach 写法（SystemAPI.Query）：
+> // foreach (var (transform, speed) in
+> //          SystemAPI.Query<RefRW<LocalTransform>, RefRO<MoveSpeed>>())
+> // { transform.ValueRW.Rotation = ...; }
+>
+> // === 改写为 IJobEntity ===
+> [BurstCompile]
+> public partial struct RotationJob : IJobEntity
+> {
+>     public float DeltaTime;
+>
+>     void Execute(ref LocalTransform transform, in RotationSpeed speed)
+>     {
+>         // 绕 Y 轴旋转
+>         transform.Rotation = math.mul(
+>             transform.Rotation,
+>             quaternion.RotateY(speed.RadiansPerSecond * DeltaTime));
+>     }
+> }
+>
+> [BurstCompile]
+> public partial struct RotationSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<RotationSpeed>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         var job = new RotationJob
+>         {
+>             DeltaTime = SystemAPI.Time.DeltaTime
+>         };
+>         state.Dependency = job.ScheduleParallel(state.Dependency);
+>     }
+> }
+> ```
+>
+> **对比分析：**
+>
+> | 特性 | SystemAPI.Query foreach | IJobEntity |
+> |------|------------------------|------------|
+> | 并行执行 | ❌ 单线程 foreach | ✅ ScheduleParallel 自动多线程 |
+> | Burst 编译 | ✅ 主方法可 Burst | ✅ Job struct 可 Burst |
+> | 代码结构 | 逻辑在 OnUpdate 内 | 逻辑在独立 Execute 方法 |
+> | 外部参数 | 闭包捕获局部变量 | 通过 struct 字段传入 |
+> | 依赖管理 | 隐式 | 显式 JobHandle 链 |
+> | 适用规模 | < 1000 实体 | 任意规模，线性扩展 |
+>
+> **选择建议：** 简单逻辑 + 实体少 → foreach 够用。需要并行 / 大量实体 / 复杂逻辑 → IJobEntity。
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> // === 组件定义 ===
+> public struct MoveDirection : IComponentData
+> {
+>     public float3 Value;
+> }
+>
+> // === 自定义 SystemGroup ===
+> [UpdateInGroup(typeof(SimulationSystemGroup))]
+> public partial class GameLogicGroup : ComponentSystemGroup { }
+>
+> // === 1. InputSystem：读取输入，设置 MoveDirection ===
+> [BurstCompile]
+> [UpdateInGroup(typeof(GameLogicGroup))]
+> public partial struct InputSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // 简化：使用固定输入方向。实际应从 UnityEngine.Input 读取
+>         float horizontal = 0f;
+>         float vertical = 0f;
+>         // 在 Burst 编译的 ISystem 中调用托管 API 需要 fallback，
+>         // 这里以固定方向演示 SystemGroup 顺序
+>         float3 moveDir = new float3(horizontal, 0f, vertical);
+>
+>         foreach (var (dir, entity) in
+>                  SystemAPI.Query<RefRW<MoveDirection>>()
+>                      .WithEntityAccess())
+>         {
+>             dir.ValueRW.Value = moveDir;
+>         }
+>     }
+> }
+>
+> // === 2. MovementSystem：根据 MoveDirection 移动实体 ===
+> [BurstCompile]
+> [UpdateInGroup(typeof(GameLogicGroup))]
+> [UpdateAfter(typeof(InputSystem))]
+> public partial struct MovementSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float deltaTime = SystemAPI.Time.DeltaTime;
+>
+>         foreach (var (transform, dir, speed) in
+>                  SystemAPI.Query<RefRW<LocalTransform>, RefRO<MoveDirection>, RefRO<MoveSpeed>>())
+>         {
+>             transform.ValueRW.Position +=
+>                 dir.ValueRO.Value * speed.ValueRO.MetersPerSecond * deltaTime;
+>         }
+>     }
+> }
+>
+> // === 3. BoundarySystem：限制实体在 [-10, 10] 范围内 ===
+> [BurstCompile]
+> [UpdateInGroup(typeof(GameLogicGroup))]
+> [UpdateAfter(typeof(MovementSystem))]
+> public partial struct BoundarySystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         foreach (var transform in
+>                  SystemAPI.Query<RefRW<LocalTransform>>())
+>         {
+>             float3 pos = transform.ValueRO.Position;
+>             pos = math.clamp(pos, new float3(-10f, -10f, -10f), new float3(10f, 10f, 10f));
+>             transform.ValueRW.Position = pos;
+>         }
+>     }
+> }
+> ```
+>
+> **关键点：**
+> - `[UpdateInGroup(typeof(GameLogicGroup))]` 确保三个 System 都在自定义 Group 内
+> - `[UpdateAfter(typeof(InputSystem))]` 和 `[UpdateAfter(typeof(MovementSystem))]` 保证执行顺序
+> - GameLogicGroup 继承自 ComponentSystemGroup，放入 SimulationSystemGroup
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Collections;
+> using Unity.Transforms;
+> using UnityEngine;
+>
+> [BurstCompile]
+> public partial struct QueryPerformanceAnalyzer : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<MoveSpeed>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // 构建查询（匹配所有拥有 MoveSpeed 和 LocalTransform 的实体）
+>         var query = SystemAPI.QueryBuilder()
+>             .WithAll<MoveSpeed, LocalTransform>()
+>             .Build();
+>
+>         // 1. 匹配的 Entity 数量
+>         int entityCount = query.CalculateEntityCount();
+>
+>         // 2. 匹配的 Chunk 数量
+>         int chunkCount = query.CalculateChunkCount();
+>
+>         // 3. 遍历 Chunk 获取每个 Chunk 中的 Entity 数量（Chunk 利用率）
+>         var chunks = query.ToArchetypeChunkArray(Allocator.Temp);
+>         float totalUtilization = 0f;
+>
+>         for (int i = 0; i < chunks.Length; i++)
+>         {
+>             int entitiesInChunk = chunks[i].Count;
+>             // 计算该 Archetype 的 Chunk 容量
+>             int chunkCapacity = chunks[i].Capacity;
+>             float utilization = (float)entitiesInChunk / chunkCapacity * 100f;
+>             totalUtilization += utilization;
+>
+>             Debug.Log($"Chunk[{i}]: {entitiesInChunk}/{chunkCapacity} entities " +
+>                       $"({utilization:F1}%)");
+>         }
+>
+>         float avgUtilization = chunks.Length > 0
+>             ? totalUtilization / chunks.Length
+>             : 0f;
+>
+>         Debug.Log($"=== Query Performance ===");
+>         Debug.Log($"Total entities: {entityCount}");
+>         Debug.Log($"Total chunks: {chunkCount}");
+>         Debug.Log($"Average chunk utilization: {avgUtilization:F1}%");
+>         Debug.Log($"Estimated memory waste: {(100f - avgUtilization):F1}%");
+>
+>         chunks.Dispose();
+>     }
+> }
+> ```
+>
+> **分析要点：**
+> - `CalculateEntityCount()` 返回匹配的 Entity 总数（跨 Chunk 累加）
+> - `CalculateChunkCount()` 返回 Chunk 数，用于衡量内存碎片程度
+> - Chunk 利用率 = entitiesInChunk / chunkCapacity，低利用率意味着 Chunk 碎片多
+> - Archetype 的 Chunk 容量由组件总大小决定：通常 16KB / sizeof(ComponentSet)
+> - 建议：定期 `EntityManager.AddMatchingArchetypeForStructuralChanges()` 整理碎片
 ---
 
 ## 4. 扩展阅读

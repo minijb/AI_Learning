@@ -603,6 +603,288 @@ GPU 占用                98%           55%           44%
 4. 验证：在 Scene View 和 Game View 中都能看到绘制的线框
 5. 使用 Frame Debugger 验证你的 Pass 确实在正确的阶段执行
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Frame Debugger 走查 — 诊断方法**
+> 
+> **走查步骤与回答框架**：
+> 
+> 1. **Draw Call 数量**：Frame Debugger 左上角显示总 Draw Call 数。例如一个标准 URP 室内场景可能有 150~400 个 Draw Call。移动端目标 < 200，PC 端 < 2000。
+> 
+> 2. **SetPass Call 与 Draw/SetPass 比率**：
+>    - 在 Frame Debugger 中逐个展开事件，Shader 切换对应 SetPass Call
+>    - SRP Batcher 生效时：Draw/SetPass > 5:1（理想 > 10:1）
+>    - SRP Batcher 未生效：Draw/SetPass ≈ 1:1（每个 Draw 一次 SetPass 切换）
+>    - 如果比率接近 1:1，说明 SRP Batcher 未启用或 Shader 不兼容
+> 
+> 3. **非预期的 CopyFramebuffer**：
+>    - 在 Frame Debugger 中搜索 `Copy` 或 `Blit` 事件
+>    - 如果在渲染不透明物体后、渲染透明物体前出现 `CopyColor` → Opaque Texture 开启导致
+>    - 这是一个**全屏复制操作**（从 color RT 到 `_CameraOpaqueTexture`），移动端成本极高
+>    - 关闭后：Frame Debugger 中该 Copy 事件消失
+> 
+> 4. **阴影 Pass 的 Draw Call 占比**：
+>    - 在 Frame Debugger 中寻找 `ShadowCaster` 或 `MainLightShadow` 事件组
+>    - 典型场景：阴影 Pass 可能占总 Draw Call 的 30~50%（每个投影物体独立绘制 Shadow Map）
+>    - 如果阴影 Draw Call 占比过高 → 考虑减少 Shadow Distance 或使用静态烘焙
+> 
+> 5. **最耗时的 Pass**：
+>    - Frame Debugger 显示每个事件的渲染时间（RenderThread 耗时）
+>    - 重点关注全屏 Pass（后处理、Bloom、DepthOfField）
+>    - 如果某个后处理 Pass 耗时过高 → 降低其质量设置或关闭
+>    - 移动端常见的耗时大户：Bloom（多级 downsample/upsample）、Motion Blur
+> 
+> **关闭 Opaque Texture 后的变化**：
+> - Frame Debugger 中 `CopyColor` 事件消失
+> - 总渲染时间可能减少 1~3ms（移动端尤其明显）
+> - 副作用：依赖 `_CameraOpaqueTexture` 的效果失效（如软粒子、折射、GrabPass 等），检查场景是否有这些效果
+
+> [!tip]- 练习 2 参考答案
+> **SRP Batcher 兼容 Shader + 批量测试**
+> 
+> **兼容版 Shader**（URP Unlit）：
+> ```hlsl
+> Shader "Custom/SRPBatcherCompatible"
+> {
+>     Properties
+>     {
+>         _BaseColor ("Base Color", Color) = (1, 1, 1, 1)
+>         _BaseMap ("Base Texture", 2D) = "white" {}
+>     }
+>     SubShader
+>     {
+>         Tags { "RenderType"="Opaque" "RenderPipeline"="UniversalPipeline" }
+> 
+>         Pass
+>         {
+>             HLSLPROGRAM
+>             #pragma vertex vert
+>             #pragma fragment frag
+> 
+>             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
+> 
+>             // ★ 关键: SRP Batcher 兼容要求的 CBUFFER 声明
+>             CBUFFER_START(UnityPerMaterial)
+>                 float4 _BaseColor;
+>                 float4 _BaseMap_ST;
+>             CBUFFER_END
+> 
+>             TEXTURE2D(_BaseMap);
+>             SAMPLER(sampler_BaseMap);
+> 
+>             struct Attributes
+>             {
+>                 float4 positionOS : POSITION;
+>                 float2 uv : TEXCOORD0;
+>             };
+> 
+>             struct Varyings
+>             {
+>                 float4 positionCS : SV_POSITION;
+>                 float2 uv : TEXCOORD0;
+>             };
+> 
+>             Varyings vert(Attributes IN)
+>             {
+>                 Varyings OUT;
+>                 OUT.positionCS = TransformObjectToHClip(IN.positionOS.xyz);
+>                 OUT.uv = TRANSFORM_TEX(IN.uv, _BaseMap);
+>                 return OUT;
+>             }
+> 
+>             half4 frag(Varyings IN) : SV_Target
+>             {
+>                 half4 texColor = SAMPLE_TEXTURE2D(_BaseMap, sampler_BaseMap, IN.uv);
+>                 return texColor * _BaseColor;
+>             }
+>             ENDHLSL
+>         }
+>     }
+> }
+> ```
+> 
+> **测试脚本**（挂载到场景中空 GameObject）：
+> ```csharp
+> using UnityEngine;
+> using UnityEngine.Rendering;
+> 
+> public class BatchTest : MonoBehaviour
+> {
+>     [SerializeField] private Mesh cubeMesh;
+>     [SerializeField] private Material baseMaterial;
+>     [SerializeField] private int cubeCount = 500;
+> 
+>     private Material[] materials;
+> 
+>     void Start()
+>     {
+>         materials = new Material[cubeCount];
+>         for (int i = 0; i < cubeCount; i++)
+>         {
+>             materials[i] = new Material(baseMaterial);
+>             materials[i].color = Random.ColorHSV(); // 不同颜色 = 不同材质实例
+>         }
+>     }
+> 
+>     void Update()
+>     {
+>         // 每帧绘制 500 个 Cube（不同材质）
+>         for (int i = 0; i < cubeCount; i++)
+>         {
+>             Vector3 pos = new Vector3(
+>                 (i % 25) * 2f - 24f,
+>                 0,
+>                 (i / 25) * 2f - 20f);
+>             Graphics.DrawMesh(cubeMesh, pos, Quaternion.identity,
+>                 materials[i], 0);
+>         }
+>     }
+> }
+> ```
+> 
+> **测试步骤**：
+> 1. 使用兼容版 Shader（含 `CBUFFER_START(UnityPerMaterial)`）→ 运行 → Profiler 记录
+> 2. 修改 Shader：移除 `CBUFFER_START`/`CBUFFER_END`，将 `_BaseColor` 声明为普通 uniform → 重新测试
+> 3. 在 Profiler 的 Rendering 模块观察：
+>    - **兼容版**：SetPass Call ≈ 1~10（SRP Batcher 批量处理），Draw Call = 500
+>    - **不兼容版**：SetPass Call ≈ 500（每个材质切换一次），等于 Draw Call
+> 
+> **预期结果**：
+> - 兼容版 SRP Batcher 开销 ≈ 0.2ms（500 物体）
+> - 不兼容版 SetPass 切换开销 ≈ 1.5~3ms（500 次 SetPass × ~3-6μs per switch）
+> - **加速比约 7~15x**
+
+> [!tip]- 练习 3 参考答案
+> **URP Renderer Feature — 光源视锥体线框可视化（挑战）**
+> 
+> ```csharp
+> // FrustumVisualizationFeature.cs
+> using UnityEngine;
+> using UnityEngine.Rendering;
+> using UnityEngine.Rendering.Universal;
+> using System.Collections.Generic;
+> 
+> public class FrustumVisualizationFeature : ScriptableRendererFeature
+> {
+>     [System.Serializable]
+>     public class Settings
+>     {
+>         public Material lineMaterial;
+>         public Color lineColor = Color.yellow;
+>     }
+> 
+>     public Settings settings = new Settings();
+>     private FrustumVisualizationPass frustumPass;
+> 
+>     public override void Create()
+>     {
+>         frustumPass = new FrustumVisualizationPass(settings);
+>         // ★ 关键：在 Opaque 之后、Transparent 之前执行
+>         frustumPass.renderPassEvent = RenderPassEvent.AfterRenderingOpaques;
+>     }
+> 
+>     public override void AddRenderPasses(ScriptableRenderer renderer,
+>         ref RenderingData renderingData)
+>     {
+>         if (settings.lineMaterial == null) return;
+>         // 只在 Game View 和 Scene View 中渲染
+>         if (renderingData.cameraData.cameraType == CameraType.Game ||
+>             renderingData.cameraData.cameraType == CameraType.SceneView)
+>         {
+>             renderer.EnqueuePass(frustumPass);
+>         }
+>     }
+> 
+>     private class FrustumVisualizationPass : ScriptableRenderPass
+>     {
+>         private Settings settings;
+>         private Material lineMaterial;
+>         private List<Vector3> frustumVertices = new List<Vector3>(8);
+>         // 视锥体 12 条棱的索引对
+>         private static readonly int[,] frustumEdges = new int[12, 2]
+>         {
+>             {0,1},{1,2},{2,3},{3,0}, // near plane
+>             {4,5},{5,6},{6,7},{7,4}, // far plane
+>             {0,4},{1,5},{2,6},{3,7}  // connecting edges
+>         };
+> 
+>         public FrustumVisualizationPass(Settings s)
+>         {
+>             settings = s;
+>             lineMaterial = new Material(s.lineMaterial);
+>             lineMaterial.color = s.lineColor;
+>         }
+> 
+>         public override void Execute(ScriptableRenderContext context,
+>             ref RenderingData renderingData)
+>         {
+>             CommandBuffer cmd = CommandBufferPool.Get("FrustumVisualization");
+> 
+>             // 获取场景中所有 Directional Light
+>             var lights = Object.FindObjectsOfType<Light>();
+>             foreach (var light in lights)
+>             {
+>                 if (light.type != LightType.Directional) continue;
+> 
+>                 // 构建视锥体 8 个顶点（从主摄像机）
+>                 Camera cam = renderingData.cameraData.camera;
+>                 CalculateFrustumCorners(cam, light.shadowNearPlane,
+>                     light.shadowDistance, frustumVertices);
+> 
+>                 // 对每条棱绘制线段
+>                 for (int e = 0; e < 12; e++)
+>                 {
+>                     Vector3 a = frustumVertices[frustumEdges[e, 0]];
+>                     Vector3 b = frustumVertices[frustumEdges[e, 1]];
+>                     // 使用 GL 风格绘制（简单线框）
+>                     // 生产环境可改用 DrawProcedural 的 line list
+>                     Debug.DrawLine(a, b, settings.lineColor, 0f, false);
+>                 }
+>             }
+> 
+>             context.ExecuteCommandBuffer(cmd);
+>             CommandBufferPool.Release(cmd);
+>         }
+> 
+>         private void CalculateFrustumCorners(Camera cam, float near,
+>             float far, List<Vector3> corners)
+>         {
+>             corners.Clear();
+>             Transform camT = cam.transform;
+>             // 计算近/远平面在相机空间中的四个角
+>             float halfFov = cam.fieldOfView * 0.5f * Mathf.Deg2Rad;
+>             float nearH = Mathf.Tan(halfFov) * near;
+>             float farH = Mathf.Tan(halfFov) * far;
+>             float nearW = nearH * cam.aspect;
+>             float farW = farH * cam.aspect;
+> 
+>             Vector3 nearCenter = camT.position + camT.forward * near;
+>             Vector3 farCenter = camT.position + camT.forward * far;
+> 
+>             corners.Add(nearCenter - camT.right * nearW - camT.up * nearH); // near BL
+>             corners.Add(nearCenter - camT.right * nearW + camT.up * nearH); // near TL
+>             corners.Add(nearCenter + camT.right * nearW + camT.up * nearH); // near TR
+>             corners.Add(nearCenter + camT.right * nearW - camT.up * nearH); // near BR
+>             corners.Add(farCenter - camT.right * farW - camT.up * farH);   // far BL
+>             corners.Add(farCenter - camT.right * farW + camT.up * farH);   // far TL
+>             corners.Add(farCenter + camT.right * farW + camT.up * farH);   // far TR
+>             corners.Add(farCenter + camT.right * farW - camT.up * farH);   // far BR
+>         }
+>     }
+> }
+> ```
+> 
+> **验证方法**：
+> 1. 在 URP Renderer Asset 的 Renderer Features 列表中添加此 Feature
+> 2. 分配一个简单的 Line Material（Unlit/Color shader）
+> 3. 运行后，在 Scene View 和 Game View 中都能看到黄色线框
+> 4. 打开 Frame Debugger → 在 `AfterRenderingOpaques` 阶段找到 `FrustumVisualization` 事件
+> 5. 确认它位于不透明物体之后、透明物体之前
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

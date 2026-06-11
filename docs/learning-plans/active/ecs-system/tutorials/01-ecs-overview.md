@@ -379,6 +379,80 @@ Entity[3] 飞箭 | Pos(44,5) Vel(50,0)
 2. 组件数据在内存中散布在堆上各处——这对 CPU 缓存有什么影响？
 3. 后续章节的 **Archetype 存储**会如何彻底解决这两个问题？
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 添加 Gravity 组件
+> struct Gravity { float force = 9.8f; };
+>
+> // ---- 在 World 类中添加 ----
+> void add(Entity e, const Gravity& c) { gravities[e] = c; }
+> Gravity* get_gravity(Entity e) {
+>     auto it = gravities.find(e);
+>     return it != gravities.end() ? &it->second : nullptr;
+> }
+> // 在 private 中添加:
+> // std::unordered_map<Entity, Gravity> gravities;
+> // 在 destroy_entity 中添加: gravities.erase(e);
+>
+> // ---- gravity_system ----
+> void gravity_system(World& world, float dt) {
+>     for (auto e : world.all_entities()) {
+>         auto* vel = world.get_velocity(e);
+>         auto* grav = world.get_gravity(e);
+>         if (vel && grav) {
+>             vel->dy += grav->force * dt;  // 向下加速（y 轴正方向向下）
+>         }
+>     }
+> }
+>
+> // ---- 给飞箭加 Gravity ----
+> // world.add(arrow, Gravity{9.8f});
+> // 飞箭现在会呈抛物线轨迹下落，而非直线飞行
+> ```
+>
+> **关键点**：Gravity 只影响有 Velocity 的实体。树没有 Velocity——不受重力影响，符合物理直觉。添加新组件不需要修改 movement_system。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 场景：玩家"砍倒"树
+> // 1. 树初始状态：只有 Position + Name（没有 Velocity，没有 Health）
+> Entity tree = world.create_entity();
+> world.add(tree, Name{"大树"});
+> world.add(tree, Position{100.0f, 0.0f});
+>
+> // 2. "砍倒"——运行时改造实体
+> std::cout << "\n===== 玩家砍倒大树！=====\n";
+> // 移除 Name 组件（树不再是"树"，变成"倒下的树干"）
+> // 在当前 World 实现中需要手动从 names map 中 erase
+> // world.names.erase(tree);  // 实际需要 add erase 方法
+> world.add(tree, Velocity{2.0f, -5.0f});  // 树干弹飞
+> world.add(tree, Health{1, 1});           // 可被摧毁
+> world.get_health(tree)->current = 0;     // 触发 damage_system 销毁
+>
+> // 3. damage_system 检测到 Health <= 0 → 销毁实体
+> ```
+>
+> **OOP vs ECS 对比**：
+> - **OOP**：需要修改 Tree 类（或创建 FallenTree 子类），复制 Position 数据，销毁旧对象，创建新对象，更新所有引用
+> - **ECS**：只修改了组件集合——添加 Velocity + Health。Entity ID 不变，代码零侵入。**运行时动态组合**是 ECS 的核心优势
+
+> [!tip]- 练习 3 参考答案（可选）
+> **1. 哈希计算量分析**
+>
+> `movement_system` 遍历所有实体，每个实体进行 2 次 `unordered_map::find`（Position + Velocity）。10000 个实体 = **20000 次哈希计算**。如果只有 5000 个实体同时有 Position 和 Velocity，另外 5000 个只有 Position——那么 10000 次 Velocity 查找是**徒劳的**（返回 nullptr）。
+>
+> **2. 缓存影响**
+>
+> `unordered_map` 的节点散布在堆上各处。同类型组件（如所有 Position）之间没有空间局部性——遍历 1000 个 Position 需要访问 1000 个不连续的内存地址。每次访问大概率 cache miss（~100-200 个 CPU 周期）。相比之下，连续数组遍历的 cache miss 率接近 0。
+>
+> **3. Archetype 如何解决**
+>
+> - **哈希开销 → 零**：Archetype 将"同时拥有 Position + Velocity"的实体存为一组。System 直接遍历这个组，不需要哈希查找——组件通过偏移量直接访问
+> - **缓存问题 → 缓存友好**：同一 Archetype 内的组件按类型连续排列（SoA 或 AoS）。遍历 Position 就是顺序扫描 `float` 数组——CPU 预取器完美工作，每次缓存行加载 8 个 Position
+> - 后续章节的 Archetype 存储会将"查询"从 O(N × M)（N 个实体 × M 次哈希查找）降到 O(K)（K 个匹配的实体，直接遍历）
 ---
 
 ## 4. 扩展阅读

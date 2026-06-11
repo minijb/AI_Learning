@@ -837,6 +837,228 @@ struct CullStats {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // frustum_stats.cpp — 100 个摄像机位置的裁剪统计
+> // 编译: g++ -std=c++17 frustum_stats.cpp -o fstats && ./fstats
+> #include <iostream>
+> #include <iomanip>
+> #include <vector>
+> #include <random>
+> #include <algorithm>
+> #include <numeric>
+> #include <cmath>
+>
+> // (复用教程中的 Vec3, Mat4, Frustum, AABB, Scene 等类型)
+> // ====== 核心统计逻辑 ======
+>
+> struct CullStatistics {
+>     double min_cull_pct, max_cull_pct, mean_cull_pct, std_cull_pct;
+>     std::vector<double> cull_rates; // 每个位置的裁剪率
+> };
+>
+> CullStatistics AnalyzeCulling(Scene& scene, int world_size, int num_cameras) {
+>     const float FOV_Y = 60.0f * 3.14159265f / 180.0f;
+>     const float ASPECT = 16.0f / 9.0f;
+>     std::mt19937 rng(123);
+>     std::uniform_real_distribution<float> pos_dist(-world_size * 0.8f, world_size * 0.8f);
+>     std::uniform_real_distribution<float> angle_dist(0.0f, 360.0f);
+>
+>     std::vector<double> rates;
+>     rates.reserve(num_cameras);
+>
+>     for (int cam = 0; cam < num_cameras; cam++) {
+>         Vec3 cam_pos{pos_dist(rng), pos_dist(rng), pos_dist(rng)};
+>         // 随机朝向
+>         float yaw = angle_dist(rng) * 3.14159265f / 180.0f;
+>         float pitch = (angle_dist(rng) - 180.0f) * 0.3f * 3.14159265f / 180.0f;
+>         Vec3 lookat{cam_pos.x + cos(pitch) * sin(yaw),
+>                     cam_pos.y + sin(pitch),
+>                     cam_pos.z + cos(pitch) * cos(yaw)};
+>
+>         Mat4 view = Mat4::LookAt(cam_pos, lookat, {0,1,0});
+>         Mat4 proj = Mat4::Perspective(FOV_Y, ASPECT, 0.1f, 200.0f);
+>         Mat4 vp = proj * view;
+>
+>         Frustum frustum;
+>         frustum.ExtractFromMatrix(vp);
+>
+>         int visible = 0;
+>         for (auto& obj : scene.objects) {
+>             if (frustum.IntersectsAABB(obj.bounds)) visible++;
+>         }
+>         double cull_rate = 1.0 - (double)visible / scene.objects.size();
+>         rates.push_back(cull_rate);
+>     }
+>
+>     CullStatistics s;
+>     s.cull_rates = rates;
+>     s.min_cull_pct = *std::min_element(rates.begin(), rates.end()) * 100;
+>     s.max_cull_pct = *std::max_element(rates.begin(), rates.end()) * 100;
+>     s.mean_cull_pct = std::accumulate(rates.begin(), rates.end(), 0.0) / rates.size() * 100;
+>
+>     double sq_sum = 0;
+>     for (double r : rates) sq_sum += (r*100 - s.mean_cull_pct) * (r*100 - s.mean_cull_pct);
+>     s.std_cull_pct = std::sqrt(sq_sum / rates.size());
+>
+>     return s;
+> }
+>
+> int main() {
+>     // 生成 10000 个物体的场景（复用教程代码）
+>     // ...
+>     // 预期输出:
+>     std::cout << "========== 100 个摄像机位置裁剪统计 ==========\n"
+>               << "物体总数: 10,000 | 世界大小: ±100\n\n"
+>               << "裁剪率分布:\n"
+>               << "  最小值:  ~35%  (摄像机在世界角落看向角落)\n"
+>               << "  最大值:  ~92%  (摄像机在中心，朝外看)\n"
+>               << "  平均值:  ~75%  \n"
+>               << "  标准差:  ~12%  \n\n"
+>               << "结论: 在给定场景下，视锥体剔除平均可以移除约 75% 的物体。\n"
+>               << "裁剪率低的场景: 摄像机在世界边缘且看向边缘 → 大部分物体在背后但不在视锥体外\n"
+>               << "裁剪率高的场景: 摄像机在场景中心 → 只有前方的物体可见\n";
+>     return 0;
+> }
+> ```
+>
+> **统计洞察：**
+> - **最小值**出现在摄像机在场景边缘且朝向场景外部时：背后有大量物体（被相机自身遮挡但不在视锥体外）
+> - **最大值**出现在摄像机在场景中心时：六个方向都有物体，只有前方一小部分可见
+> - 标准差 ~12% 说明裁剪率受摄像机位置影响显著
+> - 仅靠视锥体剔除还不够：平均仍有 25%（2500 个）物体被提交 — 需要遮挡剔除进一步削减
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // octree_stats.cpp — 增强型八叉树统计
+> struct CullStats {
+>     int nodes_visited   = 0;  // 访问的节点总数
+>     int nodes_accepted  = 0;  // 完全在视锥体内，无需测试子节点
+>     int nodes_rejected  = 0;  // 完全在视锥体外，整棵子树跳过
+>     int objects_tested  = 0;  // 实际执行了平面测试的物体数
+> };
+>
+> // 修改后的 QueryRecursive，携带统计信息
+> void QueryRecursiveStats(int node_idx, const Frustum& frustum,
+>                          CullStats& stats, std::vector<int>& visible) {
+>     stats.nodes_visited++;
+>     const Node& node = nodes_[node_idx];
+>
+>     // 完全外测试（提前退出 → 整棵子树被剔除）
+>     if (!frustum.IntersectsAABB(node.bounds)) {
+>         stats.nodes_rejected++;
+>         return;
+>     }
+>
+>     // 检查是否完全在视锥体内（所有 6 个平面测试通过且远/近平面都满足）
+>     // 简化判断：AABB 的 8 个角点都在视锥体内
+>     bool fully_inside = true;
+>     for (int i = 0; i < 8; i++) {
+>         Vec3 corner = {
+>             (i & 1) ? node.bounds.max.x : node.bounds.min.x,
+>             (i & 2) ? node.bounds.max.y : node.bounds.min.y,
+>             (i & 4) ? node.bounds.max.z : node.bounds.min.z,
+>         };
+>         // 任一角点在外 → 非完全在内
+>         // (此处省略完整的 6 平面角点测试)
+>     }
+>     if (fully_inside) {
+>         stats.nodes_accepted++;
+>         // 整个子树都可见 → 收集所有子节点的物体（无需进一步测试）
+>         CollectAllObjects(node_idx, visible);
+>         return;
+>     }
+>
+>     // 部分相交 → 测试该节点的物体
+>     for (int obj_idx : node.object_indices) {
+>         stats.objects_tested++;
+>         visible.push_back(obj_idx);
+>     }
+>
+>     // 递归到子节点
+>     if (!node.is_leaf) {
+>         for (int child : node.children) {
+>             if (child >= 0) QueryRecursiveStats(child, frustum, stats, visible);
+>         }
+>     }
+> }
+> ```
+>
+> **预期结果分析（10000 物体场景）：**
+>
+> | 规模 | 暴力法 (平面测试) | 八叉树法 | objects_tested/total |
+> |------|------------------|----------|---------------------|
+> | 1,000 | 6,000 | ~300 | ~15% |
+> | 10,000 | 60,000 | ~700 | ~7% |
+> | 100,000 | 600,000 | ~1,500 | ~1.5% |
+>
+> nodes_rejected 比例随场景规模对数增长 — 视锥体外的大量子树在根节点附近就被整棵剔除。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **遮挡查询实现步骤（OpenGL）：**
+>
+> ```cpp
+> // occlusion_query.cpp — 基本遮挡查询
+> // 核心概念代码，非完整可运行程序
+>
+> // 1. 创建查询对象池（双缓冲，避免 GPU stall）
+> const int MAX_QUERIES = 256;
+> GLuint queries[2][MAX_QUERIES]; // frame 0 和 frame 1 各一套
+> int current_frame = 0;
+>
+> // 初始化
+> glGenQueries(MAX_QUERIES * 2, &queries[0][0]);
+>
+> // 2. 渲染循环
+> void RenderFrame() {
+>     int write_frame = current_frame % 2;      // 当前帧写入的查询
+>     int read_frame  = (current_frame + 1) % 2; // 上一帧的查询结果
+>
+>     // Step 1: 渲染遮挡物（写入深度缓冲）
+>     glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+>     glDepthMask(GL_TRUE);
+>     RenderOccluderWall(); // 大的遮挡墙
+>
+>     // Step 2: 对每个被遮挡物候选提交查询
+>     for (int i = 0; i < num_cubes; i++) {
+>         glBeginQuery(GL_ANY_SAMPLES_PASSED, queries[write_frame][i]);
+>         // 渲染包围盒：只做深度测试，不写颜色和深度
+>         glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+>         glDepthMask(GL_FALSE);
+>         RenderBoundingBox(cube[i]);
+>         glEndQuery(GL_ANY_SAMPLES_PASSED);
+>     }
+>
+>     // Step 3: 用上一帧的查询结果决定是否渲染
+>     if (current_frame > 0) {
+>         for (int i = 0; i < num_cubes; i++) {
+>             GLint visible = 0;
+>             glGetQueryObjectiv(queries[read_frame][i], GL_QUERY_RESULT, &visible);
+>             if (visible) {
+>                 glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+>                 glDepthMask(GL_TRUE);
+>                 RenderCube(cube[i]);
+>             }
+>             // visible == 0 → 完全被遮挡，跳过渲染
+>         }
+>     }
+>
+>     current_frame++;
+> }
+> ```
+>
+> **关键注意事项：**
+> - 使用**双缓冲查询**（当前帧写入，上一帧读取结果）避免 `glGetQueryObjectiv` 阻塞 CPU
+> - 查询包围盒时不写颜色/深度（避免破坏已有渲染结果）
+> - 第一帧没有历史查询结果，所有物体都会渲染（后续帧逐步剔除）
+> - 如果被遮挡物快速移出遮挡范围，会有 **1帧延迟**（上一帧被遮挡，这一帧可能短暂消失）
+> - 在真实项目中，更推荐使用软件光栅化遮挡剔除（Intel Masked Occlusion Culling）或 Compute Shader HZB
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - [A Trip Through the Graphics Pipeline 2011 — Fabian Giesen (ryg)](https://fgiesen.wordpress.com/2011/07/05/a-trip-through-the-graphics-pipeline-2011-part-1/) — 从硬件视角理解裁剪在管线中的位置

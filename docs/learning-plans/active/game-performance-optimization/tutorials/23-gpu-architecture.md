@@ -671,6 +671,145 @@ float4 PSMain(PSInput input) : SV_Target {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Occupancy 参数扫描分析（以 NVIDIA RTX 3070 Ti / GA104 为例）：**
+>
+> ```
+> GA104 SM 规格:
+>   - 65536 个 32-bit 寄存器 / SM
+>   - 最大 48 warps / SM (1536 threads)
+>   - 最大 100 KB shared memory / SM (可配置)
+>   - 最大 16 blocks / SM
+>   - 每 warp 32 threads
+> ```
+>
+> **扫描 1: 寄存器数量 vs Occupancy（shared_mem=0, block_size=256=8 warps）**
+>
+> | VGPR/thread | Warp 寄存器用量 | Register-limited warps | Occupancy |
+> |------------|----------------|----------------------|-----------|
+> | 16 | 32×16=512 | 65536/512=128 → 但 max=48 | **100%** |
+> | 32 | 32×32=1024 | 65536/1024=64 → max=48 | **100%** |
+> | 48 | 32×48=1536 | 65536/1536=42 | **42/48=87.5%** |
+> | 64 | 32×64=2048 | 65536/2048=32 | **66.7%** |
+> | 80 | 32×80=2560 | 65536/2560=25 | **52.1%** |
+> | **88** | **32×88=2816** | **65536/2816=23** | **47.9% ← 首次 < 50%** |
+> | 128 | 32×128=4096 | 65536/4096=16 | **33.3%** |
+> | 256 | 32×256=8192 | 65536/8192=8 | **16.7%** |
+>
+> **扫描 2: Shared Memory 大小 vs Occupancy（VGPR=48, block_size=256）**
+>
+> | LDS/block | LDS-limited blocks (100KB max) | Reg-limited blocks (42 warps/5.25 blocks) | Actual occupancy |
+> |-----------|-------------------------------|----------------------------------------|-----------------|
+> | 0 KB | 16 (max) | 5 (65536/1536=42 warps → floor(42/8)=5 blocks) | 5×8/48=83.3% |
+> | 8 KB | 100/8=12 | 5 | 5×8/48=83.3% |
+> | 16 KB | 100/16=6 | 5 | 5×8/48=83.3% |
+> | **20 KB** | **100/20=5** | **5** | **5×8/48=83.3%** |
+> | **24 KB** | **100/24=4** | **5** | **4×8/48=66.7% ← 首次 < 50% (LDS limited!)** |
+> | 32 KB | 100/32=3 | 5 | 3×8/48=50% |
+> | 48 KB | 100/48=2 | 5 | 2×8/48=33.3% |
+>
+> **总结：**
+> - 要保持 ≥ 50% occupancy：**寄存器预算 < 88 VGPR/thread**，**shared memory 预算 < 24 KB/block**（在 block_size=256 时）。
+> - Shared memory 的 occupancy 限制更"陡峭"——它按 block 粒度（8 warps）分配，而非单个 warp。即使只多用 4KB shared memory，从 5 blocks 降到 4 blocks → 失去 8 warps。
+> - **寄存器通常是更早撞到的墙**。大多数 "heavy" shader 先遇到 register pressure 而非 shared memory 限制。
+
+> [!tip]- 练习 2 参考答案
+> **分支重排以减少 Warp Divergence：**
+>
+> ```hlsl
+> // 方案 1: 重排分支顺序 — 最常见路径放在最前面
+> // 减少 warp 内同时存在不同分支的概率
+> float4 PSMain_Reordered(PSInput input) : SV_Target {
+>     float4 color = g_BaseColor;
+>     float depth = g_DepthTex.Sample(g_Sampler, input.uv).r;
+>
+>     // 先处理绝大多数像素（常见路径）
+>     color = applyLighting(color, input.normal, input.worldPos);
+>     color = applyShadow(color, depth);
+>
+>     // 再处理少数情况——早期返回，不执行后续代码
+>     if (depth > 0.999) {          // sky pixels (少数)
+>         return g_SkyColor;
+>     }
+>     if (depth < 0.1) {             // near pixels (少数)
+>         return applyFog(color, depth);
+>     }
+>
+>     // 默认路径无需显式分支
+>     return color;
+> }
+>
+> // 方案 2: 使用 clip()/discard 把 sky 像素在 Early-Z 中剔除
+> // 在单独的 depth pre-pass 中标记 sky
+> // Depth Pre-Pass:
+> float4 DepthPrePass_PS(PSInput input) : SV_Target {
+>     float depth = g_DepthTex.Sample(g_Sampler, input.uv).r;
+>     clip(depth - 0.999);  // sky → discard，不写 depth
+>     return float4(depth, 0, 0, 1);
+> }
+>
+> // 方案 3: 分 Pass — sky/near 在独立 pass 中用 stencil 标记后跳过
+> // Pass A: 渲染 sky 到 stencil=1
+> // Pass B: 渲染 near 到 stencil=2
+> // Pass C: 主 pass — stencil != 1 && stencil != 2 才渲染
+> ```
+>
+> **分析：**
+> 1. **原始代码的 divergence 影响**：sky pixel 和 near pixel 随机穿插在实体像素中时，同一个 warp 内的 32 个像素可能 2 个是 sky、3 个是 near、27 个是实体。GPU 必须串行执行三个分支——有效吞吐 = 100% → ~50%（每个分支内的被屏蔽线程空闲）。最坏情况每个 warp 都发散。
+> 2. **方案 1（重排）**：将最常见的实体路径放在最前，然后 `return` 掉少数情况（sky/near）。大多数 warp 不会执行到 `if` 分支——因为实体路径在条件判断前就完成了。sky/near 路径的代价只在包含 sky/near 像素的 warp 中体现。
+> 3. **方案 3（分 Pass）最优**：用 stencil 标记后，主 pass 中 sky 和 near 像素不会进入 pixel shader（Early-Z + Stencil 剔除）。主 pass 的每个 warp 都是 100% 实体像素 → 零 divergence。这是工业级做法（UE 的 Forward+ 用类似策略）。
+
+> [!tip]- 练习 3 参考答案
+> **手工计算 Occupancy：**
+>
+> **AMD RDNA 2 WGP 规格：**
+> - 65536 VGPR
+> - 最大 32 wavefronts (wave32 模式)
+> - 64KB LDS (shared memory)
+> - 最大 8 workgroups 同时驻留
+> - VGPR 分配粒度：256 对齐
+>
+> **配置：`[numthreads(256, 1, 1)]`，84 VGPR/thread，12KB LDS**
+>
+> **步骤 1: wavefront 数:**
+> - 256 threads / 32 (wave32) = **8 wavefronts / workgroup**
+>
+> **步骤 2: VGPR 分配量（含对齐）：**
+> - 每 wavefront 32 threads，每 thread 84 VGPR
+> - 每 wavefront VGPR = 32 × 84 = 2688
+> - 对齐到 256 的倍数 → 2688 已对齐到 256 (2688 = 10.5 × 256? 不对，2688=10×256+128。需要向上取整到 256 的倍数 = 2816)
+> - 更准确：ceil(2688 / 256) × 256 = 11 × 256 = **2816 VGPR / wavefront**
+> - 每 workgroup VGPR = 8 × 2816 = **22528 VGPR**
+>
+> **步骤 3: 各限制维度：**
+> - VGPR 限制：65536 / 22528 = **2 个 workgroups**（余数不够第 3 个）
+> - LDS 限制：65536 bytes / (12 × 1024) = 64KB / 12288 = **5 个 workgroups**
+> - Max workgroups 限制：**8 个 workgroups**
+> - Wavefront 限制：每 WGP 最多 32 wavefronts。2 workgroups × 8 wavefronts = 16 wavefronts < 32 ✓
+>
+> **步骤 4: 最终 occupancy：**
+> - Active workgroups = min(2, 5, 8) = **2 workgroups**
+> - Active wavefronts = 2 × 8 = **16 wavefronts**
+> - Occupancy = 16 / 32 = **50%**
+>
+> **将 `numthreads` 改为 `(64, 1, 1)`，保持 84 VGPR 和 12KB LDS：**
+> - 64 threads / 32 = **2 wavefronts / workgroup**
+> - 每 wavefront VGPR = 32 × 84 = 2688 → 对齐后 2816
+> - 每 workgroup VGPR = 2 × 2816 = 5632
+> - VGPR 限制：65536 / 5632 = **11 个 workgroups**
+> - LDS 限制：64KB / 12KB = **5 个 workgroups**
+> - Max workgroups 限制：**8 个 workgroups**
+> - Active workgroups = min(11, 5, 8) = **5 workgroups**
+> - Active wavefronts = 5 × 2 = **10 wavefronts**
+> - Occupancy = 10 / 32 = **31.25%** ← 反而降低了！
+>
+> **为什么 occupancy 降低了？** 虽然每 workgroup 的 VGPR 大幅减少（22528 → 5632），LDS 仍然是瓶颈（5 workgroups）。但 wavefront 总数从 16 降到 10——因为 workgroup 变小了（8→2 wavefronts/workgroup），LDS 限制下能容纳的 wavefront 比之前少。这说明 **occupancy 不只是减少寄存器就能提升的——workgroup 大小和资源限制之间存在非线性的交互**。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [NVIDIA CUDA C++ Programming Guide — SM Architecture](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#hardware-implementation) — 官方 SM 架构描述

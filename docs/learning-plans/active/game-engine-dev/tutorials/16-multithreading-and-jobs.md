@@ -2035,6 +2035,402 @@ Thread 1: [Fiber A] ──yield──→ [Fiber B] ──yield──→ [Fiber A
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // HazardPointer.hpp —— 无锁内存回收
+>
+> #include <atomic>
+> #include <vector>
+> #include <list>
+>
+> template<typename T>
+> struct HazardNode {
+>     T data;
+>     std::atomic<HazardNode*> next;
+> };
+>
+> class HazardPointer {
+> public:
+>     static constexpr int MAX_HAZARD_POINTERS = 8;
+>     static constexpr int RETIRE_THRESHOLD = 100;
+>
+>     // 每个线程拥有的 Hazard Pointer 管理器
+>     HazardPointer() {
+>         // 注册到全局列表
+>         RegisterThread();
+>     }
+>
+>     ~HazardPointer() { UnregisterThread(); }
+>
+>     // 标记一个节点待回收
+>     template<typename T>
+>     void Retire(HazardNode<T>* node) {
+>         retireList_.push_back(reinterpret_cast<HazardNode<void>*>(node));
+>         retireCount_++;
+>
+>         // 达到阈值时触发扫描
+>         if (retireCount_ >= RETIRE_THRESHOLD) {
+>             Scan();
+>         }
+>     }
+>
+>     // 扫描并回收安全节点
+>     void Scan() {
+>         // 收集所有线程正在访问的节点
+>         std::vector<void*> hazards;
+>         for (auto* hp : allHazardPointers_) {
+>             void* ptr = hp->hazardPointer_.load(
+>                 std::memory_order_acquire);
+>             if (ptr) hazards.push_back(ptr);
+>         }
+>
+>         // 遍历回收列表
+>         auto it = retireList_.begin();
+>         while (it != retireList_.end()) {
+>             bool inUse = false;
+>             for (void* h : hazards) {
+>                 if (h == static_cast<void*>(*it)) {
+>                     inUse = true;
+>                     break;
+>                 }
+>             }
+>
+>             if (!inUse) {
+>                 // 安全删除：没有线程的hazard pointer指向它
+>                 delete *it;
+>                 it = retireList_.erase(it);
+>                 retireCount_--;
+>             } else {
+>                 ++it;  // 仍在使用，保留
+>             }
+>         }
+>     }
+>
+>     // 设置当前线程的hazard pointer
+>     void SetHazard(void* node) {
+>         hazardPointer_.store(node, std::memory_order_release);
+>     }
+>
+>     // 清除当前线程的hazard pointer
+>     void ClearHazard() {
+>         hazardPointer_.store(nullptr, std::memory_order_release);
+>     }
+>
+>     // 强制回收所有（进程退出时调用）
+>     static void ReclaimAll() {
+>         for (auto* hp : allHazardPointers_) {
+>             hp->ClearHazard();
+>             hp->Scan();
+>             // 最后剩下的直接删除（没有线程在使用）
+>             for (auto* node : hp->retireList_) {
+>                 delete node;
+>             }
+>             hp->retireList_.clear();
+>         }
+>     }
+>
+> private:
+>     void RegisterThread() {
+>         allHazardPointers_.push_back(this);
+>     }
+>
+>     void UnregisterThread() {
+>         // 从全局列表移除
+>         auto it = std::find(allHazardPointers_.begin(),
+>                             allHazardPointers_.end(), this);
+>         if (it != allHazardPointers_.end()) {
+>             allHazardPointers_.erase(it);
+>         }
+>         // 强制回收该线程的所有待回收节点
+>         ClearHazard();
+>         Scan();
+>         for (auto* node : retireList_) delete node;
+>         retireList_.clear();
+>     }
+>
+>     std::atomic<void*> hazardPointer_{nullptr};
+>     std::list<HazardNode<void>*> retireList_;
+>     int retireCount_ = 0;
+>
+>     // 全局Hazard Pointer注册表（需要单独同步保护）
+>     static std::vector<HazardPointer*> allHazardPointers_;
+>     static std::mutex registryMutex_;
+> };
+>
+> // 使用示例——Lock-free Queue的dequeue
+> template<typename T>
+> bool SafeDequeue(LockFreeQueue<T>& queue, T& out,
+>                  HazardPointer& hp) {
+>     while (true) {
+>         HazardNode<T>* head = queue.head_.load(
+>             std::memory_order_acquire);
+>
+>         // 标记head为"正在使用"
+>         hp.SetHazard(head);
+>
+>         // 重新读取head确保在标记期间没被修改
+>         if (head != queue.head_.load(std::memory_order_acquire)) {
+>             continue;  // 重试
+>         }
+>
+>         HazardNode<T>* next = head->next.load(
+>             std::memory_order_acquire);
+>         if (next == nullptr) {
+>             hp.ClearHazard();
+>             return false;  // 队列空
+>         }
+>
+>         // CAS 尝试更新 head
+>         if (queue.head_.compare_exchange_weak(
+>                 head, next,
+>                 std::memory_order_release,
+>                 std::memory_order_relaxed)) {
+>             out = next->data;
+>             hp.ClearHazard();
+>             // 延迟回收旧head
+>             hp.Retire(head);
+>             return true;
+>         }
+>         // CAS失败 → 重试
+>     }
+> }
+> ```
+>
+> **核心思路**：Hazard Pointer的核心思想是"声明意图"——线程在访问共享节点前通过`SetHazard`声明"我正在访问这个节点"，访问完毕后`ClearHazard`。回收线程扫描所有线程的hazard pointer，只有不在任何线程hazard列表中的节点才能安全删除。`RETIRE_THRESHOLD=100`控制扫描频率，防止每次都全量扫描的性能开销。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // simd_particles.cpp —— SIMD加速粒子更新
+>
+> #include <xmmintrin.h>  // SSE
+> #include <emmintrin.h>  // SSE2
+> #include <chrono>
+> #include <iostream>
+>
+> struct Particle {
+>     float x, y, z;    // 位置
+>     float vx, vy, vz; // 速度
+>     float life;       // 剩余生命
+> };
+>
+> // SOA（Structure of Arrays）布局——对SIMD更友好
+> struct ParticleSOA {
+>     float* posX, *posY, *posZ;
+>     float* velX, *velY, *velZ;
+>     float* life;
+> };
+>
+> // AOS → SOA 转换
+> ParticleSOA ConvertToSOA(const Particle* particles, int count) {
+>     ParticleSOA soa;
+>     soa.posX = new float[count];
+>     soa.posY = new float[count];
+>     soa.posZ = new float[count];
+>     soa.velX = new float[count];
+>     soa.velY = new float[count];
+>     soa.velZ = new float[count];
+>     soa.life = new float[count];
+>
+>     for (int i = 0; i < count; ++i) {
+>         soa.posX[i] = particles[i].x;
+>         soa.posY[i] = particles[i].y;
+>         soa.posZ[i] = particles[i].z;
+>         soa.velX[i] = particles[i].vx;
+>         soa.velY[i] = particles[i].vy;
+>         soa.velZ[i] = particles[i].vz;
+>         soa.life[i] = particles[i].life;
+>     }
+>     return soa;
+> }
+>
+> // 标量版本（AOS布局，基准）
+> void UpdateParticlesScalar(Particle* particles, int count,
+>                             float dt) {
+>     for (int i = 0; i < count; ++i) {
+>         particles[i].x += particles[i].vx * dt;
+>         particles[i].y += particles[i].vy * dt;
+>         particles[i].z += particles[i].vz * dt;
+>         particles[i].life -= dt;
+>     }
+> }
+>
+> // SSE版本（SOA布局）
+> void UpdateParticlesSIMD(ParticleSOA& soa, int count,
+>                           float dt) {
+>     __m128 dt4 = _mm_set1_ps(dt);
+>     int simdCount = count & ~3;  // 向下对齐到4
+>
+>     for (int i = 0; i < simdCount; i += 4) {
+>         // 加载4个粒子的位置
+>         __m128 px = _mm_load_ps(&soa.posX[i]);
+>         __m128 py = _mm_load_ps(&soa.posY[i]);
+>         __m128 pz = _mm_load_ps(&soa.posZ[i]);
+>
+>         // 加载4个粒子的速度
+>         __m128 vx = _mm_load_ps(&soa.velX[i]);
+>         __m128 vy = _mm_load_ps(&soa.velY[i]);
+>         __m128 vz = _mm_load_ps(&soa.velZ[i]);
+>
+>         // pos += vel * dt
+>         px = _mm_add_ps(px, _mm_mul_ps(vx, dt4));
+>         py = _mm_add_ps(py, _mm_mul_ps(vy, dt4));
+>         pz = _mm_add_ps(pz, _mm_mul_ps(vz, dt4));
+>
+>         // 存回
+>         _mm_store_ps(&soa.posX[i], px);
+>         _mm_store_ps(&soa.posY[i], py);
+>         _mm_store_ps(&soa.posZ[i], pz);
+>
+>         // life -= dt
+>         __m128 lf = _mm_load_ps(&soa.life[i]);
+>         lf = _mm_sub_ps(lf, dt4);
+>         _mm_store_ps(&soa.life[i], lf);
+>     }
+>
+>     // 处理剩余粒子（标量fallback）
+>     for (int i = simdCount; i < count; ++i) {
+>         soa.posX[i] += soa.velX[i] * dt;
+>         soa.posY[i] += soa.velY[i] * dt;
+>         soa.posZ[i] += soa.velZ[i] * dt;
+>         soa.life[i] -= dt;
+>     }
+> }
+>
+> // 性能测试
+> void BenchmarkSIMD() {
+>     const int COUNT = 1000000;
+>     Particle* particles = new Particle[COUNT];
+>     ParticleSOA soa = ConvertToSOA(particles, COUNT);
+>
+>     // 预热
+>     UpdateParticlesScalar(particles, COUNT, 0.016f);
+>     UpdateParticlesSIMD(soa, COUNT, 0.016f);
+>
+>     // 标量版本计时
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     for (int iter = 0; iter < 100; ++iter) {
+>         UpdateParticlesScalar(particles, COUNT, 0.016f);
+>     }
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     auto scalarMs = std::chrono::duration_cast<
+>         std::chrono::milliseconds>(t1 - t0).count();
+>
+>     // SIMD版本计时
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     for (int iter = 0; iter < 100; ++iter) {
+>         UpdateParticlesSIMD(soa, COUNT, 0.016f);
+>     }
+>     auto t3 = std::chrono::high_resolution_clock::now();
+>     auto simdMs = std::chrono::duration_cast<
+>         std::chrono::milliseconds>(t3 - t2).count();
+>
+>     std::cout << "Scalar: " << scalarMs << "ms\n";
+>     std::cout << "SIMD:   " << simdMs << "ms\n";
+>     std::cout << "Speedup: " << (float)scalarMs / simdMs
+>               << "x\n";
+>     // 预期: ~3-4x 加速（4路SIMD + SOA缓存友好）
+>
+>     delete[] particles;
+> }
+> ```
+>
+> **核心思路**：SIMD加速两个关键：**(1) SOA布局**——将同属性(如所有粒子的x)连续存储，使得`_mm_load_ps`一次加载4个float到SSE寄存器，无需gather指令。AOS布局下加载一个粒子需要访问分散的内存地址，无法利用SIMD的连续加载能力。**(2) 对齐**——`simdCount = count & ~3`确保只对4的倍数使用SSE，剩余1-3个粒子走标量fallback。预期加速比3-4x（SSE4-way × SOA缓存局部性）。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // FiberJobSystem.hpp —— 基于纤程的任务系统
+>
+> #ifdef _WIN32
+> #include <windows.h>
+>
+> class FiberJobSystem {
+> public:
+>     // 工作线程（每个有独立的fiber调度）
+>     struct WorkerThread {
+>         LPVOID mainFiber;      // 主纤程（线程本体）
+>         LPVOID currentFiber;   // 当前运行的用户纤程
+>         bool running;
+>     };
+>
+>     void Initialize(int numThreads) {
+>         workers_.resize(numThreads);
+>         for (int i = 0; i < numThreads; ++i) {
+>             auto& w = workers_[i];
+>             w.running = true;
+>             w.mainFiber = ConvertThreadToFiber(nullptr);
+>             // 创建线程...
+>         }
+>     }
+>
+>     // 启动一个Job作为fiber运行
+>     void Schedule(Job* job) {
+>         WorkerThread& worker = PickWorker();
+>
+>         // 创建fiber：将Job的执行体作为fiber入口
+>         LPVOID fiber = CreateFiber(0, FiberEntry, job);
+>         job->fiber = fiber;
+>
+>         // 切换到这个fiber执行
+>         worker.currentFiber = fiber;
+>         SwitchToFiber(fiber);
+>     }
+>
+>     // Job等待其他Job完成时yield
+>     static void Yield() {
+>         WorkerThread& worker = GetCurrentWorker();
+>         // 切换回主纤程（线程调度循环）
+>         SwitchToFiber(worker.mainFiber);
+>     }
+>
+>     // 等待一个JobCounter完成（自动yield直到完成）
+>     static void WaitFor(JobCounter& counter) {
+>         while (counter.value > 0) {
+>             Yield();  // 不等阻塞，切换到其他fiber
+>         }
+>     }
+>
+> private:
+>     static VOID WINAPI FiberEntry(LPVOID param) {
+>         Job* job = static_cast<Job*>(param);
+>         job->Execute();  // 执行Job的实际工作
+>
+>         // 执行完毕，切回主纤程
+>         // 主纤程调度下一个fiber
+>         WorkerThread& worker = GetCurrentWorker();
+>         SwitchToFiber(worker.mainFiber);
+>     }
+>
+>     std::vector<WorkerThread> workers_;
+> };
+> #endif
+>
+> // Fiber vs Thread 对比
+> void FiberVsThreadAnalysis() {
+>     // 传统线程等待：线程阻塞在mutex/condition_variable
+>     //   → 操作系统调度器挂起线程（context switch开销大：~1-10µs）
+>     //
+>     // Fiber等待：fiber主动yield回调度器
+>     //   → 用户态切换（SwitchToFiber开销极小：~10-50ns）
+>     //   → 线程从未阻塞，始终在执行有用工作
+>     //
+>     // Naughty Dog's Job System 的核心思想：
+>     //   每个worker线程管理一个fiber池
+>     //   当Job A等待Job B的结果时：
+>     //     传统：线程阻塞，浪费CPU
+>     //     Fiber：A yield → 线程切换到fiber C继续工作
+>     //     B完成后通知，A被放回就绪队列
+>     //
+>     // 代价：需要为每个fiber分配独立栈空间（通常64KB-1MB）
+> }
+> ```
+>
+> **核心思路**：Fiber是"用户态协程"——多个fiber运行在单个OS线程上，切换不经过内核调度器。`SwitchToFiber`直接保存/恢复CPU寄存器上下文（帧指针、栈指针、指令指针），开销比线程切换小2个数量级。关键价值是**消除等待阻塞**——传统Job System中，Job A等待Job B时线程被阻塞；Fiber系统中，A yield后线程立即切换到Job C，CPU利用率为100%。Naughty Dog在《最后生还者》中使用此技术将多核利用率从60%提升到95%+。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 书籍

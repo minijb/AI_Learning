@@ -1224,6 +1224,242 @@ void main() {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 添加第二个立方体：使用不同的 model 矩阵 + 共享 UBO
+> // 思路：创建两个 model 矩阵，每帧分别更新 UBO 后各发一次 DrawCall
+>
+> // 渲染循环中：
+> while (!glfwWindowShouldClose(window)) {
+>     float currentTime = glfwGetTime();
+>     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+>     glUseProgram(shaderProgram);
+>
+>     // ---- 更新共享的 View 和 Projection（一次性写入 UBO） ----
+>     glm::mat4 view = camera.GetViewMatrix();
+>     glm::mat4 projection = glm::perspective(glm::radians(45.0f), 800.0f/600.0f, 0.1f, 100.0f);
+>
+>     // ---- 立方体 1：原点，缓慢旋转 ----
+>     {
+>         glm::mat4 model1 = glm::mat4(1.0f);
+>         model1 = glm::rotate(model1, currentTime * 0.5f, glm::vec3(0.5f, 1.0f, 0.0f));
+>         // 更新整个 UBO（model + view + projection）
+>         glBindBuffer(GL_UNIFORM_BUFFER, uboMatrices);
+>         glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(glm::mat4), glm::value_ptr(model1));
+>         glBufferSubData(GL_UNIFORM_BUFFER, sizeof(glm::mat4), sizeof(glm::mat4), glm::value_ptr(view));
+>         glBufferSubData(GL_UNIFORM_BUFFER, 2 * sizeof(glm::mat4), sizeof(glm::mat4), glm::value_ptr(projection));
+>         glBindVertexArray(VAO);
+>         glDrawArrays(GL_TRIANGLES, 0, 36);
+>     }
+>
+>     // ---- 立方体 2：offset (2.0, 0, 0)，反向旋转 ----
+>     {
+>         glm::mat4 model2 = glm::mat4(1.0f);
+>         model2 = glm::translate(model2, glm::vec3(2.0f, 0.0f, 0.0f));
+>         model2 = glm::rotate(model2, currentTime * (-0.8f), glm::vec3(0.0f, 0.0f, 1.0f));
+>         glBindBuffer(GL_UNIFORM_BUFFER, uboMatrices);
+>         glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(glm::mat4), glm::value_ptr(model2));
+>         // view 和 projection 不变，无需重新上传（如果 UBO 绑定未变）
+>         glBindVertexArray(VAO);
+>         glDrawArrays(GL_TRIANGLES, 0, 36);
+>     }
+>
+>     glfwSwapBuffers(window);
+>     glfwPollEvents();
+> }
+> ```
+>
+> **思考题答案：** 对于 1000 个立方体，每次更新 UBO + 单独 `glDrawArrays` 是不可行的——1000 次 UBO 更新意味着 1000 次 CPU-GPU 同步，1000 次 Draw Call 意味着 1000 次驱动开销。解决方案是**实例化渲染（Instanced Rendering）**：将所有 1000 个 model 矩阵放入一个 SSBO 或实例化顶点缓冲，使用 `glDrawArraysInstanced` 一次提交所有实例。顶点着色器通过 `gl_InstanceID` 索引读取对应矩阵。另一个方向是 **GPU-Driven Rendering**：将绘制命令也放在 GPU buffer 中（`glMultiDrawElementsIndirect`），完全消除 CPU 端的逐物体循环。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 法线贴图（Normal Mapping）—— 在片段着色器中用切线空间法线替代插值法线
+>
+> // ==== 顶点数据扩展：每个顶点增加切线 tangent (vec3) 和副切线 bitangent (vec3) ====
+> // 为立方体的每个面计算 TBN 基向量
+> // 前面（z=0.5）：Normal=(0,0,1), Tangent=(1,0,0), Bitangent=(0,1,0)
+>
+> // ==== 顶点着色器：计算 TBN 矩阵并传递到片段着色器 ====
+> const char* vertexShaderWithTBN = R"(
+> #version 330 core
+> layout(location = 0) in vec3 aPosition;
+> layout(location = 1) in vec3 aNormal;
+> layout(location = 2) in vec2 aTexCoord;
+> layout(location = 3) in vec3 aTangent;      // ★ 新增切线
+> layout(location = 4) in vec3 aBitangent;    // ★ 新增副切线
+>
+> layout(std140, binding = 0) uniform TransformBlock {
+>     mat4 model;
+>     mat4 view;
+>     mat4 projection;
+> } ubo;
+>
+> out vec3 vWorldPos;
+> out vec2 vTexCoord;
+> out mat3 vTBN;  // ★ TBN 矩阵（切线空间 → 世界空间）
+>
+> void main() {
+>     vec4 worldPos = ubo.model * vec4(aPosition, 1.0);
+>     vWorldPos = worldPos.xyz;
+>     vTexCoord = aTexCoord;
+>
+>     // 将 TBN 向量变换到世界空间
+>     vec3 T = normalize(mat3(ubo.model) * aTangent);
+>     vec3 B = normalize(mat3(ubo.model) * aBitangent);
+>     vec3 N = normalize(mat3(ubo.model) * aNormal);
+>
+>     // 可选：Gram-Schmidt 正交化确保 TBN 正交（处理非均匀缩放）
+>     T = normalize(T - dot(T, N) * N);
+>     B = cross(N, T);  // 重新计算 B 确保正交
+>
+>     vTBN = mat3(T, B, N);
+>     gl_Position = ubo.projection * ubo.view * worldPos;
+> }
+> )";
+>
+> // ==== 片段着色器：采样法线贴图，转换到世界空间后计算光照 ====
+> const char* fragmentShaderWithNormalMap = R"(
+> #version 330 core
+> in vec3 vWorldPos;
+> in vec2 vTexCoord;
+> in mat3 vTBN;
+>
+> out vec4 fragColor;
+>
+> uniform sampler2D uDiffuseMap;
+> uniform sampler2D uNormalMap;   // ★ 法线贴图
+> uniform vec3 uCameraPos;
+> uniform vec3 uLightPos;
+> uniform vec3 uLightColor;
+> uniform float uShininess;
+>
+> void main() {
+>     // 1. 采样切线空间法线
+>     vec3 normalTS = texture(uNormalMap, vTexCoord).rgb;
+>     // 2. 从 [0,1] 映射到 [-1,1]
+>     normalTS = normalize(normalTS * 2.0 - 1.0);
+>     // 3. 通过 TBN 矩阵转换到世界空间
+>     vec3 N = normalize(vTBN * normalTS);
+>
+>     // 4. 标准 Blinn-Phong 光照（使用世界空间法线 N）
+>     vec3 L = normalize(uLightPos - vWorldPos);
+>     vec3 V = normalize(uCameraPos - vWorldPos);
+>     vec3 H = normalize(L + V);
+>
+>     float NdotL = max(dot(N, L), 0.0);
+>     float NdotH = max(dot(N, H), 0.0);
+>     float specular = pow(NdotH, uShininess);
+>
+>     vec3 albedo = texture(uDiffuseMap, vTexCoord).rgb;
+>     vec3 ambient = albedo * 0.1;
+>     vec3 diffuse = albedo * uLightColor * NdotL;
+>     vec3 spec = vec3(0.5) * specular * NdotL;  // 仅在光照区域产生高光
+>
+>     vec3 result = ambient + diffuse + spec;
+>     fragColor = vec4(result, 1.0);
+> }
+> )";
+> ```
+>
+> **TBN 正交化的重要性：** 顶点着色器中的 Gram-Schmidt 过程确保 TBN 矩阵是正交的——这在模型有非均匀缩放（如 scale=(2,1,1)）时尤为关键。直接使用模型矩阵变换的 TBN 向量可能不再正交，导致法线方向错误和光照异常。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // GPU 粒子系统：计算着色器更新 + 顶点着色器公告板渲染
+>
+> // ==== 1. 粒子数据结构（GPU buffer） ====
+> struct Particle {
+>     glm::vec4 position;  // xyz = world pos, w = size
+>     glm::vec4 velocity;  // xyz = velocity, w = lifetime remaining
+>     glm::vec4 color;     // rgb = color, a = alpha
+> };
+>
+> // ==== 2. 创建 SSBO ====
+> GLuint particleSSBO;
+> glGenBuffers(1, &particleSSBO);
+> glBindBuffer(GL_SHADER_STORAGE_BUFFER, particleSSBO);
+> glBufferData(GL_SHADER_STORAGE_BUFFER, MAX_PARTICLES * sizeof(Particle),
+>              nullptr, GL_DYNAMIC_DRAW);
+> glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 0, particleSSBO);
+>
+> // ==== 3. 计算着色器（更新粒子状态） ====
+> const char* computeShaderSrc = R"(
+> #version 430 core
+> layout(local_size_x = 256) in;
+>
+> struct Particle {
+>     vec4 position;
+>     vec4 velocity;
+>     vec4 color;
+> };
+>
+> layout(std430, binding = 0) buffer ParticleBuffer {
+>     Particle particles[];
+> };
+>
+> uniform float uDeltaTime;
+> uniform float uTotalTime;
+>
+> void main() {
+>     uint idx = gl_GlobalInvocationID.x;
+>     if (idx >= particles.length()) return;
+>
+>     Particle p = particles[idx];
+>     p.velocity.w -= uDeltaTime;  // lifetime -= dt
+>
+>     if (p.velocity.w <= 0.0) {
+>         // 重置粒子——从发射器位置重新生成
+>         float offset = float(idx) * 1.618034f; // 黄金比例散开
+>         p.position = vec4(sin(uTotalTime * 2.0 + offset) * 1.5, 0.0,
+>                            cos(uTotalTime * 1.7 + offset) * 1.5, 1.0);
+>         p.velocity = vec4(
+>             (sin(offset * 7.0) * 0.3),       // vx: 随机水平
+>             3.0 + sin(offset * 13.0) * 1.5,  // vy: 向上
+>             (cos(offset * 7.0) * 0.3),       // vz
+>             2.0 + sin(offset * 5.0) * 1.5    // lifetime: 2-3.5 秒
+>         );
+>         p.color = vec4(
+>             0.5 + 0.5 * sin(offset * 3.0),
+>             0.5 + 0.5 * sin(offset * 7.0 + 2.0),
+>             0.5 + 0.5 * sin(offset * 11.0 + 4.0),
+>             1.0
+>         );
+>     } else {
+>         // 应用重力 + 更新位置
+>         p.velocity.y -= 9.8 * uDeltaTime;
+>         p.position.xyz += p.velocity.xyz * uDeltaTime;
+>         // 生命周期衰减时透明度降低
+>         p.color.a = smoothstep(0.0, 1.0, p.velocity.w / 2.5);
+>         p.position.w = 0.05 + 0.03 * (p.velocity.w / 3.5); // 粒子大小随生命周期
+>     }
+>
+>     particles[idx] = p;
+> }
+> )";
+>
+> // ==== 4. 每帧调度 ====
+> // 在渲染循环中：
+> //   glUseProgram(computeProgram);
+> //   glUniform1f(glGetUniformLocation(computeProgram, "uDeltaTime"), deltaTime);
+> //   glDispatchCompute((MAX_PARTICLES + 255) / 256, 1, 1);
+> //   glMemoryBarrier(GL_VERTEX_ATTRIB_ARRAY_BARRIER_BIT); // ★ 确保 SSBO 写入对 VS 可见
+> //
+> //   glUseProgram(renderProgram);
+> //   glBindVertexArray(particleVAO);  // 空 VAO，顶点从 SSBO 拉取
+> //   glDrawArrays(GL_POINTS, 0, MAX_PARTICLES);
+> //
+> // 顶点着色器中从 SSBO 读取位置并生成公告板四边形：
+> //   layout(std430, binding = 0) buffer ParticleBuffer { Particle particles[]; };
+> //   // 使用 gl_VertexID / 6 获取粒子索引，用 gl_VertexID % 6 决定公告板的哪个角
+> ```
+>
+> **关键设计决策：** GPU 粒子系统将全部模拟计算放在 GPU 上执行——`glDispatchCompute` 更新 SSBO，然后 `glDrawArrays` 直接读取 SSBO 渲染，**零 CPU-GPU 数据拷贝**。这与传统 CPU 粒子系统（CPU 更新 → `glBufferSubData` 上传 → GPU 渲染）相比，消除了一帧中最昂贵的瓶颈。计算着色器的 `local_size_x = 256` 对应 AMD GCN 的 4 个 wavefront（64 threads each），或 NVIDIA 的 8 个 warp（32 threads each）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 官方文档

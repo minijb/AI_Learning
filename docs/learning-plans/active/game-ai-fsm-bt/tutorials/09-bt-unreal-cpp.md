@@ -922,6 +922,270 @@ void AMyAIController::BeginPlay()
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 以下是完整敌人 AI 行为树的核心 C++ 实现参考。注意：编辑器中的树结构组装描述见代码后的树形图。
+>
+> **Blackboard Keys（在 UBlackboardData 资产中定义）**：
+> - `TargetActor` (Object)、`TargetLocation` (Vector)、`PlayerDistance` (Float)
+> - `AmmoCount` (Int)、`IsAlerted` (Bool)、`PatrolIndex` (Int)、`HomeLocation` (Vector)
+>
+> **UBTTask_PatrolToNextWaypoint.h**：
+> ```cpp
+> #pragma once
+> #include "BehaviorTree/Tasks/BTTask_BlackboardBase.h"
+> #include "BTTask_PatrolToNextWaypoint.generated.h"
+>
+> UCLASS()
+> class UBTTask_PatrolToNextWaypoint : public UBTTask_BlackboardBase
+> {
+>     GENERATED_BODY()
+> public:
+>     UBTTask_PatrolToNextWaypoint();
+>     UPROPERTY(EditAnywhere, Category = "Patrol")
+>     TArray<FVector> Waypoints; // 在编辑器中配置路径点
+>     UPROPERTY(EditAnywhere, Category = "Patrol", meta = (ClampMin = "1.0"))
+>     float AcceptanceRadius = 100.0f;
+> protected:
+>     virtual EBTNodeResult::Type ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) override;
+>     virtual void TickTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory, float DeltaSeconds) override;
+>     virtual uint16 GetInstanceMemorySize() const override;
+> };
+> struct FPatrolMemory { float WaitTimer; bool bWaiting; };
+> ```
+>
+> **UBTTask_PatrolToNextWaypoint.cpp**：
+> ```cpp
+> UBTTask_PatrolToNextWaypoint::UBTTask_PatrolToNextWaypoint()
+> {
+>     NodeName = TEXT("Patrol To Next Waypoint");
+>     BlackboardKey.AddIntFilter(this, GET_MEMBER_NAME_CHECKED(UBTTask_PatrolToNextWaypoint, BlackboardKey));
+> }
+>
+> EBTNodeResult::Type UBTTask_PatrolToNextWaypoint::ExecuteTask(
+>     UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
+> {
+>     auto* BB = OwnerComp.GetBlackboardComponent();
+>     int32 Index = BB->GetValueAsInt(BlackboardKey.SelectedKeyName);
+>     if (Waypoints.Num() == 0) return EBTNodeResult::Failed;
+>     // 循环路径点
+>     Index = Index % Waypoints.Num();
+>     BB->SetValueAsInt(BlackboardKey.SelectedKeyName, Index);
+>     // 发起移动
+>     AAIController* AI = OwnerComp.GetAIOwner();
+>     AI->MoveToLocation(Waypoints[Index], AcceptanceRadius);
+>     return EBTNodeResult::Succeeded; // MoveTo 是异步的，由 MoveTo Task 内部处理
+>     // 注意：实际项目应使用 UAIBlueprintHelperLibrary::CreateMoveToProxyObject
+>     // 或覆写 TickTask 等待到达
+> }
+>
+> uint16 UBTTask_PatrolToNextWaypoint::GetInstanceMemorySize() const { return sizeof(FPatrolMemory); }
+> ```
+>
+> **UBTTask_ChaseTarget** — 核心逻辑在 TickTask 中每 0.3s 更新目标位置：
+> ```cpp
+> void UBTTask_ChaseTarget::TickTask(UBehaviorTreeComponent& OwnerComp,
+>     uint8* NodeMemory, float DeltaSeconds)
+> {
+>     auto* BB = OwnerComp.GetBlackboardComponent();
+>     AActor* Target = Cast<AActor>(BB->GetValueAsObject(TargetActorKey.SelectedKeyName));
+>     if (!Target) { FinishLatentTask(OwnerComp, EBTNodeResult::Failed); return; }
+>     float Dist = FVector::Dist(OwnerComp.GetAIOwner()->GetPawn()->GetActorLocation(),
+>                                Target->GetActorLocation());
+>     BB->SetValueAsFloat(PlayerDistanceKey.SelectedKeyName, Dist);
+>     if (Dist <= AcceptanceRadius) { FinishLatentTask(OwnerComp, EBTNodeResult::Succeeded); return; }
+>     // 每 0.3s 更新一次移动目标
+>     FChaseMemory* Mem = reinterpret_cast<FChaseMemory*>(NodeMemory);
+>     Mem->UpdateTimer -= DeltaSeconds;
+>     if (Mem->UpdateTimer <= 0.0f)
+>     {
+>         OwnerComp.GetAIOwner()->MoveToActor(Target, AcceptanceRadius * 0.8f);
+>         Mem->UpdateTimer = 0.3f;
+>     }
+> }
+> ```
+>
+> **UBTDecorator_IsInRange**：
+> ```cpp
+> bool UBTDecorator_IsInRange::CalculateRawConditionValue(
+>     UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory) const
+> {
+>     float Dist = OwnerComp.GetBlackboardComponent()->GetValueAsFloat(DistanceKey.SelectedKeyName);
+>     return Dist >= MinRange && Dist <= MaxRange;
+> }
+> ```
+>
+> **UBTService_UpdateTargetData**：
+> ```cpp
+> void UBTService_UpdateTargetData::TickNode(UBehaviorTreeComponent& OwnerComp,
+>     uint8* NodeMemory, float DeltaSeconds)
+> {
+>     auto* BB = OwnerComp.GetBlackboardComponent();
+>     auto* PerceptionComp = OwnerComp.GetAIOwner()->GetPerceptionComponent();
+>     TArray<AActor*> Perceived;
+>     PerceptionComp->GetCurrentlyPerceivedActors(UAISense_Sight::StaticClass(), Perceived);
+>     AActor* Player = nullptr;
+>     for (AActor* A : Perceived) { if (A->ActorHasTag("Player")) { Player = A; break; } }
+>     if (Player)
+>     {
+>         BB->SetValueAsObject(TargetActorKey.SelectedKeyName, Player);
+>         BB->SetValueAsVector(TargetLocationKey.SelectedKeyName, Player->GetActorLocation());
+>         BB->SetValueAsBool(IsAlertedKey.SelectedKeyName, true);
+>     }
+>     else { BB->SetValueAsBool(IsAlertedKey.SelectedKeyName, false); }
+> }
+> ```
+>
+> **编辑器中的树结构**（树形图）：
+> ```
+> Selector (Root)
+> ├── Sequence "Detect"  [Decorator: IsNotAlerted(ObserverAbort=LowerPriority)]
+> │   ├── Task: FindPlayerLocation (返回 TargetLocation)
+> │   └── Task: SetAlertedTrue  (IsAlerted = true)
+> ├── Selector "Combat" (在 IsAlerted=true 时可达)
+> │   ├── Sequence "Attack"  [Decorator: IsInRange(0, 300, Self)]
+> │   │   └── Task: AttackTarget
+> │   ├── Sequence "Chase"   [Decorator: IsInRange(300, 2000, Self)]
+> │   │   └── Task: ChaseTarget
+> │   └── Sequence "LoseTarget"
+> │       ├── Task: ClearAlerted  (IsAlerted = false)
+> │       └── Task: ReturnToHome
+> └── Sequence "Patrol"
+>     ├── Task: PatrolToNextWaypoint
+>     ├── Task: Wait(2s)
+>     └── [Loop]
+>
+> [Service: UpdateTargetData @0.3s] 挂在 Selector(Root) 上
+> ```
+>
+> **验证步骤**：六个验证场景逐一确认——AI 创建后应开始巡逻；玩家进入感知范围时 Service 更新 IsAlerted=true → Detected Decorator(LowerPriority) 触发 abort 中断 Patrol → 进入 Combat；距离 ≤300 进入 Attack；距离 >300 ≤2000 进入 Chase；距离 >2000 触发 LoseTarget → 返回 Home；Home 到达后 IsAlerted=false → Patrol 恢复。
+
+> [!tip]- 练习 2 参考答案
+> **1. Observer Abort 配置**：
+>
+> - **Detect 分支的 IsNotAlerted Decorator**：监听 `IsAlerted` Key，`FlowAbortMode = LowerPriority`。当 Service 写入 `IsAlerted = true` 时，条件从 false→true，触发 LowerPriority abort → 中断 Patrol 分支，Selector 重新从左评估，进入 Detect 分支。
+> - **Attack 分支的 IsInRange Decorator**：监听 `PlayerDistance`，`FlowAbortMode = Self`。当距离 > 300 时条件从 true→false，Self abort 中断 Attack → Selector 重新评估 → fall through 到 Chase。
+> - **Chase 分支的 IsInRange Decorator**：监听 `PlayerDistance`，`FlowAbortMode = Self`。当距离 > 2000 时 Self abort → fall through 到 LoseTarget。
+>
+> **2. 验证步骤代码**：
+> ```cpp
+> // 在 AbortTask 中添加日志
+> EBTNodeResult::Type UBTTask_PatrolToNextWaypoint::AbortTask(
+>     UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
+> {
+>     UE_LOG(LogBehaviorTree, Warning, TEXT("[%s] AbortTask called — interrupting patrol"),
+>         *GetNodeName());
+>     return EBTNodeResult::Aborted;
+> }
+> ```
+> Observer Abort 响应延迟应为**同一帧**——`UBlackboardComponent::SetValueAsBool` 内部同步调用 `OnBlackboardKeyValueChange` 委托，该委托直接触发 `UBTDecorator::OnBlackboardKeyValueChange` → `ConditionalFlowAbort`。
+>
+> **3. 回答以下问题**：
+>
+> **Q: FlowAbortMode = Both vs Self 或 LowerPriority？**
+> - `Self`：只在条件 true→false 时 abort 自己 + 右侧兄弟。场景："弹药用完→停止射击"。
+> - `LowerPriority`：只在条件 false→true 时 abort 右侧低优先级分支。场景："看到敌人→抢断巡逻"。
+> - `Both`：双向反应。当 `IsNotAlerted` 用 Both 时：① `IsAlerted` 从 false→true → LowerPriority abort，中断 Patrol；② `IsAlerted` 从 true→false → Self abort，中断正在进行的 Detect 分支。注意后者可能导致 AI 在"玩家刚离开视野一帧"就立即切回巡逻——如果你希望"丢失目标后保持追一下"，应该只用 LowerPriority，让 LoseTarget 分支来处理退出。
+>
+> **Q: Observer Abort 的调用链**：
+> ```
+> UBlackboardComponent::SetValueAsBool("IsAlerted", true)
+>   → FBlackboard::SetValue(key, value)
+>     → 遍历 key 的 Observer Delegates
+>       → UBTDecorator_IsNotAlerted::OnBlackboardKeyValueChange(ChangedKey)
+>         → ConditionalFlowAbort(FlowAbortMode)
+>           → UBehaviorTreeComponent::RequestExecution(this, AbortLowerPriority)
+>             → 下一帧或同一帧: ProcessExecutionRequest()
+>               → 从 Root 开始 ApplySearchData(AbortLowerPriority)
+>                 → 遍历树找到需要 abort 的分支
+>                   → Composite::OnChildAborted()
+>                     → 递归调用每个正在 Running 的子节点的 AbortTask()
+>                       → Task::AbortTask() → 清理状态，返回 Aborted
+> ```
+> （UE 5.x 中 `RequestExecution` 可能在 `bRequestedFlowUpdate` 标志下同帧执行）
+>
+> **Q: Observer Abort 抖动的修复**：
+> 当玩家在感知边界快速进出时（如 1999→2001→1999 米），`PlayerDistance` 在 2000 边界振荡，导致 Chase 和 LoseTarget 之间无限 abort。修复方案：
+> 1. **迟滞（Hysteresis）**：追击触发距离 2000，退出距离 2500（200 单位缓冲区）。Decorator 内部检查"如果已经在追击中，使用更大的退出阈值"。
+> 2. **最小稳定帧数**：条件必须连续满足 N 帧（如 5 帧 = ~83ms）才算切换，过滤瞬时波动。
+> 3. **Cooldown Decorator**：在 Chase 分支前挂一个 `Cooldown(0.5s)` 装饰器，防止高频切换。
+> 4. **引擎层面的 Abort 冷却**：UE 的 `UBehaviorTreeComponent` 内部已有一个 per-node 的 abort 去重机制——同一帧内同一节点不被 abort 两次。但跨帧抖动仍需上述方案。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **1. 共享 Blackboard 策略 — ASharedBlackboardManager**：
+> ```cpp
+> // SharedBlackboardManager.h
+> UCLASS()
+> class ASharedBlackboardManager : public AActor
+> {
+>     GENERATED_BODY()
+> public:
+>     UPROPERTY(EditAnywhere)
+>     UBlackboardData* SharedBBData; // 资产引用
+>     UPROPERTY(VisibleAnywhere)
+>     UBlackboardComponent* SharedBB;
+>     void BeginPlay() override
+>     {
+>         SharedBB = NewObject<UBlackboardComponent>(this);
+>         SharedBB->InitializeBlackboard(*SharedBBData);
+>     }
+> };
+> // 每个 AI Controller 在 BeginPlay 中获取：
+> // ASharedBlackboardManager* Mgr = ...; // 通过 GameMode 或 World 查找
+> // SharedBBRef = Mgr->SharedBB;
+> ```
+> 写入权限：只有**第一个发现玩家的守卫**通过 `UBTTask_SetGroupAlerted` 写入共享 BB。其他守卫只读。在网络环境下，Server 端写入，Client 端不进行 BB 写入操作。
+>
+> **2. UBTService_CheckGroupAlert**：
+> ```cpp
+> void UBTService_CheckGroupAlert::TickNode(UBehaviorTreeComponent& OwnerComp,
+>     uint8* NodeMemory, float DeltaSeconds)
+> {
+>     // 从 Manager 获取共享 BB 引用（通过 Blackboard Key 或 AIController 成员）
+>     auto* MyBB = OwnerComp.GetBlackboardComponent();
+>     auto* SharedBB = OwnerComp.GetAIOwner()->GetSharedBlackboard(); // 自定义
+>     bool bGroupAlerted = SharedBB->GetValueAsBool("bGroupAlerted");
+>     MyBB->SetValueAsBool("bShouldSupport", bGroupAlerted && !MyBB->GetValueAsBool("IsAlerted"));
+> }
+> ```
+>
+> **3. UBTTask_FlankTarget**：
+> ```cpp
+> EBTNodeResult::Type UBTTask_FlankTarget::ExecuteTask(UBehaviorTreeComponent& OwnerComp, uint8* NodeMemory)
+> {
+>     auto* BB = OwnerComp.GetBlackboardComponent();
+>     AActor* Target = Cast<AActor>(BB->GetValueAsObject("TargetActor"));
+>     if (!Target) return EBTNodeResult::Failed;
+>     FVector TargetPos = Target->GetActorLocation();
+>     FVector AIPos = OwnerComp.GetAIOwner()->GetPawn()->GetActorLocation();
+>     FVector DirToTarget = (TargetPos - AIPos).GetSafeNormal();
+>     // 45° 偏移，400 单位距离
+>     float Angle = (FlankSide == EFlankSide::Left ? 45.0f : -45.0f);
+>     FVector FlankPos = TargetPos + DirToTarget.RotateAngleAxis(Angle, FVector::UpVector) * -400.0f;
+>     OwnerComp.GetAIOwner()->MoveToLocation(FlankPos);
+>     return EBTNodeResult::Succeeded;
+> }
+> ```
+>
+> **4. 行为树结构**：
+> ```
+> Selector (Root)
+> ├── Sequence "GroupAlert"  [Decorator: IsGroupAlerted(LowerPriority)]
+> │   └── Task: FlankTarget (随机左侧/右侧)
+> ├── Selector "SelfAlert"   [Decorator: IsAlerted(LowerPriority)]
+> │   ├── Task: ChaseTarget
+> │   └── Task: AttackTarget
+> └── Sequence "Patrol"
+>     ├── Task: PatrolToNextWaypoint
+>     └── [Loop]
+> ```
+>
+> **5. 验证场景**：三个守卫 A/B/C。玩家靠近 A → A 的 Perception 触发 Service 写入共享 BB→ A 进入 SelfAlert 分支（追击）→ B/C 的 CheckGroupAlert Service 检测到 `bGroupAlerted=true` 且自身 `IsAlerted=false` → `bShouldSupport=true` → GroupAlert Decorator(LowerPriority) 触发 → B/C 中断 Patrol 进入 FlankTarget。结果：A 从正面追击，B 从左侧 45° 包抄，C 从右侧 45° 包抄。玩家被消灭后，Service 写入 `bGroupAlerted=false` → 所有守卫恢复正常巡逻。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 官方文档

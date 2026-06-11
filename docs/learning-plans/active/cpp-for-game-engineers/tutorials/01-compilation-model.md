@@ -441,6 +441,342 @@ int main() {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：CMake 引擎项目
+> 项目结构：
+> ```
+> my_engine/
+> ├── CMakeLists.txt
+> ├── src/
+> │   ├── engine/
+> │   │   ├── vec3.cpp
+> │   │   └── game_object.cpp
+> │   └── game/
+> │       └── main.cpp
+> └── include/
+>     └── engine/
+>         ├── vec3.h
+>         └── game_object.h
+> ```
+>
+> ````cmake
+> # CMakeLists.txt
+> cmake_minimum_required(VERSION 3.21)
+> project(MyGameEngine VERSION 1.0 LANGUAGES CXX)
+>
+> set(CMAKE_CXX_STANDARD 20)
+> set(CMAKE_CXX_STANDARD_REQUIRED ON)
+>
+> # Engine 静态库 — 高警告级别
+> add_library(Engine STATIC
+>     src/engine/vec3.cpp
+>     src/engine/game_object.cpp
+> )
+> target_include_directories(Engine PUBLIC include)
+> if(MSVC)
+>     target_compile_options(Engine PRIVATE /W4)
+> else()
+>     target_compile_options(Engine PRIVATE -Wall -Wextra -Wpedantic)
+> endif()
+>
+> # MyGame 可执行文件 — 中等警告级别
+> add_executable(MyGame
+>     src/game/main.cpp
+> )
+> target_link_libraries(MyGame PRIVATE Engine)
+> if(MSVC)
+>     target_compile_options(MyGame PRIVATE /W3)
+> else()
+>     target_compile_options(MyGame PRIVATE -Wall)
+> endif()
+> ````
+>
+> ````cpp
+> // include/engine/vec3.h
+> #pragma once
+> struct Vec3 { float x = 0, y = 0, z = 0; };
+> Vec3 normalize(Vec3 v);
+>
+> // src/engine/vec3.cpp
+> #include "engine/vec3.h"
+> #include <cmath>
+> Vec3 normalize(Vec3 v) {
+>     float len = std::sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
+>     if (len == 0) return {0, 0, 0};
+>     return {v.x / len, v.y / len, v.z / len};
+> }
+>
+> // include/engine/game_object.h
+> #pragma once
+> #include "engine/vec3.h"
+> struct GameObject {
+>     Vec3 position;
+>     Vec3 rotation;
+>     float scale = 1.0f;
+>     void update(float dt);
+> };
+>
+> // src/engine/game_object.cpp
+> #include "engine/game_object.h"
+> #include <iostream>
+> void GameObject::update(float dt) {
+>     // 模拟更新逻辑
+>     position.x += dt;
+> }
+>
+> // src/game/main.cpp
+> #include "engine/game_object.h"
+> #include <iostream>
+> int main() {
+>     GameObject player;
+>     player.position = {10.0f, 0.0f, 5.0f};
+>     player.update(0.016f);
+>     std::cout << "Player x: " << player.position.x << '\n';
+>     return 0;
+> }
+> ````
+>
+> 构建命令：
+> ```bash
+> mkdir build && cd build
+> cmake .. && cmake --build .
+> ./MyGame   # 或 build\Debug\MyGame.exe
+> ```
+
+> [!tip]- 练习 2 参考答案：Unity Build 生成器增强版
+> ```cpp
+> // unity_gen_extended.cpp — 增强版 Unity Build 生成器
+> // 编译: g++ -std=c++20 -O2 unity_gen_extended.cpp -o unity_gen_extended
+> // 运行: ./unity_gen_extended src/engine/ unity_engine.cpp --exclude test_,mock_ --groups 3
+>
+> #include <iostream>
+> #include <fstream>
+> #include <filesystem>
+> #include <vector>
+> #include <string>
+> #include <algorithm>
+> #include <unordered_set>
+> #include <set>
+>
+> namespace fs = std::filesystem;
+>
+> struct Config {
+>     std::string srcDir;
+>     std::string outputPrefix;
+>     int numGroups = 1;
+>     std::vector<std::string> excludePrefixes;
+> };
+>
+> Config parseArgs(int argc, char* argv[]) {
+>     Config cfg;
+>     cfg.srcDir = argv[1];
+>     cfg.outputPrefix = argv[2];
+>     for (int i = 3; i < argc; ++i) {
+>         std::string arg = argv[i];
+>         if (arg == "--exclude" && i + 1 < argc) {
+>             std::string list = argv[++i];
+>             size_t pos = 0;
+>             while ((pos = list.find(',')) != std::string::npos) {
+>                 cfg.excludePrefixes.push_back(list.substr(0, pos));
+>                 list.erase(0, pos + 1);
+>             }
+>             cfg.excludePrefixes.push_back(list);
+>         } else if (arg == "--groups" && i + 1 < argc) {
+>             cfg.numGroups = std::stoi(argv[++i]);
+>             if (cfg.numGroups < 1) cfg.numGroups = 1;
+>         }
+>     }
+>     return cfg;
+> }
+>
+> bool isExcluded(const std::string& filename, const std::vector<std::string>& prefixes) {
+>     for (const auto& p : prefixes) {
+>         if (filename.rfind(p, 0) == 0) return true;
+>     }
+>     return false;
+> }
+>
+> struct AnonNsWarning {
+>     std::string file;
+>     int count;
+> };
+>
+> std::vector<AnonNsWarning> detectAnonNamespaces(const std::string& filepath) {
+>     std::vector<AnonNsWarning> warnings;
+>     std::ifstream in(filepath);
+>     if (!in) return warnings;
+>     std::string line;
+>     int lineNum = 0;
+>     int anonCount = 0;
+>     while (std::getline(in, line)) {
+>         ++lineNum;
+>         if (line.find("namespace {") != std::string::npos ||
+>             line.find("namespace{") != std::string::npos) {
+>             ++anonCount;
+>         }
+>     }
+>     if (anonCount > 0) {
+>         warnings.push_back({fs::path(filepath).filename().string(), anonCount});
+>     }
+>     return warnings;
+> }
+>
+> int main(int argc, char* argv[]) {
+>     if (argc < 3) {
+>         std::cerr << "Usage: unity_gen_extended <source_dir> <output_prefix> [--exclude P1,P2,...] [--groups N]\n";
+>         return 1;
+>     }
+>
+>     auto cfg = parseArgs(argc, argv);
+>
+>     // 收集 .cpp 文件
+>     std::vector<std::string> allFiles;
+>     for (const auto& entry : fs::recursive_directory_iterator(cfg.srcDir)) {
+>         if (entry.path().extension() == ".cpp" &&
+>             !isExcluded(entry.path().filename().string(), cfg.excludePrefixes)) {
+>             allFiles.push_back(fs::relative(entry.path()).string());
+>         }
+>     }
+>     std::sort(allFiles.begin(), allFiles.end());
+>
+>     if (allFiles.empty()) {
+>         std::cerr << "No .cpp files found in " << cfg.srcDir << '\n';
+>         return 1;
+>     }
+>
+>     // 匿名命名空间检测
+>     std::cout << "\n=== Anonymous Namespace Warnings ===\n";
+>     int totalWarnings = 0;
+>     for (const auto& f : allFiles) {
+>         auto warns = detectAnonNamespaces(f);
+>         for (const auto& w : warns) {
+>             std::cout << "  ⚠️  " << w.file << " has " << w.count
+>                       << " anonymous namespace(s) — may cause Unity Build conflict\n";
+>             ++totalWarnings;
+>         }
+>     }
+>     if (totalWarnings == 0) {
+>         std::cout << "  ✅ No anonymous namespaces detected.\n";
+>     }
+>
+>     // 分组
+>     size_t totalFiles = allFiles.size();
+>     size_t groupSize = (totalFiles + cfg.numGroups - 1) / cfg.numGroups;
+>
+>     // 估算总行数
+>     size_t totalLines = 0;
+>     for (const auto& f : allFiles) {
+>         std::ifstream in(f);
+>         totalLines += std::count(std::istreambuf_iterator<char>(in),
+>                                  std::istreambuf_iterator<char>(), '\n');
+>     }
+>
+>     std::cout << "\n=== Statistics ===\n";
+>     std::cout << "  Total .cpp files: " << totalFiles << '\n';
+>     std::cout << "  Estimated total lines: " << totalLines << '\n';
+>     std::cout << "  Groups: " << cfg.numGroups << '\n';
+>     std::cout << "  Files per group: ~" << groupSize << '\n';
+>
+>     for (int g = 0; g < cfg.numGroups; ++g) {
+>         size_t start = g * groupSize;
+>         size_t end = std::min(start + groupSize, totalFiles);
+>         if (start >= totalFiles) break;
+>
+>         std::string outName = cfg.outputPrefix;
+>         if (cfg.numGroups > 1) {
+>             auto dotPos = outName.rfind('.');
+>             if (dotPos != std::string::npos) {
+>                 outName.insert(dotPos, "_" + std::to_string(g));
+>             } else {
+>                 outName += "_" + std::to_string(g);
+>             }
+>         }
+>
+>         std::ofstream out(outName);
+>         out << "// Auto-generated Unity Build — Group " << g << " / " << cfg.numGroups << '\n';
+>         out << "// " << (end - start) << " source files\n\n";
+>
+>         std::cout << "\n--- Group " << g << " (" << outName << ") ---\n";
+>         for (size_t i = start; i < end; ++i) {
+>             out << "#include \"" << allFiles[i] << "\"\n";
+>             std::cout << "  " << allFiles[i] << '\n';
+>         }
+>         std::cout << "  → " << (end - start) << " files written\n";
+>     }
+>
+>     return 0;
+> }
+> ```
+
+> [!info]- 练习 3 思考题参考答案：编译时间测量
+> 编译时间测量建议使用如下脚本（而非手动计时）：
+>
+> ```bash
+> #!/bin/bash
+> # benchmark_build.sh — 对比三种构建方案
+> set -e
+>
+> # 1. 生成 20 个测试源文件
+> mkdir -p src/test
+> for i in $(seq 1 20); do
+>     cat > "src/test/module_${i}.cpp" << EOF
+> #include <vector>
+> #include <string>
+> #include <algorithm>
+> #include <cmath>
+> int compute_${i}(int n) {
+>     std::vector<double> v(n);
+>     for (int j = 0; j < n; ++j) v[j] = std::sqrt(static_cast<double>(j));
+>     std::sort(v.begin(), v.end());
+>     return static_cast<int>(v.back());
+> }
+> EOF
+> done
+>
+> # 2. 基线测试（常规编译）
+> echo "=== Baseline (one TU per .cpp) ==="
+> time g++ -std=c++20 -O2 src/test/*.cpp -o /dev/null 2>&1
+>
+> # 3. PCH 测试
+> echo "=== With PCH ==="
+> cat > pch.h << 'HEADER'
+> #pragma once
+> #include <vector>
+> #include <string>
+> #include <algorithm>
+> #include <cmath>
+> HEADER
+> g++ -std=c++20 -O2 pch.h -o pch.h.gch  # 生成预编译头
+> time g++ -std=c++20 -O2 -include pch.h src/test/*.cpp -o /dev/null 2>&1
+>
+> # 4. Unity Build 测试
+> echo "=== With Unity Build ==="
+> cat > unity.cpp << 'UNITY'
+> #include "pch.h"
+> UNITY
+> for f in src/test/module_*.cpp; do
+>     echo "#include \"../$f\"" >> unity.cpp
+> done
+> time g++ -std=c++20 -O2 unity.cpp -o /dev/null 2>&1
+>
+> # 5. LTO 测试（可选）
+> echo "=== With LTO ==="
+> time g++ -std=c++20 -O2 -flto src/test/*.cpp -o test_lto 2>&1
+> echo "Binary size: $(stat -f%z test_lto 2>/dev/null || stat -c%s test_lto) bytes"
+> rm -f test_lto
+> ```
+>
+> **典型结果分析：**
+> - 常规编译：每个 `.cpp` 独立预处理、编译，STL 头文件解析 20 次 → 最慢
+> - PCH：STL 头文件只解析一次，编译阶段仍需处理 20 TU → 快 30-60%
+> - Unity Build：预处理一次，编译一个 TU，模板只实例化一次 → 快 50-80%
+> - Unity + PCH 叠加：收益递减，因为 Unity Build 本身已经消除了大量头文件重复解析
+> - LTO：编译时间与常规类似，但链接阶段显著变慢（IR 合并和优化），最终二进制更小（死代码消除 + 跨模块内联）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了编译和测试，或分析得出了合理结论，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读] C++ Reference — Translation phases:** https://en.cppreference.com/w/cpp/language/translation_phases — 编译阶段的标准定义

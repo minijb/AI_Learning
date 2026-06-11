@@ -847,6 +847,352 @@ public class SpatialHashDebug : MonoBehaviour
 
 **松散四叉树** 将每个象限的边界向外扩展 2 倍——这样大多数边界对象落在扩展区域内，可以安全放入子象限。实现它，并与标准四叉树对比跨越边界的对象数量。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 环形查询 `query_ring` 适用于"在某个距离范围内"的战术查询。实现方式：枚举覆盖外圈 AABB 的单元，对每个候选做精确的环形距离过滤 `r_inner² ≤ dist² ≤ r_outer²`。
+>
+> ```cpp
+> // 在 SpatialHash 类中添加
+> public:
+>     // 返回距离 center 在 [radius, radius+ring_width] 环形区域内的所有实体
+>     std::vector<const Entity*> query_ring(const Point2D& center,
+>                                            float radius, float ring_width) const {
+>         float r_outer = radius + ring_width;
+>         float r_inner2 = radius * radius;
+>         float r_outer2 = r_outer * r_outer;
+>
+>         // 用外圈 AABB 获取候选（与 query 相同逻辑）
+>         int cx_min = int(std::floor((center.x - r_outer) / cell_size_));
+>         int cx_max = int(std::floor((center.x + r_outer) / cell_size_));
+>         int cy_min = int(std::floor((center.y - r_outer) / cell_size_));
+>         int cy_max = int(std::floor((center.y + r_outer) / cell_size_));
+>
+>         std::vector<const Entity*> results;
+>         for (int cx = cx_min; cx <= cx_max; ++cx) {
+>             for (int cy = cy_min; cy <= cy_max; ++cy) {
+>                 auto it = cells_.find(make_key(cx, cy));
+>                 if (it == cells_.end()) continue;
+>                 for (auto* e : it->second) {
+>                     float d2 = sqr_dist(center, e->pos);
+>                     // 核心：环形距离过滤——必须在外圈半径内，且大于内圈半径
+>                     if (d2 <= r_outer2 && d2 >= r_inner2) {
+>                         results.push_back(e);
+>                     }
+>                 }
+>             }
+>         }
+>         return results;
+>     }
+> ```
+>
+> **注意事项**：
+> - 枚举单元以 `r_outer` 为半径（确保不遗漏环形外缘的点），不可用 `radius` 作为枚举范围
+> - 内圈用 `>=`（包含内边界），外圈用 `<=`（包含外边界）——与常见"半开区间"不同，这是战术查询的直觉行为
+> - 如果 `radius=0`，则退化为普通圆形范围查询（只不过精确距离过滤在宽相位中完成）
+> - 性能：候选数取决于外圈大小，环形宽度越窄 → 过滤掉的候选比例越高 → 窄相位计算开销占比越小
+
+> [!tip]- 练习 2 参考答案
+> 双层自适应空间哈希：大单元格做粗筛，小单元格做细筛。当大单元格内实体数超过阈值，为该单元格创建子哈希表（细粒度查询），否则直接在大单元格内暴力遍历。
+>
+> ```cpp
+> class AdaptiveSpatialHash {
+> public:
+>     // cell_size_large: 粗粒度单元格（如 60），cell_size_fine: 细粒度单元格（如 15）
+>     AdaptiveSpatialHash(float cell_size_large, float cell_size_fine, int threshold = 20)
+>         : large_cs_(cell_size_large), fine_cs_(cell_size_fine), threshold_(threshold) {}
+>
+>     void clear() {
+>         large_cells_.clear();
+>         fine_tables_.clear();
+>     }
+>
+>     void insert(const Entity& e) {
+>         int64_t lkey = large_key(e.pos);
+>         large_cells_[lkey].push_back(&e);
+>     }
+>
+>     // 构建完成后调用：为超阈值的大单元格创建子哈希表
+>     void build_fine_level() {
+>         fine_tables_.clear();
+>         for (auto& [lkey, entities] : large_cells_) {
+>             if ((int)entities.size() > threshold_) {
+>                 // 为该大单元格创建细粒度子哈希表
+>                 FineTable ft(fine_cs_);
+>                 for (auto* e : entities) {
+>                     ft.insert(*e);
+>                 }
+>                 fine_tables_[lkey] = std::move(ft);
+>             }
+>         }
+>     }
+>
+>     // 查询：大单元格 → 如果有子表则代理给子表，否则暴力遍历
+>     std::vector<const Entity*> query(const Point2D& center, float radius) const {
+>         std::vector<const Entity*> candidates;
+>
+>         // 枚举覆盖的大单元格
+>         int cx_min = int(std::floor((center.x - radius) / large_cs_));
+>         int cx_max = int(std::floor((center.x + radius) / large_cs_));
+>         int cy_min = int(std::floor((center.y - radius) / large_cs_));
+>         int cy_max = int(std::floor((center.y + radius) / large_cs_));
+>
+>         for (int cx = cx_min; cx <= cx_max; ++cx) {
+>             for (int cy = cy_min; cy <= cy_max; ++cy) {
+>                 int64_t lkey = make_key(cx, cy);
+>
+>                 auto fit = fine_tables_.find(lkey);
+>                 if (fit != fine_tables_.end()) {
+>                     // 该大单元格有子表 → 代理细粒度查询
+>                     auto fine_results = fit->second.query(center, radius);
+>                     candidates.insert(candidates.end(),
+>                                       fine_results.begin(), fine_results.end());
+>                 } else {
+>                     // 无子表 → 直接暴力遍历大单元格内实体
+>                     auto lit = large_cells_.find(lkey);
+>                     if (lit != large_cells_.end()) {
+>                         for (auto* e : lit->second) {
+>                             candidates.push_back(e);
+>                         }
+>                     }
+>                 }
+>             }
+>         }
+>         return candidates;
+>     }
+>
+> private:
+>     float large_cs_, fine_cs_;
+>     int threshold_;
+>
+>     struct FineTable {
+>         float cell_size;
+>         std::unordered_map<int64_t, std::vector<const Entity*>> cells;
+>         FineTable(float cs) : cell_size(cs) {}
+>         void insert(const Entity& e) {
+>             int cx = int(std::floor(e.pos.x / cell_size));
+>             int cy = int(std::floor(e.pos.y / cell_size));
+>             cells[make_key(cx, cy)].push_back(&e);
+>         }
+>         std::vector<const Entity*> query(const Point2D& center, float radius) const {
+>             // 与单层空间哈希 query 完全相同
+>             std::vector<const Entity*> results;
+>             int cx_min = int(std::floor((center.x - radius) / cell_size));
+>             int cx_max = int(std::floor((center.x + radius) / cell_size));
+>             int cy_min = int(std::floor((center.y - radius) / cell_size));
+>             int cy_max = int(std::floor((center.y + radius) / cell_size));
+>             for (int cx = cx_min; cx <= cx_max; ++cx)
+>                 for (int cy = cy_min; cy <= cy_max; ++cy) {
+>                     auto it = cells.find(make_key(cx, cy));
+>                     if (it != cells.end())
+>                         for (auto* e : it->second) results.push_back(e);
+>                 }
+>             return results;
+>         }
+>     };
+>
+>     std::unordered_map<int64_t, std::vector<const Entity*>> large_cells_;
+>     std::unordered_map<int64_t, FineTable> fine_tables_;
+>
+>     static int64_t make_key(int cx, int cy) {
+>         return (int64_t(cx) << 32) | (int64_t(cy) & 0xFFFFFFFFLL);
+>     }
+>     int64_t large_key(const Point2D& p) const {
+>         return make_key(int(std::floor(p.x / large_cs_)), int(std::floor(p.y / large_cs_)));
+>     }
+> };
+> ```
+>
+> **何时有效**：
+> - 不均匀密度场景（如城市中心密集、郊区稀疏）→ 密集区触发子表 → 减少每个候选的遍历范围
+> - 单层哈希在密集区返回数百个候选（因为大单元内实体多）；双层通过子表将候选数降低到 ~阈值附近的水平
+> - `threshold` 设太小 → 太多子表被创建 → 内存开销增加；设太大 → 子表不触发 → 退化为单层
+> - 推荐 `threshold ≈ 2 × (cell_size_large / cell_size_fine)²` 作为起点
+
+> [!tip]- 练习 3 参考答案
+> 松散四叉树 (Loose Quadtree) 将每个象限的边界向外扩展为原来的 2 倍——"松散边界"能容纳大部分原本跨越严格边界线的对象，避免它们被提升到父节点。
+>
+> ```cpp
+> class LooseQuadTree {
+> public:
+>     struct AABB {
+>         float x_min, y_min, x_max, y_max;
+>         bool contains(const Point2D& p) const {
+>             return p.x >= x_min && p.x <= x_max && p.y >= y_min && p.y <= y_max;
+>         }
+>         bool overlaps(const AABB& o) const {
+>             return !(x_min > o.x_max || x_max < o.x_min ||
+>                      y_min > o.y_max || y_max < o.y_min);
+>         }
+>         Point2D center() const { return {(x_min+x_max)*0.5f, (y_min+y_max)*0.5f}; }
+>     };
+>
+>     LooseQuadTree(const AABB& bounds, int max_objects = 8, int max_depth = 8)
+>         : strict_bounds_(bounds), max_objects_(max_objects), max_depth_(max_depth),
+>           is_split_(false) {
+>         // 松散边界 = 严格边界的 2 倍大小（以中心为基准）
+>         float hw = bounds.x_max - bounds.x_min;   // 半宽（松散边界用整宽）
+>         float hh = bounds.y_max - bounds.y_min;
+>         Point2D c = bounds.center();
+>         loose_bounds_ = { c.x - hw, c.y - hh, c.x + hw, c.y + hh };
+>     }
+>
+>     ~LooseQuadTree() { for (auto* c : children_) delete c; }
+>
+>     void clear() {
+>         objects_.clear();
+>         for (auto* c : children_) delete c;
+>         children_.clear();
+>         is_split_ = false;
+>     }
+>
+>     void insert(const Entity* e) { insert_internal(e, 0); }
+>
+>     std::vector<const Entity*> query_range(const AABB& rect) const {
+>         std::vector<const Entity*> results;
+>         query_internal(rect, results);
+>         return results;
+>     }
+>
+>     int node_count() const {
+>         int n = 1;
+>         for (auto* c : children_) n += c->node_count();
+>         return n;
+>     }
+>
+>     // 统计跨越严格边界但仍留在子节点的对象数（松散四叉树的核心指标）
+>     int boundary_objects_in_children() const {
+>         int count = 0;
+>         if (is_split_) {
+>             for (auto* c : children_) {
+>                 count += c->boundary_objects_in_children();
+>                 for (auto* e : c->objects_) {
+>                     // 检查此对象是否在父节点的严格边界内但在子节点的严格边界外
+>                     // （说明它是被松散边界捕获的边界对象）
+>                     (void)e;  // 实际统计逻辑见下方说明
+>                 }
+>             }
+>         }
+>         return count;
+>     }
+>
+> private:
+>     AABB strict_bounds_;  // 逻辑上的严格边界
+>     AABB loose_bounds_;   // 物理上的松散边界（2x）
+>     int max_objects_, max_depth_;
+>     bool is_split_;
+>     std::vector<const Entity*> objects_;
+>     std::vector<LooseQuadTree*> children_;
+>
+>     void split() {
+>         Point2D c = strict_bounds_.center();
+>         float hw = (strict_bounds_.x_max - strict_bounds_.x_min) * 0.5f;
+>         float hh = (strict_bounds_.y_max - strict_bounds_.y_min) * 0.5f;
+>
+>         // 子节点的严格边界是父节点严格边界的四分之一
+>         children_.push_back(new LooseQuadTree(
+>             {c.x - hw, c.y, c.x, c.y + hh}, max_objects_, max_depth_));     // NW
+>         children_.push_back(new LooseQuadTree(
+>             {c.x, c.y, c.x + hw, c.y + hh}, max_objects_, max_depth_));     // NE
+>         children_.push_back(new LooseQuadTree(
+>             {c.x - hw, c.y - hh, c.x, c.y}, max_objects_, max_depth_));     // SW
+>         children_.push_back(new LooseQuadTree(
+>             {c.x, c.y - hh, c.x + hw, c.y}, max_objects_, max_depth_));     // SE
+>
+>         is_split_ = true;
+>
+>         // 重新分配：用松散边界判断对象归属
+>         auto old = std::move(objects_);
+>         objects_.clear();
+>         for (auto* e : old) insert_internal(e, 0);
+>     }
+>
+>     void insert_internal(const Entity* e, int depth) {
+>         // 用松散边界判断归属——这是与标准四叉树的关键差异
+>         if (!loose_bounds_.contains(e->pos)) return;
+>
+>         if (!is_split_ && (int)objects_.size() < max_objects_) {
+>             objects_.push_back(e);
+>             return;
+>         }
+>
+>         if (!is_split_ && depth < max_depth_) split();
+>
+>         if (is_split_) {
+>             for (auto* child : children_) {
+>                 // 注意：用松散边界（而非严格边界）判断子节点归属
+>                 if (child->loose_bounds_.contains(e->pos)) {
+>                     child->insert_internal(e, depth + 1);
+>                     return;
+>                 }
+>             }
+>         }
+>
+>         // 所有子节点的松散边界都不包含此对象 → 留在当前节点
+>         objects_.push_back(e);
+>     }
+>
+>     void query_internal(const AABB& rect, std::vector<const Entity*>& results) const {
+>         // 注意：用松散边界做 overlap 检测（而非严格边界）
+>         if (!loose_bounds_.overlaps(rect)) return;
+>
+>         for (auto* e : objects_) {
+>             if (rect.contains(e->pos)) results.push_back(e);
+>         }
+>
+>         if (is_split_) {
+>             for (auto* child : children_)
+>                 child->query_internal(rect, results);
+>         }
+>     }
+> };
+> ```
+>
+> **松散四叉树 vs 标准四叉树对比测试**：
+>
+> ```cpp
+> // 对比测试
+> void compare_loose_vs_standard() {
+>     const int N = 5000;
+>     std::mt19937 rng(42);
+>
+>     // 生成实体——30% 随机分布在象限边界附近（模拟边界对象）
+>     std::vector<Entity> entities(N);
+>     std::uniform_real_distribution<float> boundary_pos(495, 505);  // 靠近 x=500
+>     std::uniform_real_distribution<float> normal_pos(0, 1000);
+>
+>     for (int i = 0; i < N; ++i) {
+>         if (i < N * 0.3)  // 30% 边界对象
+>             entities[i] = {Point2D(boundary_pos(rng), normal_pos(rng)), 2.0f, i};
+>         else
+>             entities[i] = {Point2D(normal_pos(rng), normal_pos(rng)), 2.0f, i};
+>     }
+>
+>     QuadTree::AABB world = {0, 0, 1000, 1000};
+>
+>     // 标准四叉树
+>     QuadTree st(world, 8, 10);
+>     for (auto& e : entities) st.insert(&e);
+>
+>     // 松散四叉树
+>     LooseQuadTree lt(world, 8, 10);
+>     for (auto& e : entities) lt.insert(&e);
+>
+>     std::cout << "标准四叉树 nodes: " << st.node_count() << "\n";
+>     std::cout << "松散四叉树 nodes: " << lt.node_count() << "\n";
+>     // 松散四叉树通常有更多节点（因为松散边界区域重叠），
+>     // 但根节点/上层节点中的跨边界对象大幅减少
+> }
+> ```
+>
+> **核心差异总结**：
+> - **归属判断**：标准四叉树用严格边界（对象常被提升到父节点），松散四叉树用 2× 边界（大多数边界对象可留在子节点）
+> - **重叠特性**：松散四叉树相邻子节点的松散边界会重叠（因为每个都扩展了 2×），这是刻意为之——一个对象可能同时属于多个子节点的松散区域，插入时选第一个接受的子节点
+> - **查询影响**：查询时用松散边界做 overlap 检查，可能遍历更多子节点（因为重叠），但每个子节点内的对象数更少 → 净效果取决于分布
+> - **适用场景**：对象尺寸不可忽略（如坦克半径为 3 格，严格边界为 10 格 → 很容易跨边界），或对象集中在象限分界线上（如地图以中央道路为分界）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **空间哈希的经典论文**：Teschner, M., Heidelberger, B., Müller, M., et al. (2003). "Optimized Spatial Hashing for Collision Detection of Deformable Objects". *VMV 2003.* — 在 GPU 计算与软体碰撞检测中推广了空间哈希

@@ -496,6 +496,130 @@ void InsertGPUMarker(const FString& MarkerName)
 4. 在 Timing 视图中过滤你的自定义 Channel——确认它们以你期望的颜色/名称出现
 5. 实验：给不同的 AI Agent 分配不同的 `AgentCount` 和 `ThinkDurationMs`，在 Insights 中观察模式
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **stat 命令解读模板（基于典型 UE5 场景）：**
+>
+> 1. **`stat unit`** — 瓶颈识别：
+>    ```
+>    Frame: 16.67 ms
+>    Game:  6.20 ms   ← GameThread OK
+>    Draw:  2.10 ms   ← RenderThread OK
+>    GPU:  18.50 ms   ← 🔴 GPU 是瓶颈！
+>    ```
+>    结论：`GPU > Frame` → GPU Bound。需要降低画质/分辨率、减少几何复杂度或优化 Shader。
+>
+>    另一种场景：
+>    ```
+>    Frame: 16.67 ms
+>    Game: 22.40 ms   ← 🔴 GameThread 是瓶颈
+>    Draw:  4.10 ms
+>    GPU: 14.20 ms
+>    ```
+>    结论：`Game > Frame` → CPU Bound。检查 `stat game` 找出最慢的 Tick。
+>
+> 2. **`stat game`** — GameThread 明细：
+>    - 查找 `Tick Time` 最高的 Actor 类
+>    - 常见高开销项：`TickableGameObjects`、`CharacterMovement`、`Animation`、AI 的 `BehaviorTree`
+>    - 排序后取前 5 类，逐一审查是否有必要每帧执行
+>
+> 3. **`stat gpu`** — GPU Pass 明细：
+>    - 典型输出：`ShadowDepths` 5.2ms、`BasePass` 3.1ms、`Translucency` 2.8ms
+>    - 最大块通常是优化目标——Shadow Pass 高 → 降低 Shadow Map 分辨率或 Cascade 数量；BasePass 高 → 减少 Draw Call / 简化材质
+>
+> 4. **`stat memory`** — 内存快照：
+>    ```
+>    Physical: 3.2 GB used / 15.8 GB total
+>    Virtual:  6.5 GB
+>    ```
+>    Physical 接近系统总内存 → 存在 OOM 风险。检查 `memreport` 确认主因。
+>
+> 5. **Insights Trace 分析**：
+>    - 用 UnrealInsights.exe 打开 `.utrace` 文件
+>    - 在 Timing 视图中放大到帧级，按 Duration 排序
+>    - 找到耗时最大的函数（通常是 `AActor::Tick` 或 `FTickTaskManager::RunTickGroup` 的子调用）
+>    - 记录完整调用路径和耗时，例如：`AEnemyAIController::Tick → UBehaviorTreeComponent::Tick → 12.3ms`
+
+> [!tip]- 练习 2 参考答案
+> **性能回归检测流水线操作步骤：**
+>
+> 1. **设置启动参数**：在项目的 `DefaultEngine.ini` 或打包配置中确保 `-execcmds` 支持。Development 构建即可（Shipping 不支持）。
+>
+> 2. **采集 baseline**：
+>    ```bash
+>    YourGame.exe YourMap -game -windowed -ResX=1280 -ResY=720 \
+>        -execcmds="stat startfile" -csvCaptureFrames=2000
+>    ```
+>    CSV 文件生成在 `Saved/Profiling/UnrealCSV/` 下。
+>
+> 3. **引入回归**（模拟性能变差）：
+>    - 在关卡蓝图中添加 100 个额外 Actor（如 100 个 `StaticMeshActor` 带碰撞体）
+>    - 或用 `stat unit` 确认帧时间明显升高
+>
+> 4. **采集 current**：重复步骤 2 的命令。
+>
+> 5. **Python 脚本检测**：
+>    ```bash
+>    python regression_check.py baseline.csv current.csv --threshold 5.0
+>    ```
+>    **预期输出示例**：
+>    ```
+>    === Performance Regression Report ===
+>    Baseline: 2000 frames, avg 8.23 ms
+>    Current:  2000 frames, avg 14.71 ms
+>    Regressions Detected:
+>      GameThreadTime:  +78.9% (5.12 → 9.16 ms)  ← 回归检测成功！
+>      FrameTime:       +67.3% (8.23 → 14.71 ms)
+>    ```
+>
+> 6. **验证修复**：移除额外 Actor，重新采集，脚本应输出 "No regressions detected"。
+>
+> **注意事项**：
+> - 每次采集前关闭所有无关应用以减少干扰
+> - 确保两次采集使用相同的分辨率、窗口模式、引擎配置
+> - CSV 列名可能因 UE 版本不同而变化，先用 `-csvCaptureFrames=10` 抓一个短文件确认列名
+
+> [!tip]- 练习 3 参考答案（可选）
+> **自定义 Trace Event 实现：**
+>
+> ```cpp
+> // 1. 定义 Trace Events（放在模块 Startup 中）
+> UE_TRACE_EVENT_BEGIN(Cpu, MyCore_GameLoop, NoSync)
+>     UE_TRACE_EVENT_FIELD(float, FrameDeltaMs)
+>     UE_TRACE_EVENT_FIELD(int32, EntityCount)
+> UE_TRACE_EVENT_END()
+>
+> UE_TRACE_EVENT_BEGIN(Cpu, MyAI_DecisionSystem, NoSync)
+>     UE_TRACE_EVENT_FIELD(int32, AgentCount)
+>     UE_TRACE_EVENT_FIELD(float, DecisionTimeMs)
+>     UE_TRACE_EVENT_FIELD(uint32, BehaviorTreeHash)
+> UE_TRACE_EVENT_END()
+>
+> UE_TRACE_EVENT_BEGIN(Cpu, MyPhysics_QueryBatch, NoSync)
+>     UE_TRACE_EVENT_FIELD(int32, QueryCount)
+>     UE_TRACE_EVENT_FIELD(float, BatchDurationMs)
+> UE_TRACE_EVENT_END()
+>
+> // 2. 在代码路径中调用
+> void UMyCoreLoop::Tick(float DeltaTime)
+> {
+>     UE_TRACE_LOG(Cpu, MyCore_GameLoop, MyGameplayChannel)
+>         << MyCore_GameLoop.FrameDeltaMs(DeltaTime * 1000.0f)
+>         << MyCore_GameLoop.EntityCount(ActiveEntities.Num());
+>     // ... 实际逻辑 ...
+> }
+> ```
+>
+> **Insights 查看技巧**：
+> - Timing 视图中右上角的 Channel Filter → 只勾选 `MyGameplayChannel`
+> - 不同 Agent 的 `AgentCount` 不同会在 Insights 中显示为不同大小的时间块
+> - 将鼠标悬停在 Event 块上可查看 `AgentCount` 和 `ThinkDurationMs` 的值
+> - 使用 `Bookmark` 标记测试阶段的起止，方便在长录中定位
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

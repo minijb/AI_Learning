@@ -164,6 +164,202 @@ alwaysApply: true
 2. 切换到不同项目，验证 Skill 仍然可用
 3. 在项目中也创建同名 Skill，验证项目 Skill 优先级更高
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 创建 Skill 的完整示例——假设你的项目中反复出现的模式是"为 API 端点写 Zod 验证 + 错误处理"：
+>
+> ```markdown
+> <!-- .omp/skills/api-endpoint-pattern/SKILL.md -->
+> ---
+> name: api-endpoint-pattern
+> description: >
+>   本项目的 API 端点编码规范。当创建或修改 API 路由时使用。
+>   Next.js Route Handler + Zod 验证 + 统一错误响应格式。
+> globs: ["app/api/**/route.ts"]
+> ---
+>
+> # API 端点编码规范
+>
+> ## 1. 请求验证
+>
+> 每个 API 端点必须用 Zod schema 验证输入：
+>
+> ```ts
+> import { z } from "zod";
+>
+> const CreateUserSchema = z.object({
+>   name: z.string().min(1).max(100),
+>   email: z.string().email(),
+>   role: z.enum(["admin", "user"]).default("user"),
+> });
+> ```
+>
+> ## 2. 错误响应格式
+>
+> 使用统一错误格式：
+>
+> ```ts
+> // app/api/_lib/errors.ts
+> export function apiError(status: number, message: string) {
+>   return Response.json({ error: { code: status, message } }, { status });
+> }
+> ```
+>
+> ## 3. 端点模板
+>
+> POST 端点必须使用以下模式：
+>
+> ```ts
+> export async function POST(req: Request) {
+>   try {
+>     const body = await req.json();
+>     const parsed = CreateUserSchema.safeParse(body);
+>     if (!parsed.success) {
+>       return apiError(400, parsed.error.message);
+>     }
+>     // ... 业务逻辑 ...
+>     return Response.json({ data: result });
+>   } catch (err) {
+>     return apiError(500, "Internal Server Error");
+>   }
+> }
+> ```
+> ```
+>
+> 验证方式：
+>
+> ```text
+> 在 OMP 中测试：
+> "按照 api-endpoint-pattern skill 创建一个 POST /api/users 端点"
+>
+> → OMP 应自动使用 Zod 验证 + 统一错误格式
+> → 检查生成的代码是否符合 SKILL.md 的规范
+> ```
+
+> [!tip]- 练习 2 参考答案
+> 带资源的 Skill 扩展：
+>
+> ```text
+> 目录结构：
+> .omp/skills/react-component/SKILL.md
+> .omp/skills/react-component/templates/component.tsx
+> ```
+>
+> SKILL.md 注册模板：
+>
+> ```markdown
+> <!-- .omp/skills/react-component/SKILL.md -->
+> ---
+> name: react-component
+> description: >
+>   本项目的 React 组件编写规范。使用 tailwindcss + TypeScript。
+>   提供组件模板。创建新组件时使用。
+> globs: ["src/components/**/*.tsx"]
+> ---
+>
+> # React 组件规范
+>
+> 使用 skill://react-component/templates/component.tsx 创建新组件。
+> 所有组件必须：
+> - 使用 'use client' 指令（如果是有状态的）
+> - Props 用 interface 定义
+> - 默认导出
+> ```
+>
+> 模板文件：
+>
+> ```tsx
+> <!-- .omp/skills/react-component/templates/component.tsx -->
+> "use client";
+>
+> import { type FC } from "react";
+>
+> interface Props {
+>   className?: string;
+>   children?: React.ReactNode;
+> }
+>
+> const Component: FC<Props> = ({ className, children }) => {
+>   return <div className={className}>{children}</div>;
+> };
+>
+> export default Component;
+> ```
+>
+> 在 OMP 中使用：
+>
+> ```text
+> "用 react-component skill 和其中的 component.tsx 模板创建一个 UserCard 组件"
+> ```
+>
+> OMP 会读取 `skill://react-component/templates/component.tsx` 的内容，将其作为模板，填充具体内容生成 `UserCard`。
+
+> [!tip]- 练习 3 参考答案
+> 全局 Skill 与优先级验证：
+>
+> 1. 创建全局 Skill：
+>
+> ```bash
+> mkdir -p ~/.omp/agent/skills/global-logging/
+> ```
+>
+> ```markdown
+> <!-- ~/.omp/agent/skills/global-logging/SKILL.md -->
+> ---
+> name: logging-standards
+> description: >
+>   全局日志规范。所有项目都使用统一的日志格式。
+> globs: ["src/**/*.ts"]
+> ---
+>
+> # 日志规范
+>
+> - 使用 pino 作为日志库（不要用 console.log）
+> - 日志格式：`[module] message { context }`
+> - 禁止在循环中打日志
+> ```
+>
+> 2. 切换到不同项目验证：
+>
+> ```text
+> cd /path/to/project-a
+> omp
+> # 让 OMP 写代码 → 检查它是否参考了 logging-standards
+> # 预期：即使 project-a 没有 .omp/skills/，OMP 仍加载全局 skill
+>
+> cd /path/to/project-b
+> omp
+> # 同样验证
+> ```
+>
+> 3. 项目 Skill 覆盖测试：
+>
+> ```markdown
+> <!-- project-a/.omp/skills/logging-standards/SKILL.md -->
+> ---
+> name: logging-standards
+> description: 本项目的日志规范（覆盖全局）
+> globs: ["src/**/*.ts"]
+> ---
+>
+> # 日志规范
+>
+> - 使用 winston 而不是 pino（项目特定选择）
+> - 保持其他规则不变
+> ```
+>
+> ```text
+> # 重启 OMP 后验证：
+> # project-a 中写代码 → 使用 winston（项目 skill 覆盖了全局）
+> # project-b 中写代码 → 使用 pino（全局 skill 生效）
+> ```
+>
+> **思考题答案：** Skill 优先级由 provider 决定：`.omp` (100) > `.claude` (80) > `.gemini` (60)。同名 Skill 按 provider 优先级选择，更高优先级的完整替换低优先级的——不是字段级 merge。这意味着如果你在项目 `.omp/` 中创建了同名 Skill，必须包含全部需要的内容，不能只写差异部分。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

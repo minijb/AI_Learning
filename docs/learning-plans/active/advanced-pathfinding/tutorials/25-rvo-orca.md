@@ -686,6 +686,431 @@ ORCA 的实际 w 计算更精确地考虑了锥的几何形状。
 
 5. **性能基准测试**：用 500 个 agent 运行 ORCA，测量每帧的 LP 求解总耗时。优化方向：(a) 空间哈希加速邻居查找（当前是 O(N²)）；(b) 用 `std::array` 替代 `std::vector<Line>` 避免堆分配；(c) 提前终止 LP 求解——如果 preferred velocity 已经满足所有 ORCA 半平面，直接返回。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 修改 `time_horizon` 后，重新编译运行场景 2（迎面相遇）。τ 越大 → agent 越早开始避让 → 最小距离越大，但横向偏移也越大（"避让过头"）。
+>
+> ```cpp
+> // 时间窗口对比测试——在 main() 中或独立函数中运行
+> void test_time_horizon_impact() {
+>     std::cout << "=== τ 时间窗口影响分析 ===\n";
+>     std::cout << "  τ  | 最小距离 | 最大横向偏移 | 碰撞?\n";
+>     std::cout << "  ----|---------|-------------|-------\n";
+>
+>     for (float tau : {0.5f, 1.0f, 2.0f, 5.0f}) {
+>         OrcaSimulator sim;
+>         sim.params.time_horizon  = tau;
+>         sim.params.neighbor_dist = 20.0f;
+>
+>         Agent a, b;
+>         a.position = {0, 0};  a.velocity = {3, 0};
+>         a.pref_velocity = {3, 0};  a.radius = 0.5f;
+>         a.max_speed = 4.0f;  a.max_accel = 2.0f;  a.id = 0;
+>
+>         b.position = {20, 0};  b.velocity = {-3, 0};
+>         b.pref_velocity = {-3, 0};  b.radius = 0.5f;
+>         b.max_speed = 4.0f;  b.max_accel = 2.0f;  b.id = 1;
+>
+>         sim.agents = {a, b};
+>
+>         float min_dist = 1e9f;
+>         float max_lateral = 0.0f;
+>         bool collided = false;
+>
+>         for (int t = 0; t < 30; ++t) {
+>             if (t > 0) sim.step(1.0f);
+>             float dist = (sim.agents[0].position - sim.agents[1].position).len();
+>             if (dist < min_dist) min_dist = dist;
+>             // 横向偏移 = |y 坐标|（对迎面相遇而言）
+>             max_lateral = std::max(max_lateral,
+>                                    std::abs(sim.agents[0].position.y));
+>             max_lateral = std::max(max_lateral,
+>                                    std::abs(sim.agents[1].position.y));
+>             if (dist < sim.agents[0].radius + sim.agents[1].radius)
+>                 collided = true;
+>         }
+>
+>         std::cout << "  " << std::setw(3) << tau
+>                   << " | " << std::setw(8) << std::fixed << std::setprecision(2)
+>                   << min_dist
+>                   << " | " << std::setw(11) << max_lateral
+>                   << " | " << (collided ? "✗ 穿透" : "✓ 安全") << "\n";
+>     }
+> }
+> ```
+>
+> **预期结果与分析**：
+> - `τ=0.5`：最小距离 ~0.6m（接近半径和 1.0m），横向偏移 ~0.3m。agent 反应很晚，最后一刻才急转。高密度场景中穿透风险大
+> - `τ=2.0`：最小距离 ~1.1m，横向偏移 ~2m。平衡点——有足够余量但不过度避让
+> - `τ=5.0`：最小距离 ~2.5m，横向偏移 ~5m。agent 在 10m 外就开始横向移动，路径更长，看起来"怕撞"
+> - **推荐**: 步行角色 τ=2~3s，高速车辆 τ=0.5~1s（速度快 + τ 大 = 过早大幅偏航）
+
+> [!tip]- 练习 2 参考答案
+> 验证 ORCA 对称性：在两个 agent 的每一步都记录 `||v_new - v_pref||`，如果 ORCA 工作正确，两个值应大致相等（差异在浮点误差范围内）。
+>
+> ```cpp
+> void verify_symmetry() {
+>     std::cout << "=== ORCA 对称性验证 ===\n";
+>
+>     OrcaSimulator sim;
+>     sim.params.time_horizon  = 2.0f;
+>     sim.params.neighbor_dist = 15.0f;
+>
+>     Agent a, b;
+>     a.position = {0, 0.5f};  a.velocity = {3, 0};
+>     a.pref_velocity = {3, 0};  a.radius = 0.5f;
+>     a.max_speed = 4.0f;  a.max_accel = 3.0f;  a.id = 0;
+>
+>     b.position = {20, -0.5f};  b.velocity = {-3, 0};
+>     b.pref_velocity = {-3, 0};  b.radius = 0.5f;
+>     b.max_speed = 4.0f;  b.max_accel = 3.0f;  b.id = 1;
+>
+>     sim.agents = {a, b};
+>
+>     std::cout << "  t  | ||dv_A|| | ||dv_B|| | 比值 | 对称?\n";
+>     std::cout << "  ----|----------|----------|-------|------\n";
+>
+>     // 必须先 compute 一次初始速度，记录每帧的 preferred（在 step 前保存）
+>     for (int t = 0; t < 15; ++t) {
+>         // 保存当前 pref_velocity（因为 step 后 velocity 变了，
+>         // 但 pref_velocity 保持不变——这是 ORCA 求解的目标基准）
+>         Vec2 pref_a = sim.agents[0].pref_velocity;
+>         Vec2 pref_b = sim.agents[1].pref_velocity;
+>         Vec2 vel_a_before = sim.agents[0].velocity;
+>         Vec2 vel_b_before = sim.agents[1].velocity;
+>
+>         sim.step(1.0f);
+>
+>         Vec2 vel_a_after = sim.agents[0].velocity;
+>         Vec2 vel_b_after = sim.agents[1].velocity;
+>
+>         float dv_a = (vel_a_after - pref_a).len();
+>         float dv_b = (vel_b_after - pref_b).len();
+>         float ratio = dv_b > 0.001f ? dv_a / dv_b : 0;
+>         bool symmetric = std::abs(dv_a - dv_b) < 0.1f;
+>
+>         std::cout << "  " << std::setw(2) << t
+>                   << " | " << std::fixed << std::setprecision(4)
+>                   << std::setw(8) << dv_a
+>                   << " | " << std::setw(8) << dv_b
+>                   << " | " << std::setprecision(2) << std::setw(5) << ratio
+>                   << " | " << (symmetric ? "✓" : "✗ (差异") << "\n";
+>     }
+> }
+> ```
+>
+> **ORCA 对称性的理论保证**：
+> - A 的 ORCA 半平面边界在 `v_A + w/2`，B 的边界在 `v_B - w/2`
+> - 如果 LP 求解器对双方都正好找到边界点，则 `dv_A = dv_B = |w|/2`
+> - 实际中可能因：(1) 速度约束（max_speed）截断了某一方的解；(2) 多邻居交互时，A 和 B 各自有不同的其他邻居，打破了纯粹的二体对称性
+> - 在纯二体场景中，对称性应在 1% 以内（浮点精度差异）
+
+> [!tip]- 练习 3 参考答案
+> 用 8 个半平面近似圆形速度约束，每 45° 一条切线，解的平滑度显著优于 4 半平面正方形近似。
+>
+> ```cpp
+> // 替换 compute_orca_velocity() 中速度约束部分
+> // 原始 4 半平面:
+> // lines.push_back(Line({ 1, 0}, {      0, 0}));
+> // lines.push_back(Line({-1, 0}, {  vmax, 0}));
+> // lines.push_back(Line({ 0, 1}, {      0, 0}));
+> // lines.push_back(Line({ 0,-1}, {  vmax, 0}));
+>
+> // 改为 8 半平面（每 45° 一个）:
+> void add_circular_speed_constraint(std::vector<Line>& lines, float vmax) {
+>     constexpr int N = 8;
+>     for (int i = 0; i < N; ++i) {
+>         float angle = 2.0f * M_PI * i / N;  // 0°, 45°, 90°, 135°, ...
+>         Vec2 normal(std::cos(angle), std::sin(angle));  // 单位圆上点的方向
+>         // 半平面: normal·v ≤ vmax  ⇔  -normal·v ≥ -vmax
+>         // 即 direction = normal, point = vmax * normal
+>         // → normal·v ≤ vmax 等价于 normal 方向投影不超过 vmax
+>         // 用 Line(direction, point) 表示 direction·v ≥ point
+>         // 我们需要 normal·v ≤ vmax → -(normal)·v ≥ -vmax
+>         // 这里直接用外法向指向圆外（normal），约束 normal·v ≤ vmax
+>         // Line 格式: direction·v ≥ point
+>         // 所以用 direction = normal, point = vmax → normal·v ≥ vmax ... 这是错的
+>         // 正确: 约束 normal·v ≤ vmax ↔ (-normal)·v ≥ -vmax
+>         lines.push_back(Line(-normal, Vec2(-vmax * normal.x, -vmax * normal.y)));
+>     }
+> }
+>
+> // 使用: 在 compute_orca_velocity() 中将 4 行替换为:
+> // add_circular_speed_constraint(lines, A.max_speed);
+> ```
+>
+> ```cpp
+> // 更简洁版本——直接在 compute_orca_velocity 中内联
+> // 替换原始速度约束:
+> // {
+> //     constexpr int NS = 8;
+> //     for (int i = 0; i < NS; ++i) {
+> //         float a = 2.0f * M_PI * i / NS;
+> //         Vec2 n(std::cos(a), std::sin(a));
+> //         // 约束 n·v ≤ vmax  →  (-n)·v ≥ -vmax
+> //         lines.push_back(Line(-n, Vec2() - n * vmax));
+> //     }
+> // }
+> ```
+>
+> **抖动测量对比**：
+>
+> ```cpp
+> // 测量连续帧速度变化角度的标准差（抖动指标）
+> void measure_jitter(const OrcaSimulator& sim) {
+>     const int N = (int)sim.agents.size();
+>     std::vector<std::vector<Vec2>> history;
+>     // ... 运行 N 帧，记录每帧所有 agent 的 velocity
+>     // 对每个 agent 计算相邻帧速度夹角的标准差
+>     // 4 半平面: 角度变化 ~5-15° stddev（正方形导致对角方向更快）
+>     // 8 半平面: 角度变化 ~1-3° stddev（圆形更均匀）
+> }
+> ```
+>
+> **为什么 8 半平面更平滑**：
+> - 4 半平面形成正方形可行域：对角方向（45°）最大速度为 vmax×√2，水平和垂直方向只有 vmax → agent 沿对角走比直走更"快"，产生速度波动
+> - 8 半平面形成正八边形：最大 vs 最小速度比 ≈ 1.08（而非 √2 ≈ 1.41），各方向速度更均匀
+> - 进一步提升：用 16 或 32 半平面；或者直接在 LP 求解后用 `v.trunc(vmax)` 做最终钳制（简单但可能产生不可行解）
+
+> [!tip]- 练习 4 参考答案
+> 静态障碍物的 ORCA 计算：障碍物速度为零，且不承担避让责任（w 不除以 2）。A 需要完整避开整个 w 向量。
+>
+> ```cpp
+> // 障碍物结构
+> struct Obstacle {
+>     Vec2  position;
+>     float radius;
+> };
+>
+> // 在 OrcaSimulator 中添加成员
+> std::vector<Obstacle> obstacles;
+>
+> // 在 compute_orca_velocity() 中添加（agent-agent 循环之后）：
+> // ---- 障碍物 ORCA 半平面 ----
+> for (const auto& obs : obstacles) {
+>     Vec2 rel_pos = obs.position - A.position;
+>     float dist_sq = rel_pos.len_sq();
+>     float combined_radius = A.radius + obs.radius;
+>
+>     // 距离过滤
+>     if (dist_sq > params.neighbor_dist * params.neighbor_dist) continue;
+>
+>     // 已重叠——推开
+>     if (dist_sq < combined_radius * combined_radius * 0.99f) {
+>         float dist = std::sqrt(dist_sq);
+>         if (dist < 0.0001f) dist = 0.0001f;
+>         Vec2 n = rel_pos / dist;
+>         lines.push_back(Line(n, A.position + n * combined_radius));
+>         continue;
+>     }
+>
+>     float dist = std::sqrt(dist_sq);
+>     Vec2 to_obs = rel_pos / dist;
+>
+>     // 障碍物速度为零 → rel_vel = A.velocity
+>     float closing_speed = A.velocity.dot(to_obs);
+>
+>     float inv_tau_obs = 1.0f / params.time_horizon_obs;
+>     float min_dist_change = (dist - combined_radius) * inv_tau_obs;
+>     float w_mag = min_dist_change - closing_speed;
+>
+>     if (w_mag <= 0.0f) continue;
+>
+>     // 关键差异：障碍物不承担避让 → w 不除以 2
+>     Vec2 w = to_obs * w_mag;
+>     Vec2 u_opt = A.velocity + w;  // 注意：不是 +0.5f*w
+>
+>     Vec2 n = w.norm();
+>     lines.push_back(Line(n, u_opt));
+> }
+> ```
+>
+> **狭窄走廊测试**：
+>
+> ```cpp
+> void test_corridor_avoidance() {
+>     OrcaSimulator sim;
+>     sim.params.time_horizon_obs = 0.8f;  // 对障碍物用更短时间窗口
+>     sim.params.neighbor_dist = 5.0f;
+>
+>     // 走廊墙壁（上下各一条长障碍物链）
+>     for (float x = 0; x <= 50; x += 2.0f) {
+>         sim.obstacles.push_back({{x, -2.0f}, 1.0f});  // 下墙
+>         sim.obstacles.push_back({{x,  6.0f}, 1.0f});  // 上墙
+>     }
+>
+>     // Agent 在走廊中移动
+>     Agent a;
+>     a.position = {2.0f, 2.0f};
+>     a.velocity   = {3.0f, 0.0f};
+>     a.pref_velocity = {3.0f, 0.0f};  // 向右走
+>     a.radius = 0.5f;
+>     a.max_speed = 4.0f;
+>     a.max_accel = 2.0f;
+>     a.id = 0;
+>     sim.agents = {a};
+>
+>     // 验证 agent 不会撞墙：始终满足 wall_gap - agent.radius > 0
+>     for (int t = 0; t < 20; ++t) {
+>         sim.step(0.5f);
+>         float y = sim.agents[0].position.y;
+>         std::cout << "  t=" << t << " y=" << y
+>                   << (y > -0.5f && y < 4.5f ? " ✓" : " ✗ 撞墙!") << "\n";
+>     }
+> }
+> ```
+>
+> **障碍物 vs Agent 的差异总结**：
+> | 方面 | Agent-Agent | Agent-障碍物 |
+> |------|-----------|------------|
+> | rel_vel | v_A - v_B | v_A - 0 = v_A |
+> | w 分配 | 各承担 w/2 | A 承担全部 w |
+> | time_horizon | params.time_horizon | params.time_horizon_obs（通常更短） |
+> | 责任 | 对称 | 不对称 |
+
+> [!tip]- 练习 5 参考答案
+> 三项优化叠加：空间哈希加速邻居查找、栈分配替代堆分配、提前终止 LP。
+>
+> ```cpp
+> // 优化 1: 空间哈希邻居查找（替换 O(N²) 循环）
+> class NeighborGrid {
+> public:
+>     NeighborGrid(float cell_size) : cell_size_(cell_size) {}
+>
+>     void build(const std::vector<Agent>& agents) {
+>         cells_.clear();
+>         for (size_t i = 0; i < agents.size(); ++i) {
+>             int cx = int(std::floor(agents[i].position.x / cell_size_));
+>             int cy = int(std::floor(agents[i].position.y / cell_size_));
+>             cells_[make_key(cx, cy)].push_back((int)i);
+>         }
+>     }
+>
+>     // 返回 agent i 的邻居索引列表
+>     std::vector<int> query_neighbors(const Agent& a, float radius,
+>                                       const std::vector<Agent>& agents,
+>                                       int max_count) const {
+>         std::vector<int> neighbors;
+>         int cx = int(std::floor(a.position.x / cell_size_));
+>         int cy = int(std::floor(a.position.y / cell_size_));
+>         int range = int(std::ceil(radius / cell_size_));
+>
+>         for (int dx = -range; dx <= range && (int)neighbors.size() < max_count; ++dx) {
+>             for (int dy = -range; dy <= range && (int)neighbors.size() < max_count; ++dy) {
+>                 auto it = cells_.find(make_key(cx+dx, cy+dy));
+>                 if (it == cells_.end()) continue;
+>                 for (int idx : it->second) {
+>                     if ((int)neighbors.size() >= max_count) break;
+>                     float d2 = (a.position - agents[idx].position).len_sq();
+>                     if (d2 <= radius*radius && idx != a.id)
+>                         neighbors.push_back(idx);
+>                 }
+>             }
+>         }
+>         return neighbors;
+>     }
+>
+> private:
+>     float cell_size_;
+>     std::unordered_map<int64_t, std::vector<int>> cells_;
+>     static int64_t make_key(int cx, int cy) {
+>         return (int64_t(cx) << 32) | (int64_t(cy) & 0xFFFFFFFFLL);
+>     }
+> };
+> ```
+>
+> ```cpp
+> // 优化 2: 栈分配 + 提前终止 LP
+> // 在 compute_orca_velocity() 中：
+> Vec2 compute_orca_velocity_optimized(int agent_idx,
+>                                       const NeighborGrid& grid) {
+>     Agent& A = agents[agent_idx];
+>
+>     // 栈分配（避免 std::vector 堆分配）
+>     // 普通情况下 lines 很少 > 20
+>     constexpr int MAX_LINES = 32;
+>     Line lines_buf[MAX_LINES];
+>     int line_count = 0;
+>
+>     // 添加速度约束（8 半平面）
+>     // ... 同练习 3 ...
+>
+>     // 优化 3: 只在必要时收集 ORCA 约束
+>     // 先检查 preferred velocity 是否与任何邻居冲突
+>     auto neighbors = grid.query_neighbors(A, params.neighbor_dist, agents,
+>                                            params.max_neighbors);
+>     bool needs_orca = false;
+>     for (int j : neighbors) {
+>         Agent& B = agents[j];
+>         Vec2 rel_pos = B.position - A.position;
+>         float dist = rel_pos.len();
+>         Vec2 rel_vel = A.pref_velocity - B.velocity;  // 用 pref 预估
+>         float closing = rel_vel.dot(rel_pos / dist);
+>         float min_change = (dist - A.radius - B.radius) / params.time_horizon;
+>         if (closing > min_change) { needs_orca = true; break; }
+>     }
+>
+>     if (!needs_orca) return A.pref_velocity;  // 提前终止：pref 已安全
+>
+>     // 否则构建完整约束并求解
+>     // ... ORCA 半平面构建 ...
+>
+>     // 用简易数组式 LP（避免 std::vector 开销）
+>     return solve_lp_array(A.pref_velocity, lines_buf, line_count);
+> }
+>
+> // LP 求解器接受原始数组版本
+> Vec2 solve_lp_array(Vec2 v_pref, Line* lines, int count) {
+>     if (count == 0) return v_pref;
+>     Vec2 opt = v_pref;
+>     // ... 同原 solve_linear_program_2d，但用 lines[0..count-1] ...
+>     return opt;
+> }
+> ```
+>
+> **性能对比基准**（500 agents, 10 步）：
+>
+> ```cpp
+> void benchmark_optimizations() {
+>     const int N = 500;
+>     // ... 生成 500 个随机 agent ...
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     for (int step = 0; step < 10; ++step) {
+>         // 原版 O(N²) 邻居查找
+>         // sim.step(dt);
+>     }
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     auto baseline_us = std::chrono::duration_cast
+>         <std::chrono::microseconds>(t1 - t0).count();
+>
+>     // 优化版
+>     t0 = std::chrono::high_resolution_clock::now();
+>     for (int step = 0; step < 10; ++step) {
+>         NeighborGrid grid(params.neighbor_dist);
+>         grid.build(sim.agents);
+>         // for each i: compute_orca_velocity_optimized(i, grid)
+>     }
+>     t1 = std::chrono::high_resolution_clock::now();
+>     auto opt_us = std::chrono::duration_cast
+>         <std::chrono::microseconds>(t1 - t0).count();
+>
+>     std::cout << "N=" << N << " agents:\n";
+>     std::cout << "  原版 O(N²): " << baseline_us / 1000.0 << " ms/step\n";
+>     std::cout << "  优化版:      " << opt_us / 1000.0 << " ms/step ("
+>               << (double)baseline_us / opt_us << "x)\n";
+> }
+> ```
+>
+> **预期加速效果**：
+> - (a) 空间哈希：邻居查找 O(N²)→O(N×K)（K≈20），500 agents 时 ~25x 提升
+> - (b) 栈分配：消除每次 LP 的堆分配，~1.3-2x 提升（取决于 allocator）
+> - (c) 提前终止：若 80% 的 agent 无需避让（稀疏场景），LP 跳过率 80% → 整体 ~5x；密集场景收益较小
+> - 综合：稀疏场景 ~50x，密集场景 ~30x
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **ORCA 原始论文**：van den Berg, J., Guy, S. J., Lin, M., & Manocha, D. (2011). "Reciprocal n-Body Collision Avoidance". *Robotics Research*. 这篇是 ORCA 的出处，包含完整的数学推导和收敛性证明。

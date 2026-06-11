@@ -874,6 +874,478 @@ void CSMain (uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID,
 1. **GPU JPS**: 研究并实现 GPU 上的 JPS。参考 "Parallel Jump Point Search on GPU" (Harabor & Grastien, 2021)。思考 JPS 的递归 jump 操作如何映射到 GPU 线程。
 2. **异构图寻路**: 设计一个系统，在运行时根据查询批大小自动选择 CPU A*、多线程 A*、或 GPU Dijkstra。实现自适应调度器。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 多线程吞吐量测试——在 main() 中添加
+> void benchmark_thread_scaling(const Grid& grid,
+>                               const std::vector<PathQuery>& queries) {
+>     int thread_counts[] = {1, 2, 4, 8, 16};
+>     std::cout << "线程数 | 耗时(ms) | 吞吐量(q/s) | 加速比\n";
+>     std::cout << "-------|---------|------------|------\n";
+>
+>     double baseline = 0.0;
+>     for (int nt : thread_counts) {
+>         auto t0 = std::chrono::steady_clock::now();
+>         auto results = parallel_astar_cpu(grid, queries, nt);
+>         auto t1 = std::chrono::steady_clock::now();
+>         double ms = std::chrono::duration<double, std::milli>(t1-t0).count();
+>         double qps = queries.size() / (ms / 1000.0);
+>
+>         if (nt == 1) baseline = ms;
+>         double speedup = baseline / ms;
+>
+>         std::cout << std::setw(6) << nt << " | "
+>                   << std::setw(8) << std::fixed << std::setprecision(2) << ms
+>                   << " | " << std::setw(10) << std::setprecision(0) << qps
+>                   << " | " << std::setprecision(2) << speedup << "×\n";
+>     }
+> }
+> ```
+>
+> **预期结果 (8 核 CPU, 100 查询, 80×60 网格):**
+>
+> | 线程数 | 耗时(ms) | 吞吐量(q/s) | 加速比 |
+> |--------|---------|------------|--------|
+> | 1 | 189 | 529 | 1.0× |
+> | 2 | 98 | 1020 | 1.9× |
+> | 4 | 52 | 1923 | 3.6× |
+> | 8 | 32 | 3125 | 5.9× |
+> | 16 | 30 | 3333 | 6.3× |
+>
+> **为什么 8→16 几乎不再加速**：(1) 物理核心只有 8 个，超线程带来的额外吞吐有限；(2) 内存带宽成为瓶颈——8 个线程已经饱和了 L3 cache 和 RAM 带宽；(3) `std::priority_queue` 的分配器争用——多个线程同时从堆上分配 `AStarNode` 导致 malloc 锁竞争。阿姆达尔定律：可并行部分（A* 内部）占 90%，但串行部分（malloc/内存分配）占 10% → 理论最大加速比 = 1/0.1 = 10×，实际受带宽限制约 6-7×。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 在 gpu_dijkstra_batch() 中添加 ASCII 可视化
+> void visualize_wavefront(const std::vector<float>& dist_data,
+>                          int q, int w, int h, int iteration) {
+>     std::cout << "--- Query " << q << ", Iteration " << iteration << " ---\n";
+>     int total = w * h;
+>     // 字符映射: '#'=障碍, 'S'=起点(0), 数字=距离级别, '.'=未到达
+>     for (int y = 0; y < h; ++y) {
+>         for (int x = 0; x < w; ++x) {
+>             float d = dist_data[q * total + y * w + x];
+>             if (d >= INF_F * 0.5f) std::cout << '.';
+>             else if (d < 0.01f)    std::cout << 'S';
+>             else if (d < 5.0f)     std::cout << (char)('0' + (int)d);
+>             else if (d < 15.0f)    std::cout << (char)('A' + (int)(d - 10));
+>             else                   std::cout << '+';
+>         }
+>         std::cout << "\n";
+>     }
+>     std::cout << std::string(w, '=') << "\n";
+> }
+>
+> // 在 GPU Dijkstra 循环中每 10 轮输出一次
+> if (iteration % 10 == 0) {
+>     visualize_wavefront(dist_data, 0, grid.w, grid.h, iteration);
+>     // 暂停以便观察（或写入文件用于动画）
+>     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+> }
+> ```
+>
+> **观察要点**：Wavefront 以起点为中心向外扩散，呈菱形（曼哈顿距离）或近似圆形（欧几里得距离）。早期轮次扩展速度接近 `iteration × 1.0`/步，后期因障碍物绕行而呈现"绕射"模式——wavefront 在障碍物旁弯曲而非穿过。这是 Dijkstra（无启发式）与 A* 的核心区别：Dijkstra 的 wavefront 在所有方向均匀扩展，不管目标在哪。
+
+> [!tip]- 练习 3 参考答案
+> ```csharp
+> // Unity 中验证 ComputeShader 正确性的测试脚本
+> using UnityEngine;
+> using NUnit.Framework;
+> using System.Collections.Generic;
+>
+> public class GPUTest : MonoBehaviour {
+>     public PathfindingGPU gpuPathfinder;
+>
+>     // 纯 C# A* 参考实现
+>     float CSharpAStar(int[,] grid, Vector2Int start, Vector2Int goal) {
+>         int w = grid.GetLength(0), h = grid.GetLength(1);
+>         var dist = new float[w, h];
+>         for (int x = 0; x < w; x++)
+>             for (int y = 0; y < h; y++) dist[x, y] = float.MaxValue;
+>
+>         var open = new SortedSet<(float f, int x, int y)>();
+>         dist[start.x, start.y] = 0;
+>         open.Add((Heuristic(start, goal), start.x, start.y));
+>
+>         Vector2Int[] dirs = {new(0,-1), new(1,0), new(0,1), new(-1,0)};
+>         while (open.Count > 0) {
+>             var cur = open.Min; open.Remove(cur);
+>             if (cur.x == goal.x && cur.y == goal.y) return dist[cur.x, cur.y];
+>             foreach (var d in dirs) {
+>                 int nx = cur.x + d.x, ny = cur.y + d.y;
+>                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+>                 if (grid[nx, ny] == 1) continue; // 障碍
+>                 float ng = dist[cur.x, cur.y] + 1f;
+>                 if (ng < dist[nx, ny]) {
+>                     dist[nx, ny] = ng;
+>                     open.Add((ng + Heuristic(new(nx,ny), goal), nx, ny));
+>                 }
+>             }
+>         }
+>         return float.PositiveInfinity;
+>     }
+>
+>     float Heuristic(Vector2Int a, Vector2Int b) =>
+>         Mathf.Abs(a.x - b.x) + Mathf.Abs(a.y - b.y);
+>
+>     // 测试：生成随机查询，对比 GPU 与 CPU 结果
+>     public void ValidateGPUResults() {
+>         int[,] testGrid = new int[32, 32];
+>         var rand = new System.Random(42);
+>         // 20% 障碍
+>         for (int x = 0; x < 32; x++)
+>             for (int y = 0; y < 32; y++)
+>                 testGrid[x, y] = (rand.NextDouble() < 0.2f) ? 1 : 0;
+>
+>         // 生成 50 个随机查询
+>         var starts = new List<Vector2Int>();
+>         var goals = new List<Vector2Int>();
+>         for (int i = 0; i < 50; i++) {
+>             Vector2Int s, g;
+>             do { s = new(rand.Next(32), rand.Next(32)); }
+>             while (testGrid[s.x, s.y] == 1);
+>             do { g = new(rand.Next(32), rand.Next(32)); }
+>             while (testGrid[g.x, g.y] == 1 || (s == g));
+>             starts.Add(s); goals.Add(g);
+>         }
+>
+>         var gpuResults = gpuPathfinder.BatchPathfind(starts, goals);
+>
+>         // 对比验证（允许浮点误差 < 0.01）
+>         int mismatches = 0;
+>         for (int i = 0; i < 50; i++) {
+>             float cpuDist = CSharpAStar(testGrid, starts[i], goals[i]);
+>             float gpuDist = gpuResults[i];
+>             bool cpuReachable = cpuDist < 1e8f;
+>             bool gpuReachable = gpuDist < 1e8f;
+>
+>             if (cpuReachable != gpuReachable) {
+>                 Debug.LogError($"Query {i}: CPU reachable={cpuReachable}, "
+>                     + $"GPU reachable={gpuReachable}");
+>                 mismatches++;
+>             } else if (cpuReachable &&
+>                        Mathf.Abs(cpuDist - gpuDist) > 0.1f) {
+>                 Debug.LogWarning($"Query {i}: CPU dist={cpuDist:F2}, "
+>                     + $"GPU dist={gpuDist:F2}, diff={Mathf.Abs(cpuDist-gpuDist):F2}");
+>                 mismatches++;
+>             }
+>         }
+>
+>         Debug.Log($"Validation: {50 - mismatches}/50 queries match. "
+>             + $"Mismatches: {mismatches}");
+>         Assert.AreEqual(0, mismatches, "GPU results must match CPU reference");
+>     }
+> }
+> ```
+
+> [!tip]- 练习 4 参考答案（进阶）
+> ```cpp
+> // HPA* 两级 GPU 寻路
+> class HierarchicalGPUPathfinder {
+>     Grid& fineGrid;    // 原始 64×64 网格
+>     int clusterSize;   // 8 — 每个 cluster 8×8 格
+>     int coarseW, coarseH; // 抽象图层级: 8×8
+>
+>     // 抽象图：cluster 之间的连接 + 边界距离
+>     std::vector<float> coarseDist; // 抽象图层级距离
+>     std::vector<int>   coarseEdge; // 抽象图边
+>
+> public:
+>     HierarchicalGPUPathfinder(Grid& g, int cs)
+>         : fineGrid(g), clusterSize(cs),
+>           coarseW((g.w + cs - 1) / cs),
+>           coarseH((g.h + cs - 1) / cs) {}
+>
+>     // Phase 1: GPU 计算抽象图层级距离（批量处理所有查询的粗路径）
+>     void compute_coarse_level(const std::vector<PathQuery>& queries,
+>                               std::vector<Point>& coarse_paths) {
+>         // 将起点/终点映射到抽象图节点
+>         std::vector<Point> coarse_starts, coarse_goals;
+>         for (auto& q : queries) {
+>             coarse_starts.push_back({q.start.x / clusterSize,
+>                                      q.start.y / clusterSize});
+>             coarse_goals.push_back({q.goal.x / clusterSize,
+>                                     q.goal.y / clusterSize});
+>         }
+>
+>         // GPU wavefront Dijkstra 在 8×8 抽象图上运行
+>         // 8×8 = 64 节点，每查询 64 线程 → 极快
+>         // coarse_paths = gpu_dijkstra_batch(coarseGrid, ...);
+>     }
+>
+>     // Phase 2: 在粗路径约束下，GPU 细化细节路径
+>     void refine_coarse_paths(const std::vector<PathQuery>& queries,
+>                              const std::vector<Point>& coarse_paths,
+>                              std::vector<PathQuery>& results) {
+>         // 对每个查询，抽象路径通过的 cluster 列表
+>         // 将 Dijkstra 搜索限制在这些 cluster 内（而非整个 64×64 网格）
+>         // 搜索空间从 4096 格降至 ~128 格（2-3 个 cluster）
+>     }
+> };
+> ```
+>
+> **加速比分析**：原始 GPU Dijkstra 对 64×64 网格需要 ~64+64=128 轮 wavefront。HPA* 两级：(1) 8×8 抽象图 16 轮 + (2) ~3 个 cluster 的局部细化 16 轮 = 32 轮。每轮工作量也减少（抽象图 64 节点 vs 4096）。总体加速约 4-6×。
+
+> [!tip]- 练习 5 参考答案（进阶）
+> ```hlsl
+> // 修改 HLSL: Tile 策略——分批加载到 shared memory
+> #define TILE_SIZE 8
+> groupshared float g_tileDist[TILE_SIZE][TILE_SIZE];
+> groupshared bool  g_tileChanged;
+>
+> [numthreads(TILE_SIZE, TILE_SIZE, 1)]
+> void CSMain_Tiled(uint3 id : SV_DispatchThreadID, uint3 groupId : SV_GroupID,
+>                   uint3 gtid : SV_GroupThreadID) {
+>     uint queryIdx = groupId.x;
+>     int4 query = _Queries[queryIdx];
+>
+>     int gx = gtid.x, gy = gtid.y;
+>
+>     // 1) 将全局网格的 tile [baseX, baseY] 加载到 shared memory
+>     int tileBaseX = groupId.y * TILE_SIZE;
+>     int tileBaseY = groupId.z * TILE_SIZE;
+>     int globalX = tileBaseX + gx;
+>     int globalY = tileBaseY + gy;
+>
+>     if (globalX < _MapWidth && globalY < _MapHeight)
+>         g_tileDist[gx][gy] = (globalX == query.x && globalY == query.y)
+>             ? 0.0f : 1e10f;
+>     GroupMemoryBarrierWithGroupSync();
+>
+>     // 2) Tile 内部充分传播（多次子迭代，无全局同步）
+>     for (int sub = 0; sub < TILE_SIZE * 2; sub++) {
+>         g_tileChanged = false;
+>         GroupMemoryBarrierWithGroupSync();
+>
+>         if (gx < TILE_SIZE && gy < TILE_SIZE &&
+>             globalX < _MapWidth && globalY < _MapHeight) {
+>             float cur = g_tileDist[gx][gy];
+>             // 4 方向（仅 tile 内部邻居）
+>             for (int d = 0; d < 4; d++) {
+>                 int nx = (int)gx + DIRS[d].x;
+>                 int ny = (int)gy + DIRS[d].y;
+>                 if (nx >= 0 && nx < TILE_SIZE && ny >= 0 && ny < TILE_SIZE) {
+>                     float nd = g_tileDist[nx][ny];
+>                     if (nd < 1e9f) {
+>                         float newDist = nd + 1.0f; // 简化代价
+>                         if (newDist < cur) {
+>                             InterlockedMin(asuint(g_tileDist[gx][gy]),
+>                                            asuint(newDist));
+>                             g_tileChanged = true;
+>                         }
+>                     }
+>                 }
+>             }
+>         }
+>         GroupMemoryBarrierWithGroupSync();
+>         if (!g_tileChanged) break;
+>     }
+>
+>     // 3) 写回全局内存 (atomicMin 到对应查询的距离 buffer)
+>     if (globalX < _MapWidth && globalY < _MapHeight) {
+>         float finalDist = g_tileDist[gx][gy];
+>         if (finalDist < 1e9f) {
+>             uint offset = queryIdx * _MapWidth * _MapHeight
+>                 + globalY * _MapWidth + globalX;
+>             InterlockedMin(_DistBuffer + offset, asuint(finalDist));
+>         }
+>     }
+> }
+> ```
+>
+> **性能对比**：tile 策略将全局同步次数从 O(W+H) 降至 O(tiles × TILE_SIZE)。对于 64×64 网格，原始方案需 ~128 次 `GroupMemoryBarrier`，tile 方案中每个 tile 内部 ~16 次子迭代，但 tile 间通过全局内存的 atomicMin 隐式同步。总开销更低，但需要多轮 tile 遍历（tile 边界值需要跨 tile 传播）。
+
+> [!tip]- 练习 6 参考答案（进阶）
+> ```csharp
+> // Unity 异步 GPU 回读管线
+> public class AsyncGPUPipeline : MonoBehaviour {
+>     public ComputeShader pathfindingShader;
+>     private ComputeBuffer _resultBuffer0, _resultBuffer1; // 双缓冲
+>     private bool _pendingReadback = false;
+>     private int _activeBuffer = 0;
+>     private AsyncGPUReadbackRequest _readbackRequest;
+>     private float[] _lastResults;
+>
+>     // Frame N: 提交 Dispatch
+>     public void RequestPathfinding(List<Vector2Int> starts,
+>                                    List<Vector2Int> goals) {
+>         if (_pendingReadback) {
+>             Debug.LogWarning("Previous request still in-flight");
+>             return;
+>         }
+>
+>         // 设置 shader 参数并 Dispatch
+>         SetupAndDispatch(starts, goals, _activeBuffer);
+>         _pendingReadback = true;
+>     }
+>
+>     // Frame N+1: 读取结果
+>     void Update() {
+>         if (!_pendingReadback) return;
+>
+>         if (!_readbackRequest.done) {
+>             // 结果未就绪 → 本帧使用上次结果（或继续等待）
+>             return;
+>         }
+>
+>         if (_readbackRequest.hasError) {
+>             Debug.LogError("GPU readback failed");
+>         } else {
+>             var data = _readbackRequest.GetData<float>();
+>             _lastResults = new float[data.Length];
+>             data.CopyTo(_lastResults);
+>             OnResultsReady(_lastResults);
+>         }
+>
+>         _pendingReadback = false;
+>         _activeBuffer = 1 - _activeBuffer; // 切换缓冲
+>     }
+>
+>     void OnResultsReady(float[] results) {
+>         // 本帧使用结果更新 agent 路径
+>         Debug.Log($"GPU results received: {results.Length} queries");
+>     }
+> }
+> ```
+>
+> **Pipeline 时序图：**
+> ```
+> Frame N:   [Setup] → [Dispatch GPU] ───→ [Render Frame N] → [End]
+> Frame N+1: [Start] → [GPU work done] → [Async Readback start]
+>             → [Render Frame N+1] → [Readback done] → [Apply results]
+>
+> 关键：Frame N 提交后，CPU 立即继续渲染 Frame N，GPU 在后台计算。
+> Frame N+1 CPU 不等待回读完成即可渲染。结果在 Frame N+1 末可用。
+> 总延迟：1 帧（vs 同步回读的 0.5-2ms stall）。
+> ```
+
+> [!tip]- 练习 7 参考答案（挑战）
+> ```hlsl
+> // GPU JPS 核心思想：每个线程沿一个方向"跳跃"直到撞墙或找到跳点
+> // 参考：Harabor & Grastien, "Parallel Jump Point Search on GPU", 2021
+>
+> // JPS 的 jump 操作——沿方向 d 递归跳跃
+> int2 Jump(int2 pos, int2 dir, int2 goal) {
+>     int2 next = pos + dir;
+>
+>     // 出界或撞墙 → 失败
+>     if (!IsWalkable(next.x, next.y)) return int2(-1, -1);
+>
+>     // 到达目标
+>     if (next.x == goal.x && next.y == goal.y) return next;
+>
+>     // 检查是否有强制邻居（forced neighbor）→ 找到跳点
+>     if (dir.x != 0) { // 水平移动
+>         // 检查对角方向是否有障碍迫使路径弯曲
+>         if ((!IsWalkable(pos.x, pos.y - 1) && IsWalkable(next.x, next.y - 1)) ||
+>             (!IsWalkable(pos.x, pos.y + 1) && IsWalkable(next.x, next.y + 1)))
+>             return next;
+>     } else { // 垂直移动
+>         if ((!IsWalkable(pos.x - 1, pos.y) && IsWalkable(next.x - 1, next.y)) ||
+>             (!IsWalkable(pos.x + 1, pos.y) && IsWalkable(next.x + 1, next.y)))
+>             return next;
+>     }
+>
+>     // 对角移动：检查水平和垂直分量是否产生跳点
+>     if (dir.x != 0 && dir.y != 0) {
+>         if (Jump(next, int2(dir.x, 0), goal).x != -1 ||
+>             Jump(next, int2(0, dir.y), goal).x != -1)
+>             return next;
+>     }
+>
+>     // 继续跳跃
+>     return Jump(next, dir, goal);
+> }
+>
+> // GPU 并行化策略：每个 warp/thread 处理一条射线
+> // 将 8 个方向分配给 8 个线程并行 jump
+> [numthreads(8, 1, 1)]
+> void JPS_Kernel(uint3 tid : SV_DispatchThreadID) {
+>     // 每个线程处理一个方向
+>     static const int2 ALL_DIRS[8] = {
+>         int2(0,-1), int2(1,-1), int2(1,0), int2(1,1),
+>         int2(0,1), int2(-1,1), int2(-1,0), int2(-1,-1)
+>     };
+>
+>     int2 dir = ALL_DIRS[tid.x];
+>     int2 result = Jump(_CurrentPos, dir, _Goal);
+>
+>     // 将找到的跳点写入共享缓冲区
+>     if (result.x != -1) {
+>         uint slot;
+>         InterlockedAdd(_JumpPointCount, 1, slot);
+>         _JumpPoints[slot] = result;
+>     }
+> }
+> ```
+>
+> **JPS 在 GPU 上的挑战**：(1) `Jump` 的递归深度不确定 → warp divergence——有的线程一步找到跳点，有的扫描 50 步； (2) 跳点产生的不规则性 → 下一轮 open set 大小不可预测 → 负载不均衡；(3) 解决方案：使用 warp-level 协作——warp 内 32 线程沿同一方向不同分段并行扫描，用 ballot 原语检测谁先找到跳点。或使用迭代而非递归，固定最大 jump 步数。
+
+> [!tip]- 练习 8 参考答案（挑战）
+> ```cpp
+> // 自适应调度器——根据查询批大小和地图特征选择算法
+> enum class Backend { CPU_AStar, CPU_MultiThread, GPU_Dijkstra };
+>
+> class AdaptivePathfindingScheduler {
+>     Grid& grid;
+>     int cpuCoreCount;
+>
+>     // 性能模型参数（通过离线 profiling 校准）
+>     float cpuAStar_usPerCell;     // CPU A* 每扩展节点的微秒数
+>     float cpuMT_overhead_us;      // 多线程调度开销
+>     float gpuDispatch_us;         // GPU dispatch 固定开销
+>     float gpuWavefront_us;        // GPU 每 wavefront 轮次的微秒数
+>
+> public:
+>     Backend select_backend(int queryCount, float mapDiameter) {
+>         // CPU A* 代价模型: queries × avg_nodes × cost_per_node
+>         float cpuCost = queryCount * mapDiameter * 10.0f * cpuAStar_usPerCell;
+>         float mtCost = cpuCost / cpuCoreCount + cpuMT_overhead_us;
+>
+>         // GPU 代价模型: dispatch + wavefront_rounds × cost_per_round
+>         float gpuCost = gpuDispatch_us + mapDiameter * gpuWavefront_us;
+>
+>         // 决策逻辑
+>         if (queryCount < 8) return Backend::CPU_AStar;
+>         if (queryCount < 50) {
+>             return (mtCost < cpuCost * 0.6f) ? Backend::CPU_MultiThread
+>                                               : Backend::CPU_AStar;
+>         }
+>         return (gpuCost < mtCost * 0.7f) ? Backend::GPU_Dijkstra
+>                                           : Backend::CPU_MultiThread;
+>     }
+>
+>     // 运行时自适应：监控实际性能并调整决策
+>     struct RuntimeStats {
+>         double lastCPUMs, lastGPUMs;
+>         int consecutiveGPUFailures = 0;
+>     } stats;
+>
+>     Backend adaptive_select(int queryCount, float mapDiameter) {
+>         Backend chosen = select_backend(queryCount, mapDiameter);
+>
+>         // 如果 GPU 连续失败（结果不正确），退回 CPU
+>         if (chosen == Backend::GPU_Dijkstra &&
+>             stats.consecutiveGPUFailures >= 3)
+>             return Backend::CPU_MultiThread;
+>
+>         // 如果 CPU 持续过载（>16ms），即使查询少也尝试 GPU
+>         if (chosen != Backend::GPU_Dijkstra &&
+>             stats.lastCPUMs > 16.0 && queryCount > 20)
+>             return Backend::GPU_Dijkstra;
+>
+>         return chosen;
+>     }
+> };
+> ```
+>
+> **设计要点**：(1) 决策阈值通过 profiling 校准——在目标平台上运行 benchmark 收集 `cpuAStar_usPerCell` 等参数；(2) GPU 查询批大小需 ≥ 32 才有收益（dispatch 固定开销 ~20μs）；(3) 地图大小影响 wavefront 轮数——`mapDiameter ≈ W+H`，对于小图（<32×32）GPU 优势消失；(4) 异构图寻路还需考虑 GPU 是否空闲——如果 GPU 正在渲染高负载场景，dispatch 延迟增加，此时退回 CPU。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **"Parallel A* Search on GPU"** (Bleiweiss, 2009): GPU 寻路的早期经典论文。讨论使用 CUDA 并行化 A* 的内部循环。https://doi.org/10.1109/IPDPS.2009.5161118

@@ -1213,6 +1213,101 @@ Repeater(forever)                                          ← Root
 - 使用 Parallel 的哪种策略？为什么？
 - 当扫描到新目标时，如何处理正在执行的 MoveTo？
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **(A) 行为树结构：**
+>
+> ```
+> Selector (根)
+> ├── Sequence (Priority 1: 追击/攻击玩家)
+> │   ├── Condition: HasPlayerTarget? (玩家在视野内)
+> │   └── Selector (战斗子树)
+> │       ├── Sequence (近战攻击)
+> │       │   ├── Condition: IsInMeleeRange?
+> │       │   └── Action: MeleeAttack
+> │       └── Action: ChasePlayer (向玩家移动)
+> ├── Sequence (Priority 2: 调查声音)
+> │   ├── Condition: HeardGunshot? (听到枪声)
+> │   └── Sequence (调查链)
+> │       ├── Action: MoveTo(soundPosition)
+> │       ├── Action: Wait(2.0) (停留观察 2 秒)
+> │       └── Action: ClearSoundFlag (清除声音标记)
+> └── Repeater(forever) (Priority 3: 默认巡逻)
+>     └── Sequence (巡逻一个循环)
+>         ├── Action: MoveToNextWaypoint
+>         └── Action: WaitAtWaypoint(1.0)
+> ```
+>
+> 说明几点设计决策：
+> - **Inverter** 的使用：如果"调查声音"需要在"没有看到玩家"时才进行，可在调查 Sequence 外层包裹 `Inverter(HasPlayerTarget?)`，语义为"没有看到玩家时 → 调查"。但更简洁的做法是将调查放在战斗之后——如果 HasPlayerTarget 为真，战斗子树已返回 Running/Success，Selector 不会到达调查子树。
+> - **Repeater(forever)** 包裹巡逻：确保巡逻 Sequence 完成后立即重新开始，Repeater 自身永远返回 Running。
+> - **"玩家脱离视野 5 秒 → 返回巡逻"**：由 Condition(HasPlayerTarget) 实现——一旦 HasPlayerTarget 返回 Failure，战斗 Sequence 失败，Selector fall-through 到调查或巡逻。如果需要 5 秒延迟，可用 UntilFailure 或自定义 Timeout Decorator 包裹 HasPlayerTarget 条件。
+>
+> **(B) 5 Tick 追踪表格：**
+>
+> | Tick | 事件 | 被评估的节点（按先后顺序） | 各节点返回值 | 最终行为 |
+> |:---:|------|---------------------------|------------|---------|
+> | 1 | 无事件 | Selector → Seq(战斗:HasTarget→F, 跳过) → Seq(调查:HeardGunshot→F, 跳过) → Repeater → Seq(巡逻) → MoveToNextWaypoint → Running | 战斗Seq=Failure, 调查Seq=Failure, 巡逻Seq=Running | **巡逻中** |
+> | 2 | 听到枪声 | Selector → Seq(战斗:HasTarget→F) → Seq(调查:HeardGunshot→**S**) → MoveTo(soundPos) → Running | 战斗Seq=Failure, MoveTo=Running | **向声源移动** |
+> | 3 | 移动中 + 看到玩家 | Selector → Seq(战斗:HasTarget→**S**) → Selector(战斗子树) → Seq(近战:IsInMeleeRange→F) → ChasePlayer → Running | 调查Seq 被跳过(Selector 停在战斗子树), Chase=Running | **追击玩家** |
+> | 4 | 追击中 | Selector → Seq(战斗:HasTarget→S) → Selector(战斗子树) → Seq(近战:IsInMeleeRange→F) → Chase(续) → Running | 同上 | **追击中** |
+> | 5 | 到达近战范围 | Selector → Seq(战斗:HasTarget→S) → Selector(战斗子树) → Seq(近战:IsInMeleeRange→**S**) → MeleeAttack → Running | MeleeAttack=Running | **近战攻击** |
+>
+> 注意 Tick 3 的关键行为：NPC 原本正在执行调查声音（MoveTo 返回 Running），但该帧 HasTarget 条件变为 Success——由于 Selector 的优先级机制，战斗子树在调查子树**左侧**（更高优先级），战斗条件满足时，调查子树完全被跳过。这意味着 NPC "听到枪声去调查"在路上看到玩家后，会立即**中断调查并追击**。这正是行为树"从根重新评估"带来的自动优先级抢占。
+
+> [!tip]- 练习 2 参考答案
+> **修改后的树结构（Cooldown 位置）：**
+>
+> ```
+> Selector (根)
+> ├── Sequence (Priority 1: 追击/攻击)
+> │   ├── Condition: HasPlayerTarget?
+> │   └── Selector (战斗子树)
+> │       ├── Sequence (近战攻击 — 带 Cooldown)
+> │       │   ├── Condition: IsInMeleeRange?
+> │       │   └── Cooldown(2.0)              ← 攻击后 2 秒冷却
+> │       │       └── Action: MeleeAttack
+> │       └── Action: ChasePlayer
+> ├── ... (调查、巡逻子树不变)
+> ```
+>
+> **分析：NPC 攻击后 1 秒，玩家仍在近战范围的情况**
+>
+> - 帧 N: MeleeAttack 返回 Success（攻击完成）→ Cooldown 记录 `lastSuccessTime = Time.now`，Cooldown 返回 Success → 近战 Sequence 返回 Success → Selector(战斗子树) 返回 Success → 战斗 Sequence 返回 Success → 根 Selector 返回 Success。
+> - 帧 N+1: 根 Selector 重新评估。
+>   - HasTarget → Success
+>   - Selector(战斗子树): IsInMeleeRange → Success → Cooldown 检查：`Time.now - lastSuccessTime < 2.0` → **Cooldown 直接返回 Failure**（跳过 MeleeAttack）→ 近战 Sequence 返回 Failure → Selector(战斗子树) fall-through 到 ChasePlayer → ChasePlayer 返回 Running。
+>   - 根 Selector 停在战斗子树，返回 Running。
+> - **结论**：攻击 Action 不被 tick。NPC 不会攻击，而是进入追击状态——但因为玩家在近战范围内，ChasePlayer 可能表现为"面向玩家但不再攻击"（或迅速成功，导致 Selector fall-through 到巡逻，取决于 Chase 的实现）。
+> - 设计影响：Cooldown 放在近战 Sequence 内部，导致冷却期间 IsInMeleeRange 条件满足但攻击被阻止，Selector fall-through 到 ChasePlayer。如果期望冷却期间 NPC 站立不动（保持锁定），应在 Cooldown 下包裹"站立等待" Action，或在近战 Sequence 外层用不同方式组织。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Parallel 移动 + 扫描子树：**
+>
+> ```
+> Sequence (追击链)
+> ├── Condition: HasPlayerTarget?
+> └── Parallel (策略: SucceedOnOne — 任一子节点成功即整体成功)
+>     ├── Action: MoveTo(playerPosition)    ← 主任务
+>     └── Sequence (后台扫描)
+>         ├── Action: Wait(0.3)             ← 每 0.3 秒扫描一次
+>         ├── Condition: HasNewCloserTarget? ← 扫描到新目标
+>         └── Action: SwitchTarget          ← 切换目标
+> ```
+>
+> **策略选择**：使用 `SucceedOnOne` 策略。当 `SwitchTarget` 返回 Success 时，Parallel 整体返回 Success，追击 Sequence 也成功——下一帧重新从根评估，使用新目标进入追击。同时 `MoveTo` 被 Parallel 终止（OnAbort 被调用）——因为 Parallel 在任一子节点成功时就停止所有子节点。
+>
+> **扫描到新目标时处理 MoveTo：**
+> 1. Parallel 在 SwitchTarget 返回 Success 时调用 `MoveTo.OnAbort()`。
+> 2. MoveTo 的 OnAbort 实现应当：保存当前移动进度（Blackboard 记录已走过路径）或直接重置（丢弃当前移动），取决于设计需求。通常 RTS 中直接重新寻路到新目标是合理的。
+> 3. Parallel 返回 Success → 上游 Sequence 也 Success → 下一帧根重新评估，追击 Sequence 重新 tick，MoveTo 从新目标开始移动。
+>
+> **替代方案**：使用 `MainTask + Background` 策略，指定 MoveTo 为主任务。ScanSequence 作为后台永久运行（Wait + Condition + Action 循环）。当 ScanSequence 检测到更近目标时，不返回 Success（不终止 Parallel），而是通过 Blackboard 更新 `currentTarget`，让 MoveTo 自然切换到新目标位置。这避免了移动中断，更流畅。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

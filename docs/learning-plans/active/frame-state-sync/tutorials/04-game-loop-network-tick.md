@@ -1896,6 +1896,194 @@ print(f"策略B (最小RTT): {best_offset:.2f}ms, 误差: {abs(best_offset - TRU
 - 策略 B 的误差在 80% 的情况下小于或等于策略 A
 - 能解释为什么策略 B 更好（RTT 越小 → 网络越对称 → offset 估算越准）
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 以下是用 Python 实现的固定步长游戏循环，包含追赶限制和渲染插值：
+>
+> ```python
+> import time
+>
+> LOGIC_DT = 1.0 / 30.0       # 33.33ms
+> MAX_CATCHUP = 4
+> SIMULATED_FPS = 60.0
+>
+> accumulator = 0.0
+> logic_time = 0.0
+> frame_count = 0
+>
+> def execute_logic_tick(tick_num):
+>     global logic_time
+>     logic_time += LOGIC_DT
+>
+> def render(alpha):
+>     pass  # 渲染插值
+>
+> # 模拟运行
+> for frame in range(200):
+>     # 大部分帧用正常 dt，第 10 帧模拟掉帧
+>     if frame == 10:
+>         dt = 0.080  # 80ms 掉帧
+>     else:
+>         dt = 1.0 / SIMULATED_FPS
+>
+>     accumulator += dt
+>     ticks = 0
+>     while accumulator >= LOGIC_DT and ticks < MAX_CATCHUP:
+>         accumulator -= LOGIC_DT
+>         execute_logic_tick(frame_count)
+>         frame_count += 1
+>         ticks += 1
+>
+>     if accumulator >= LOGIC_DT:
+>         # 追赶上限已达到，丢弃累积时间防止螺旋
+>         accumulator = 0.0
+>         print(f"WARNING: frame {frame} catchup limit reached, dt={dt:.3f}s")
+>
+>     alpha = accumulator / LOGIC_DT
+>     assert 0.0 <= alpha < 1.0, f"alpha={alpha} out of range"
+>     render(alpha)
+>
+> # 验证：掉帧场景下 ticks 应该等于 4
+> # 第 10 帧 dt=80ms: 80/33.33 = 2.4，所以执行 2 个逻辑帧，accumulator 剩余 ~13.3ms
+> # 实际 dt=80ms 时 80ms / 33.33ms ≈ 2.4，accumulator 循环 2 次后剩余 13.3ms
+> # 但如果之前的 accumulator 已有累积则可能更多。关键是要看到正确的追赶行为。
+> ```
+>
+> **C# 版本**（参考教程 2.1 节的 `NetworkTickManager`）：
+>
+> ```csharp
+> void Update() {
+>     _accumulator += Time.deltaTime;
+>     int ticks = 0;
+>     while (_accumulator >= _logicDt && ticks < MAX_CATCHUP) {
+>         _accumulator -= _logicDt;
+>         ExecuteLogicTick(_currentTick++);
+>         ticks++;
+>     }
+>     if (_accumulator >= _logicDt) {
+>         _accumulator = 0f;
+>         Debug.LogWarning("Frame catchup limit reached!");
+>     }
+>     float alpha = _accumulator / _logicDt;
+>     InterpolateRenderState(alpha);
+> }
+> ```
+>
+> **核心要点**：
+> - `accumulator` 累积渲染时间，追赶逻辑帧时消耗它
+> - `MAX_CATCHUP` 防止"死亡螺旋"——如果一帧耗时过长，追赶会产生更多追赶，导致帧率崩溃
+> - `alpha` 值始终在 [0, 1)，用于在两个逻辑帧状态之间做渲染插值
+> - 掉帧场景：accumulator ≥ LOGIC_DT 但 ticks 已耗尽 → 丢弃多余时间，打印 warning
+
+> [!tip]- 练习 2 参考答案
+> 环形缓冲区（Ring Buffer）实现：
+>
+> ```csharp
+> public class RingBuffer<T> {
+>     private const int BUFFER_SIZE = 64;
+>     private readonly T?[] _buffer = new T?[BUFFER_SIZE];
+>     private uint _bufferStart = 0;  // 最老的有效帧号
+>     private uint _bufferEnd = 0;    // 下一个可写入的帧号
+>
+>     public bool WriteInput(uint frameNo, T data) {
+>         // 帧号小于 bufferStart：已过期
+>         if (IsBefore(frameNo, _bufferStart)) return false;
+>         // 帧号超出容量范围（bufferStart + 64）
+>         if (IsBefore(_bufferStart + BUFFER_SIZE, frameNo)) return false;
+>
+>         uint index = frameNo % BUFFER_SIZE;
+>         _buffer[index] = data;
+>
+>         // 更新有效范围
+>         if (IsBefore(_bufferEnd, frameNo + 1))
+>             _bufferEnd = frameNo + 1;
+>         return true;
+>     }
+>
+>     public T? TryReadInput(uint frameNo) {
+>         if (IsBefore(frameNo, _bufferStart)) return default;
+>         if (!IsBefore(frameNo, _bufferEnd)) return default;
+>         return _buffer[frameNo % BUFFER_SIZE];
+>     }
+>
+>     public void AdvanceStart(uint frameNo) {
+>         // 只前进不后退
+>         if (IsBefore(_bufferStart, frameNo))
+>             _bufferStart = frameNo;
+>     }
+>
+>     // 处理 uint32 回绕的比较：使用有符号差值技巧
+>     // a < b (考虑回绕) ⇔ (int)(a - b) < 0
+>     private static bool IsBefore(uint a, uint b)
+>         => (int)(a - b) < 0;
+> }
+> ```
+>
+> **关键设计**：
+> - `_bufferStart` 和 `_bufferEnd` 定义有效帧号窗口 [start, end)
+> - 模运算 `frameNo % BUFFER_SIZE` 做索引（要求 BUFFER_SIZE 是 2 的幂时可用位与优化）
+> - `IsBefore` 用 `(int)(a - b) < 0` 处理 uint32 回绕——技巧来源于教程 1.7 节序列号比较
+> - `AdvanceStart(6)` 后 Read(5) 返回 null，因为帧 5 已不在有效窗口内
+> - 容量边界：Write(64) 时 `_bufferStart + 64` 不满足 `IsBefore` 条件 → 拒绝写入
+> - 帧号回绕测试：`0xFFFFFFFF` 写入后立即被 `0` 覆盖（`0 % 64 == 0xFFFFFFFF % 64`，且 `_bufferStart` 前进后 0xFFFFFFFF 变为过期）
+
+> [!tip]- 练习 3 参考答案
+> 完整的时间同步模拟与对比：
+>
+> ```python
+> import random
+>
+> TRUE_OFFSET = 100.0
+> MEAN_RTT = 50.0
+> STD_RTT = 20.0
+>
+> def simulate_one_sample():
+>     rtt = max(1, random.gauss(MEAN_RTT, STD_RTT))
+>     noise = random.gauss(0, rtt / 4)
+>     observed_offset = TRUE_OFFSET + noise
+>     return rtt, observed_offset
+>
+> def run_experiment(trials=1000):
+>     a_better = 0
+>     total_a_err = 0.0
+>     total_b_err = 0.0
+>
+>     for _ in range(trials):
+>         samples = [simulate_one_sample() for _ in range(8)]
+>
+>         # 策略 A：算术平均
+>         avg_a = sum(o for _, o in samples) / len(samples)
+>         err_a = abs(avg_a - TRUE_OFFSET)
+>
+>         # 策略 B：取 RTT 最小的前一半样本
+>         sorted_samples = sorted(samples, key=lambda x: x[0])
+>         half = max(1, len(sorted_samples) // 2)
+>         avg_b = sum(o for _, o in sorted_samples[:half]) / half
+>         err_b = abs(avg_b - TRUE_OFFSET)
+>
+>         total_a_err += err_a
+>         total_b_err += err_b
+>         if err_b <= err_a:
+>             a_better += 1  # 注意：这里统计 B ≤ A 的情况
+>
+>     print(f"策略A 平均误差: {total_a_err/trials:.2f}ms")
+>     print(f"策略B 平均误差: {total_b_err/trials:.2f}ms")
+>     print(f"策略B ≤ 策略A 的比例: {a_better/trials*100:.1f}%")
+>
+> run_experiment()
+> ```
+>
+> **为什么策略 B 更好**：
+> - 时间同步的核心假设是**网络路径对称**——请求和响应的延迟各占 RTT 的一半
+> - RTT 越小的样本，说明网络越不拥塞，排队延迟越小，路径更接近对称
+> - RTT 大的样本通常包含路由器排队延迟，这种延迟往往是非对称的（去程和回程排队不同）
+> - 过滤掉高 RTT 样本相当于**排除排队噪声**，保留接近真实物理延迟的样本
+> - 这是 NTP 协议中"时钟过滤算法"的简化版本——NTP 也是取最近 8 个样本中延迟最小的几个来估算 offset
+> - 策略 A 将所有样本平等对待，被高延迟异常值拉偏
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

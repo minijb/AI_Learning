@@ -191,6 +191,210 @@ operator delete(raw);  // 只释放内存
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **编译器调用带 `align_val_t` 版本的时机：**
+>
+> 当类型的对齐要求超过 `__STDCPP_DEFAULT_NEW_ALIGNMENT__`（通常是 `alignof(std::max_align_t)`，在 x86-64 上为 16）时，编译器自动选择对齐感知的 `operator new` 重载。例如：`alignas(64)` 的类型 → `operator new(size, align_val_t{64})`。
+>
+> ```cpp
+> #include <cstddef>
+> #include <cstdlib>
+> #include <iostream>
+> #include <new>
+>
+> // 对齐感知的 operator new（C++17）
+> void* operator new(std::size_t size, std::align_val_t al) {
+>     std::cout << "[aligned new] size=" << size
+>               << " align=" << static_cast<std::size_t>(al) << "\n";
+>     void* p = std::aligned_alloc(static_cast<std::size_t>(al), size);
+>     if (!p) throw std::bad_alloc{};
+>     return p;
+> }
+>
+> void operator delete(void* p, std::align_val_t al) noexcept {
+>     std::cout << "[aligned delete] align="
+>               << static_cast<std::size_t>(al) << "\n";
+>     std::free(p);
+> }
+>
+> // 也需重载普通版本（否则非对齐的 new 会找不到）
+> void* operator new(std::size_t size) {
+>     std::cout << "[normal new] size=" << size << "\n";
+>     void* p = std::malloc(size);
+>     if (!p) throw std::bad_alloc{};
+>     return p;
+> }
+> void operator delete(void* p) noexcept {
+>     std::cout << "[normal delete]\n";
+>     std::free(p);
+> }
+>
+> struct alignas(64) OverAligned {
+>     int data[16];
+> };
+>
+> struct Normal {
+>     int data[4];
+> };
+>
+> int main() {
+>     std::cout << "alignof(OverAligned) = "
+>               << alignof(OverAligned) << "\n";
+>     auto* oa = new OverAligned{};
+>     delete oa;
+>
+>     std::cout << "alignof(Normal) = "
+>               << alignof(Normal) << "\n";
+>     auto* n = new Normal{};
+>     delete n;
+>     return 0;
+> }
+> ```
+>
+> **输出示例：**
+> ```
+> alignof(OverAligned) = 64
+> [aligned new] size=64 align=64
+> [aligned delete] align=64
+> alignof(Normal) = 4
+> [normal new] size=16
+> [normal delete]
+> ```
+>
+> **关键点：** 触发条件 = `alignof(T) > alignof(std::max_align_t)`。这是 C++17 引入的核心特性——在此之前，`new` 无法保证超对齐类型的对象分配在正确的对齐边界上。
+
+> [!tip]- 练习 2 参考答案
+> **第一段代码（`operator new` + `operator delete`）（只分配/释放内存）：**
+> - 只获取了一块 `sizeof(int) * 10` 字节的原始内存
+> - **没有调用任何 `int` 的构造函数** → 这片内存中的 `int` 对象从未开始它们的生命周期
+> - 读取 `raw` 指向的内存是 UB（对象不存在）
+> - `operator delete` **不调用析构函数**，只归还内存
+>
+> **对比 `int* p = new int[10]; delete[] p;`：**
+> - `new int[10]` 做了两件事：(1) 调用 `operator new[]` 分配 40 字节，(2) 对 10 个 `int` 调用默认构造函数（对 `int` 来说是不做任何事的 trivial 构造，但标准说对象生命周期开始了）
+> - `delete[] p` 也做两件事：(1) 对 10 个 `int` 调用析构函数（trivial，无操作），(2) 调用 `operator delete[]` 释放内存
+>
+> **反过来——先 `new int[10]` 再 `operator delete(p)`：**
+> - `new int[10]` 让 10 个 `int` 对象的生命周期开始
+> - `operator delete(p)` 只释放内存，**不调用析构函数**
+> - 对 `int` 这没问题（析构函数是 trivial 的），所以"碰巧"正确
+> - 但对非平凡类型后果严重：析构函数被跳过 → 资源泄漏/UB
+> - 更危险的是：`operator delete` 接收的地址必须和 `operator new` 返回的地址**完全相同**。`new[]` 对非平凡类型可能存储 cookie 在返回指针之前，`operator delete(p)` 接收的是用户指针而非 `operator new` 返回的原始块地址 → 堆损坏
+>
+> **总结：永远配对使用。** `new` ↔ `delete`，`new[]` ↔ `delete[]`，`operator new` ↔ `operator delete`。混搭是 UB，即使看起来"能跑"。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // leak_tracker.h —— 轻量级内存泄漏追踪器
+> #pragma once
+> #include <cstddef>
+> #include <cstdlib>
+> #include <cstring>
+> #include <cstdio>
+>
+> namespace leak_tracker {
+>
+> struct AllocEntry {
+>     const char* file;
+>     int         line;
+>     size_t      size;
+>     AllocEntry* next;
+> };
+>
+> static AllocEntry* g_head = nullptr;
+>
+> // 链表头插法：每次分配插入一个追踪节点
+> inline void track_alloc(void* ptr, size_t size, const char* file, int line) {
+>     // 将追踪信息存储到分配的内存之前
+>     auto* entry = static_cast<AllocEntry*>(ptr);
+>     entry->file = file;
+>     entry->line = line;
+>     entry->size = size;
+>     entry->next = g_head;
+>     g_head = entry;
+> }
+>
+> inline void track_free(void* ptr) {
+>     // 从链表中移除
+>     auto* entry = static_cast<AllocEntry*>(ptr);
+>     if (g_head == entry) {
+>         g_head = entry->next;
+>     } else {
+>         for (auto* p = g_head; p; p = p->next) {
+>             if (p->next == entry) {
+>                 p->next = entry->next;
+>                 break;
+>             }
+>         }
+>     }
+> }
+>
+> inline void report_leaks() {
+>     if (!g_head) {
+>         std::printf("[leak_tracker] No leaks detected.\n");
+>         return;
+>     }
+>     std::printf("[leak_tracker] === LEAKS DETECTED ===\n");
+>     size_t total = 0;
+>     for (auto* p = g_head; p; p = p->next) {
+>         std::printf("  %s:%d: %zu bytes (addr=%p)\n",
+>                     p->file, p->line, p->size,
+>                     static_cast<char*>(static_cast<void*>(p)) + sizeof(AllocEntry));
+>         total += p->size;
+>     }
+>     std::printf("[leak_tracker] Total: %zu bytes in %zu blocks.\n", total, /* count omitted for brevity */ size_t{});
+> }
+>
+> } // namespace leak_tracker
+>
+> // 重载 operator new：在用户请求的 size 之前分配追踪头
+> void* operator new(std::size_t size, const char* file, int line) {
+>     // 分配: [AllocEntry header][user data]
+>     void* raw = std::malloc(sizeof(leak_tracker::AllocEntry) + size);
+>     if (!raw) throw std::bad_alloc{};
+>     leak_tracker::track_alloc(raw, size, file, line);
+>     return static_cast<char*>(raw) + sizeof(leak_tracker::AllocEntry);
+> }
+>
+> void* operator new[](std::size_t size, const char* file, int line) {
+>     return operator new(size, file, line);
+> }
+>
+> void operator delete(void* ptr) noexcept {
+>     if (!ptr) return;
+>     void* raw = static_cast<char*>(ptr) - sizeof(leak_tracker::AllocEntry);
+>     leak_tracker::track_free(raw);
+>     std::free(raw);
+> }
+>
+> void operator delete[](void* ptr) noexcept {
+>     operator delete(ptr);
+> }
+>
+> // 宏：在调用处捕获 __FILE__ 和 __LINE__
+> #define TRACK_NEW new(__FILE__, __LINE__)
+>
+> // 自动注册退出时报告
+> namespace {
+>     struct AutoReporter { ~AutoReporter() { leak_tracker::report_leaks(); } };
+>     AutoReporter g_reporter;
+> }
+> ```
+>
+> **使用方式：** 在所有 `.cpp` 文件中 `#include "leak_tracker.h"`，用 `TRACK_NEW` 替代 `new`（例如 `auto* p = TRACK_NEW int[10];`），用普通 `delete` 释放。程序退出时自动打印未释放的块。
+>
+> **局限性（为什么实际中用 ASan/Valgrind）：**
+> - 只追踪通过 `TRACK_NEW` 的分配，不追踪 `malloc`/`new`（无文件行号的 `new`）
+> - 重载 `operator delete` 影响了全局，但未重载 `operator delete(void*, size_t)` 的 sized-deallocation 版本
+> - 不处理 `std::nothrow` 版本、`align_val_t` 版本
+> - 线程安全需要加锁（本简化版未加）
+> - 实际生产代码应使用 AddressSanitizer (`-fsanitize=address`) 或 Valgrind
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [cppreference — new expression](https://en.cppreference.com/w/cpp/language/new)

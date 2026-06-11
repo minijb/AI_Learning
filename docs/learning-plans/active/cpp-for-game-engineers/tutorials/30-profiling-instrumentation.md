@@ -773,6 +773,688 @@ private:
 4. 提出并且实现至少一个基于剖析发现的优化
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：构建可工作的作用域剖析器
+> ```cpp
+> #include <chrono>
+> #include <cstring>
+> #include <cstdio>
+> #include <atomic>
+> #include <array>
+> #include <thread>
+> #include <vector>
+> #include <algorithm>
+> #include <unordered_map>
+> #include <iomanip>
+> #include <iostream>
+> #include <string>
+> #include <memory>
+> #include <random>
+> 
+> // ========== 剖析事件 ==========
+> struct ProfilerEvent {
+>     const char* name;
+>     uint64_t    startUs;
+>     uint64_t    durationUs;
+>     uint32_t    threadId;
+>     uint32_t    depth;       // 嵌套深度（用于缩进输出）
+>     uint32_t    parentIdx;   // 父事件的索引（用于 parent/child 报告）
+> };
+> 
+> // ========== 每线程环形缓冲区 ==========
+> class ThreadProfilerBuffer {
+>     static constexpr size_t BUFFER_SIZE = 1024 * 64;
+> public:
+>     void record(const ProfilerEvent& event) {
+>         size_t idx = writePos_.load(std::memory_order_relaxed);
+>         buffer_[idx % BUFFER_SIZE] = event;
+>         writePos_.store(idx + 1, std::memory_order_release);
+>     }
+>     size_t flush(std::vector<ProfilerEvent>& out) {
+>         size_t end = writePos_.load(std::memory_order_acquire);
+>         size_t start = end > BUFFER_SIZE ? end - BUFFER_SIZE : 0;
+>         if (start <= readPos_) return 0;
+>         start = std::max(start, readPos_);
+>         size_t count = end - start;
+>         out.reserve(out.size() + count);
+>         for (size_t i = start; i < end; ++i) {
+>             out.push_back(buffer_[i % BUFFER_SIZE]);
+>         }
+>         readPos_ = end;
+>         return count;
+>     }
+> private:
+>     std::array<ProfilerEvent, BUFFER_SIZE> buffer_;
+>     std::atomic<size_t> writePos_{0};
+>     size_t readPos_ = 0;
+> };
+> 
+> // ========== 全局剖析器 ==========
+> class Profiler {
+> public:
+>     static Profiler& instance() {
+>         static Profiler p;
+>         return p;
+>     }
+> 
+>     // 作用域计时器
+>     class ScopedZone {
+>     public:
+>         ScopedZone(const char* name) : name_(name) {
+>             start_ = nowUs();
+>             depth_ = getThreadDepth();
+>             setThreadDepth(depth_ + 1);
+>         }
+>         ~ScopedZone() {
+>             setThreadDepth(depth_);
+>             auto duration = nowUs() - start_;
+>             Profiler::instance().record({
+>                 name_, start_, duration,
+>                 getThreadId(), depth_,
+>                 0  // parentIdx 由 endFrame 填充
+>             });
+>         }
+>         ScopedZone(const ScopedZone&) = delete;
+>         ScopedZone& operator=(const ScopedZone&) = delete;
+>     private:
+>         const char* name_;
+>         uint64_t start_;
+>         uint32_t depth_;
+>     };
+> 
+>     void record(const ProfilerEvent& event) {
+>         getThreadBuffer().record(event);
+>     }
+> 
+>     // 每帧调用一次：聚合所有线程数据
+>     void endFrame() {
+>         std::vector<ProfilerEvent> allEvents;
+>         for (auto& buf : threadBuffers_) {
+>             if (buf) buf->flush(allEvents);
+>         }
+>         if (allEvents.empty()) return;
+> 
+>         // 聚合：按名称统计
+>         frameData_.clear();
+>         for (const auto& e : allEvents) {
+>             auto& entry = frameData_[e.name];
+>             entry.name = e.name;
+>             entry.count++;
+>             entry.totalUs += e.durationUs;
+>             entry.minUs = std::min(entry.minUs, e.durationUs);
+>             entry.maxUs = std::max(entry.maxUs, e.durationUs);
+>             entry.medianSamples.push_back(e.durationUs);
+>         }
+> 
+>         // 计算中位数
+>         for (auto& [_, v] : frameData_) {
+>             std::sort(v.medianSamples.begin(), v.medianSamples.end());
+>             if (!v.medianSamples.empty()) {
+>                 v.medianUs = v.medianSamples[v.medianSamples.size() / 2];
+>             }
+>         }
+> 
+>         // 构建 parent/child 关系
+>         buildHierarchy(allEvents);
+> 
+>         // 排序后输出
+>         printFrameReport(allEvents);
+>     }
+> 
+>     struct AggregatedEntry {
+>         const char* name;
+>         size_t count = 0;
+>         uint64_t totalUs = 0;
+>         uint64_t minUs = UINT64_MAX;
+>         uint64_t maxUs = 0;
+>         uint64_t medianUs = 0;
+>         std::vector<uint64_t> medianSamples;
+>     };
+> 
+> private:
+>     Profiler() {
+>         for (auto& buf : threadBuffers_) {
+>             buf = std::make_unique<ThreadProfilerBuffer>();
+>         }
+>     }
+> 
+>     ThreadProfilerBuffer& getThreadBuffer() {
+>         thread_local static ThreadProfilerBuffer* tls = nullptr;
+>         if (!tls) {
+>             static std::atomic<int> nextIdx{0};
+>             int idx = nextIdx.fetch_add(1);
+>             if (idx < static_cast<int>(threadBuffers_.size())) {
+>                 tls = threadBuffers_[idx].get();
+>             }
+>         }
+>         return *tls;
+>     }
+> 
+>     static uint32_t getThreadDepth() {
+>         thread_local static uint32_t depth = 0;
+>         return depth;
+>     }
+>     static void setThreadDepth(uint32_t d) {
+>         thread_local static uint32_t depth = 0;
+>         depth = d;
+>     }
+> 
+>     void buildHierarchy(const std::vector<ProfilerEvent>& events) {
+>         hierarchy_.clear();
+>         // 简单实现：记录每个 zone 的 child time
+>         for (size_t i = 0; i < events.size(); ++i) {
+>             const auto& e = events[i];
+>             hierarchy_[e.name].selfUs += e.durationUs;
+> 
+>             // 查找父 zone（前一个 depth 更浅的事件）
+>             for (size_t j = i; j > 0; --j) {
+>                 if (events[j-1].depth < e.depth) {
+>                     hierarchy_[events[j-1].name].childUs += e.durationUs;
+>                     hierarchy_[e.name].parentName = events[j-1].name;
+>                     break;
+>                 }
+>             }
+>         }
+>     }
+> 
+>     void printFrameReport(const std::vector<ProfilerEvent>& events) {
+>         static int frameNum = 0;
+>         std::cout << "\n=== Frame " << ++frameNum << " Profile ===\n\n";
+> 
+>         // 表头
+>         std::cout << std::left  << std::setw(28) << "Zone"
+>                   << std::right << std::setw(8)  << "Count"
+>                   << std::setw(12) << "Total(us)"
+>                   << std::setw(10) << "Avg(us)"
+>                   << std::setw(10) << "Min(us)"
+>                   << std::setw(10) << "Max(us)"
+>                   << std::setw(12) << "Median(us)"
+>                   << std::setw(10) << "Self%"
+>                   << "\n" << std::string(100, '-') << "\n";
+> 
+>         uint64_t frameTotal = 0;
+>         for (const auto& e : events) frameTotal += e.durationUs;
+> 
+>         // 按总耗时排序
+>         std::vector<AggregatedEntry> sorted;
+>         for (const auto& [_, v] : frameData_) sorted.push_back(v);
+>         std::sort(sorted.begin(), sorted.end(),
+>             [](const auto& a, const auto& b) { return a.totalUs > b.totalUs; });
+> 
+>         for (const auto& e : sorted) {
+>             auto avg = e.totalUs / std::max(e.count, size_t(1));
+>             double selfPct = frameTotal > 0 ?
+>                 (100.0 * e.totalUs / frameTotal) : 0.0;
+> 
+>             // 嵌套缩进
+>             std::string indent(hierarchy_[e.name].depth * 2, ' ');
+>             std::cout << std::left  << std::setw(28) << (indent + e.name)
+>                       << std::right << std::setw(8)  << e.count
+>                       << std::setw(12) << e.totalUs
+>                       << std::setw(10) << avg
+>                       << std::setw(10) << e.minUs
+>                       << std::setw(10) << e.maxUs
+>                       << std::setw(12) << e.medianUs
+>                       << std::setw(9)  << std::fixed << std::setprecision(1)
+>                       << selfPct << "%\n";
+> 
+>             // Parent/child 详情
+>             auto& hi = hierarchy_[e.name];
+>             if (hi.parentName) {
+>                 std::cout << "  └─ parent: " << hi.parentName
+>                           << " | children total: " << hi.childUs << " us\n";
+>             }
+>         }
+>     }
+> 
+>     static uint64_t nowUs() {
+>         return std::chrono::duration_cast<std::chrono::microseconds>(
+>             std::chrono::high_resolution_clock::now().time_since_epoch()
+>         ).count();
+>     }
+>     static uint32_t getThreadId() {
+>         return static_cast<uint32_t>(
+>             std::hash<std::thread::id>{}(std::this_thread::get_id()) & 0xFFFFFFFF
+>         );
+>     }
+> 
+>     struct HierarchyInfo {
+>         const char* parentName = nullptr;
+>         uint64_t childUs = 0;
+>         uint64_t selfUs  = 0;
+>         uint32_t depth   = 0;
+>     };
+> 
+>     std::array<std::unique_ptr<ThreadProfilerBuffer>, 16> threadBuffers_;
+>     std::unordered_map<const char*, AggregatedEntry> frameData_;
+>     std::unordered_map<const char*, HierarchyInfo> hierarchy_;
+> };
+> 
+> // ========== 条件编译宏 ==========
+> #ifdef ENABLE_PROFILING
+>     #define PROFILE_SCOPE(name) Profiler::ScopedZone __zone(name)
+>     #define PROFILE_FUNCTION()  Profiler::ScopedZone __zone(__FUNCTION__)
+> #else
+>     #define PROFILE_SCOPE(name) ((void)0)
+>     #define PROFILE_FUNCTION()  ((void)0)
+> #endif
+> 
+> // ========== 集成到游戏循环 ==========
+> 
+> // 5 个不同的系统
+> void updatePhysics(float dt) {
+>     PROFILE_FUNCTION();
+>     // 模拟物理计算（加随机波动模拟性能波动）
+>     static std::mt19937 rng(42);
+>     int us = 2000 + (rng() % 1000);  // 2-3ms
+>     std::this_thread::sleep_for(std::chrono::microseconds(us));
+> }
+> 
+> void updateAI(float dt) {
+>     PROFILE_FUNCTION();
+>     static std::mt19937 rng(99);
+>     int us = 1500 + (rng() % 800);   // 1.5-2.3ms
+>     std::this_thread::sleep_for(std::chrono::microseconds(us));
+> }
+> 
+> void processAudio(float dt) {
+>     PROFILE_FUNCTION();
+>     std::this_thread::sleep_for(std::chrono::microseconds(500));  // 0.5ms
+> }
+> 
+> void renderScene(float dt) {
+>     PROFILE_FUNCTION();
+>     static std::mt19937 rng(123);
+>     int us = 5000 + (rng() % 3000);  // 5-8ms (最大热点)
+>     std::this_thread::sleep_for(std::chrono::microseconds(us));
+> }
+> 
+> void updateUI(float dt) {
+>     PROFILE_FUNCTION();
+>     std::this_thread::sleep_for(std::chrono::microseconds(300));  // 0.3ms
+> }
+> 
+> void gameLoop() {
+>     float dt = 1.0f / 60.0f;
+> 
+>     for (int frame = 0; frame < 5; ++frame) {
+>         {
+>             PROFILE_SCOPE("Frame");
+> 
+>             {
+>                 PROFILE_SCOPE("Update");
+>                 updatePhysics(dt);
+>                 updateAI(dt);
+>                 processAudio(dt);
+>             }
+> 
+>             {
+>                 PROFILE_SCOPE("Render");
+>                 renderScene(dt);
+>                 updateUI(dt);
+>             }
+>         }
+> 
+>         Profiler::instance().endFrame();
+>     }
+> }
+> 
+> // ========== 验证：Shipping 构建零开销 ==========
+> // 未定义 ENABLE_PROFILING 时：
+> //   PROFILE_SCOPE("Frame") → ((void)0) → 编译器优化掉
+> // 可通过 objdump/disassembly 验证无剖析相关代码
+> 
+> #define ENABLE_PROFILING
+> void demoProfiler() {
+>     std::cout << "Profiler demo: 5 frames with performance noise\n";
+>     gameLoop();
+> 
+>     std::cout << "\n=== Analysis ===\n";
+>     std::cout << "Expected hot spots:\n";
+>     std::cout << "  1. Render  (5-8ms)  ← usually the bottleneck\n";
+>     std::cout << "  2. Physics (2-3ms)\n";
+>     std::cout << "  3. AI      (1.5-2.3ms)\n";
+>     std::cout << "  4. Audio   (0.5ms)\n";
+>     std::cout << "  5. UI      (0.3ms)\n";
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：集成 Tracy 剖析器
+> ```cpp
+> // 注意：本答案展示 Tracy 集成模式，需要先下载 Tracy
+> // 参见 https://github.com/wolfpld/tracy
+> 
+> // ========== Tracy 集成包装 ==========
+> // 将此文件放在项目中，include Tracy.hpp 后使用
+> 
+> #ifdef TRACY_ENABLE
+>     #include "Tracy.hpp"
+> 
+>     // CPU 区域
+>     #define PROF_SCOPE(name)    ZoneScopedN(name)
+>     #define PROF_FUNCTION()     ZoneScoped
+>     #define PROF_FRAME_MARK     FrameMark
+> 
+>     // GPU 区域 (Vulkan 示例)
+>     #define PROF_GPU_SCOPE(ctx, name) TracyVkZone(ctx, name)
+> 
+>     // 自定义绘图
+>     #define PROF_PLOT(name, val)    TracyPlot(name, val)
+>     #define PROF_MESSAGE(txt)       TracyMessage(txt, strlen(txt))
+> 
+>     // 内存追踪
+>     #define PROF_ALLOC(ptr, size)   TracyAlloc(ptr, size)
+>     #define PROF_FREE(ptr)          TracyFree(ptr)
+> 
+>     // 锁追踪
+>     #define PROF_LOCKABLE(type, var) TracyLockable(type, var)
+> #else
+>     #define PROF_SCOPE(name)        ((void)0)
+>     #define PROF_FUNCTION()         ((void)0)
+>     #define PROF_FRAME_MARK         ((void)0)
+>     #define PROF_GPU_SCOPE(c, n)    ((void)0)
+>     #define PROF_PLOT(n, v)         ((void)0)
+>     #define PROF_MESSAGE(t)         ((void)0)
+>     #define PROF_ALLOC(p, s)        ((void)0)
+>     #define PROF_FREE(p)            ((void)0)
+>     #define PROF_LOCKABLE(t, v)     t v
+> #endif
+> 
+> // ========== 示例：引擎帧循环集成 Tracy ==========
+> #ifdef TRACY_ENABLE
+> 
+> static size_t activeEntities = 0;
+> static float  frameTimeMs    = 0.0f;
+> 
+> void engineFrameWithTracy() {
+>     PROF_FUNCTION();  // 自动命名为 engineFrameWithTracy
+> 
+>     // CPU 追踪
+>     {
+>         PROF_SCOPE("Physics Update");
+>         updatePhysics(0.016f);
+>     }
+>     {
+>         PROF_SCOPE("AI Update");
+>         updateAI(0.016f);
+>     }
+> 
+>     // GPU 追踪（Vulkan 示例）
+>     // PROF_GPU_SCOPE(gfxContext, "Shadow Pass");
+>     // renderShadows();
+>     // PROF_GPU_SCOPE(gfxContext, "Main Pass");
+>     // renderMainPass();
+> 
+>     // 实时绘图 — 在 Tracy 界面看到曲线
+>     PROF_PLOT("Frame Time (ms)", frameTimeMs);
+>     PROF_PLOT("Active Entities", static_cast<int64_t>(activeEntities));
+> 
+>     // 自定义消息
+>     if (frameTimeMs > 16.6f) {
+>         PROF_MESSAGE("Frame budget exceeded!");
+>     }
+> 
+>     PROF_FRAME_MARK;  // 标记帧边界
+> }
+> 
+> // ========== Tracy 服务端配置要点 ==========
+> // 1. 运行 Tracy profiler GUI (从 GitHub Releases 下载)
+> // 2. 应用启动时 Tracy 客户端自动连接
+> // 3. 实时查看: CPU zones, GPU timeline, memory allocations,
+> //    lock contention, context switches, plots
+> // 4. 可以保存 trace 文件 (.tracy) 离线分析
+> 
+> // ========== 优化工作流（Tracy 辅助） ==========
+> // 1. 运行应用 → Tracy 显示帧时间线
+> // 2. 点击长帧 → 展开 zone 树 → 找到最耗时 zone
+> // 3. 点击该 zone → 查看统计 (min/avg/max/median)
+> // 4. 查看调用栈 → 定位具体代码行
+> // 5. 修改代码 → 重新运行 → 对比帧时间
+> // 6. Tracy 的 "Compare traces" 功能可直接对比优化前后
+> 
+> #endif  // TRACY_ENABLE
+> ```
+
+> [!tip]- 可选挑战参考答案：全栈剖析（CPU + GPU + 内存 + 多线程）
+> ```cpp
+> #include <chrono>
+> #include <vector>
+> #include <string>
+> #include <thread>
+> #include <mutex>
+> #include <fstream>
+> #include <cstdint>
+> 
+> // ========== 1. GPU 计时器查询 ==========
+> class GPUProfiler {
+> public:
+>     struct GPUZone {
+>         const char* name;
+>         uint64_t startNs;
+>         uint64_t endNs;
+>     };
+> 
+>     void beginQuery(const char* name) {
+>         // Vulkan: vkCmdWriteTimestamp(cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool, idx*2);
+>         // OpenGL: glQueryCounter(queries_[idx].start, GL_TIMESTAMP);
+>         pendingQueries_.push_back({name, nowNs(), 0});
+>     }
+> 
+>     void endQuery(const char* name) {
+>         for (auto& q : pendingQueries_) {
+>             if (std::strcmp(q.name, name) == 0 && q.endNs == 0) {
+>                 q.endNs = nowNs();
+>                 completedQueries_.push_back(q);
+>                 return;
+>             }
+>         }
+>     }
+> 
+>     void endFrame() {
+>         std::cout << "\n=== GPU Timeline ===\n";
+>         for (const auto& q : completedQueries_) {
+>             double ms = (q.endNs - q.startNs) / 1e6;
+>             std::cout << "  GPU " << q.name << ": " << ms << " ms\n";
+>         }
+>         completedQueries_.clear();
+>         pendingQueries_.clear();
+>     }
+> 
+> private:
+>     static uint64_t nowNs() {
+>         return std::chrono::duration_cast<std::chrono::nanoseconds>(
+>             std::chrono::high_resolution_clock::now().time_since_epoch()
+>         ).count();
+>     }
+>     std::vector<GPUZone> pendingQueries_;
+>     std::vector<GPUZone> completedQueries_;
+> };
+> 
+> // ========== 2. 内存分配追踪 ==========
+> class MemoryTracker {
+> public:
+>     struct AllocRecord {
+>         void* ptr;
+>         size_t size;
+>         const char* file;
+>         int line;
+>         // 调用栈 (简化：只记录 3 层)
+>         void* stack[3];
+>     };
+> 
+>     static MemoryTracker& instance() {
+>         static MemoryTracker mt;
+>         return mt;
+>     }
+> 
+>     void recordAlloc(void* ptr, size_t size, const char* file, int line) {
+>         std::lock_guard lock(mutex_);
+>         AllocRecord rec{ptr, size, file, line, {}};
+>         // CaptureStackBackTrace (Windows) 或 backtrace() (Linux)
+> #ifdef _WIN32
+>         CaptureStackBackTrace(0, 3, rec.stack, nullptr);
+> #endif
+>         allocations_[ptr] = rec;
+>         totalAllocated_ += size;
+>     }
+> 
+>     void recordFree(void* ptr) {
+>         std::lock_guard lock(mutex_);
+>         auto it = allocations_.find(ptr);
+>         if (it != allocations_.end()) {
+>             totalAllocated_ -= it->second.size;
+>             allocations_.erase(it);
+>         }
+>     }
+> 
+>     void report() {
+>         std::lock_guard lock(mutex_);
+>         std::cout << "\n=== Memory Report ===\n";
+>         std::cout << "Active: " << allocations_.size() << " allocs, "
+>                   << totalAllocated_ << " bytes\n";
+>     }
+> 
+> private:
+>     std::unordered_map<void*, AllocRecord> allocations_;
+>     size_t totalAllocated_ = 0;
+>     std::mutex mutex_;
+> };
+> 
+> // ========== 3. 锁竞争检测 ==========
+> class LockProfiler {
+> public:
+>     struct LockRecord {
+>         const char* name;
+>         uint64_t waitUs;
+>         uint64_t holdUs;
+>         size_t contentionCount;
+>     };
+> 
+>     static LockProfiler& instance() {
+>         static LockProfiler lp;
+>         return lp;
+>     }
+> 
+>     void recordWait(const char* name, uint64_t waitUs) {
+>         std::lock_guard lock(mutex_);
+>         auto& rec = locks_[name];
+>         rec.name = name;
+>         rec.waitUs += waitUs;
+>         rec.contentionCount++;
+>     }
+> 
+>     void report() {
+>         std::lock_guard lock(mutex_);
+>         std::cout << "\n=== Lock Contention ===\n";
+>         for (const auto& [name, rec] : locks_) {
+>             std::cout << "  " << name << ": " << rec.contentionCount
+>                       << " contentions, " << rec.waitUs << " us waited\n";
+>         }
+>     }
+> 
+>     // RAII 包装器
+>     class ScopedLock {
+>     public:
+>         ScopedLock(const char* name, std::mutex& mtx) : name_(name), mtx_(mtx) {
+>             auto start = std::chrono::high_resolution_clock::now();
+>             mtx_.lock();
+>             auto end = std::chrono::high_resolution_clock::now();
+>             auto wait = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+>             if (wait > 0) {
+>                 LockProfiler::instance().recordWait(name_, wait);
+>             }
+>         }
+>         ~ScopedLock() { mtx_.unlock(); }
+>     private:
+>         const char* name_;
+>         std::mutex& mtx_;
+>     };
+> 
+> private:
+>     std::unordered_map<const char*, LockRecord> locks_;
+>     std::mutex mutex_;
+> };
+> 
+> // ========== 4. 火焰图输出（Chrome Tracing JSON 格式） ==========
+> class ChromeTracingWriter {
+> public:
+>     struct Event {
+>         std::string name;
+>         std::string cat;  // 分类
+>         char ph;           // 'B' = begin, 'E' = end, 'X' = complete
+>         uint64_t ts;       // 微秒时间戳
+>         uint64_t dur;      // 持续时间（仅 'X'）
+>         uint32_t pid;      // 进程 ID
+>         uint32_t tid;      // 线程 ID
+>     };
+> 
+>     void addEvent(const Event& e) { events_.push_back(e); }
+> 
+>     void save(const std::string& filename) {
+>         std::ofstream f(filename);
+>         f << "{\"traceEvents\":[\n";
+>         for (size_t i = 0; i < events_.size(); ++i) {
+>             const auto& e = events_[i];
+>             f << "  {\"name\":\"" << e.name << "\",";
+>             f << "\"cat\":\"" << e.cat << "\",";
+>             f << "\"ph\":\"" << e.ph << "\",";
+>             f << "\"ts\":" << e.ts << ",";
+>             if (e.ph == 'X') f << "\"dur\":" << e.dur << ",";
+>             f << "\"pid\":" << e.pid << ",";
+>             f << "\"tid\":" << e.tid << "}";
+>             if (i + 1 < events_.size()) f << ",";
+>             f << "\n";
+>         }
+>         f << "]}\n";
+>         std::cout << "Chrome tracing JSON saved to " << filename
+>                   << " — open chrome://tracing to view\n";
+>     }
+> 
+> private:
+>     std::vector<Event> events_;
+> };
+> 
+> // ========== 5. 综合分析示例 ==========
+> void fullStackProfilingDemo() {
+>     GPUProfiler gpu;
+>     ChromeTracingWriter chrome;
+> 
+>     for (int frame = 0; frame < 3; ++frame) {
+>         // CPU 追踪
+>         {
+>             PROFILE_SCOPE("Frame");
+> 
+>             // GPU 追踪（模拟）
+>             gpu.beginQuery("Shadow Pass");
+>             std::this_thread::sleep_for(std::chrono::milliseconds(2));
+>             gpu.endQuery("Shadow Pass");
+> 
+>             gpu.beginQuery("Main Pass");
+>             std::this_thread::sleep_for(std::chrono::milliseconds(6));
+>             gpu.endQuery("Main Pass");
+> 
+>             // Chrome tracing event
+>             chrome.addEvent({"Frame_" + std::to_string(frame), "cpu", 'X',
+>                              0, 8000, 1, 1});
+>         }
+> 
+>         Profiler::instance().endFrame();
+>         gpu.endFrame();
+>     }
+> 
+>     MemoryTracker::instance().report();
+>     LockProfiler::instance().report();
+>     chrome.save("trace.json");
+> 
+>     std::cout << "\n=== Optimization Report ===\n";
+>     std::cout << "Analysis: GPU Main Pass is the bottleneck (6ms)\n";
+>     std::cout << "Recommendation: reduce draw calls via instancing or occlusion culling\n";
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。剖析器的核心设计原则（无锁环形缓冲、RAII 作用域计时、条件编译零开销）是重点；Tracy 集成模式中宏包装层的 API 设计可灵活调整。
 
 ## 4. 扩展阅读
 

@@ -396,6 +396,334 @@ public partial struct DeathSystem : ISystem
 - Buff 过期后自动从 Buffer 中移除
 - 提示：使用 ECB 在 Job 完成后统一操作
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> // ========== Health.cs — 非托管组件 ==========
+> using Unity.Entities;
+>
+> public struct Health : IComponentData
+> {
+>     public float Current;
+>     public float Max;
+> }
+> ```
+>
+> ```csharp
+> // ========== DamageDealt.cs — Buffer Element ==========
+> using Unity.Entities;
+>
+> [InternalBufferCapacity(4)] // 预期每帧最多 4 次伤害事件
+> public struct DamageDealt : IBufferElementData
+> {
+>     public float Value;     // 伤害值
+>     public Entity Source;   // 伤害来源（可选）
+> }
+> ```
+>
+> ```csharp
+> // ========== DeadTag.cs — 零大小标签 ==========
+> using Unity.Entities;
+>
+> public struct DeadTag : IComponentData { }
+> // 空 struct，不占 Chunk 存储（零大小组件被特殊优化）
+> ```
+>
+> ```csharp
+> // ========== DamageSystem.cs ==========
+> using Unity.Burst;
+> using Unity.Entities;
+>
+> [BurstCompile]
+> public partial struct DamageSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<Health>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         var ecb = new EntityCommandBuffer(Unity.Collections.Allocator.Temp);
+>
+>         // 遍历所有有 Health + DamageDealt Buffer 的实体
+>         foreach (var (health, damageBuffer, entity) in
+>                  SystemAPI.Query<RefRW<Health>, DynamicBuffer<DamageDealt>>()
+>                      .WithEntityAccess())
+>         {
+>             float totalDamage = 0;
+>             // 累加所有待处理的伤害
+>             foreach (var dmg in damageBuffer)
+>                 totalDamage += dmg.Value;
+>
+>             health.ValueRW.Current -= totalDamage;
+>
+>             // 清零 Buffer（已处理所有伤害）
+>             damageBuffer.Clear();
+>
+>             // 死亡判定
+>             if (health.ValueRO.Current <= 0f)
+>             {
+>                 // 用 ECB 添加 DeadTag——在 Job 完成后统一执行
+>                 ecb.AddComponent<DeadTag>(entity);
+>             }
+>         }
+>
+>         ecb.Playback(state.EntityManager);
+>         ecb.Dispose();
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> **设计要点：**
+> - `DamageDealt` 用 Buffer 而非单组件——一帧内可能有多个伤害源（碰撞、AOE、DOT），Buffer 自然地累积
+> - `DeadTag` 是零大小 struct——不存储数据，仅用于 System 查询过滤（如 `RequireForUpdate<DeadTag>()`、`.WithNone<DeadTag>()`）
+> - 使用 ECB (`EntityCommandBuffer`) 做结构变更（添加/删除组件），避免在 Job 中直接修改 Entity 结构导致数据竞争
+> - `ecb.Playback` 在 `OnUpdate` 末尾统一执行，保证 Job 期间 Archetype 不变
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> // ========== Shield.cs — Enableable 可开关组件 ==========
+> using Unity.Entities;
+>
+> public struct Shield : IComponentData, IEnableableComponent
+> {
+>     public float ShieldAmount;     // 当前护盾值
+>     public float MaxShield;        // 最大护盾值
+>     public float RechargeDelay;    // 充能延迟（秒）
+>     public float RechargeTimer;    // 充能计时器
+> }
+> ```
+>
+> ```csharp
+> // ========== ShieldDamageSystem.cs ==========
+> using Unity.Burst;
+> using Unity.Entities;
+>
+> [BurstCompile]
+> public partial struct ShieldDamageSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float dt = SystemAPI.Time.DeltaTime;
+>
+>         foreach (var (health, damageBuffer, shield, entity) in
+>                  SystemAPI.Query<RefRW<Health>, DynamicBuffer<DamageDealt>,
+>                                 RefRW<Shield>>()
+>                      .WithEntityAccess())
+>         {
+>             float remainingDamage = 0;
+>             foreach (var dmg in damageBuffer)
+>                 remainingDamage += dmg.Value;
+>
+>             // 优先消耗护盾（只有当 Shield Enabled 时才会进入此查询）
+>             if (remainingDamage > 0 && shield.ValueRO.ShieldAmount > 0)
+>             {
+>                 float absorbed = math.min(shield.ValueRO.ShieldAmount, remainingDamage);
+>                 shield.ValueRW.ShieldAmount -= absorbed;
+>                 remainingDamage -= absorbed;
+>
+>                 // 护盾耗尽 → Disable
+>                 if (shield.ValueRW.ShieldAmount <= 0)
+>                 {
+>                     SystemAPI.SetComponentEnabled<Shield>(entity, false);
+>                     shield.ValueRW.RechargeTimer = shield.ValueRO.RechargeDelay;
+>                 }
+>             }
+>
+>             // 剩余伤害扣血
+>             health.ValueRW.Current -= remainingDamage;
+>             damageBuffer.Clear();
+>         }
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> ```csharp
+> // ========== ShieldRechargeSystem.cs ==========
+> using Unity.Burst;
+> using Unity.Entities;
+>
+> [BurstCompile]
+> public partial struct ShieldRechargeSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float dt = SystemAPI.Time.DeltaTime;
+>
+>         // 查询 Disabled 的 Shield——需要 IgnoreComponentEnabledState
+>         foreach (var (shield, entity) in
+>                  SystemAPI.Query<RefRW<Shield>>().WithEntityAccess()
+>                      .WithOptions(EntityQueryOptions.IgnoreComponentEnabledState))
+>         {
+>             if (SystemAPI.IsComponentEnabled<Shield>(entity))
+>                 continue; // 护盾还在，跳过
+>
+>             shield.ValueRW.RechargeTimer -= dt;
+>             if (shield.ValueRW.RechargeTimer <= 0f)
+>             {
+>                 // 5 秒后重新 Enable
+>                 shield.ValueRW.ShieldAmount = shield.ValueRO.MaxShield;
+>                 SystemAPI.SetComponentEnabled<Shield>(entity, true);
+>             }
+>         }
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> **Enableable 组件的核心机制：**
+> - `SystemAPI.Query<RefRW<Shield>>()` 默认只返回 Enabled 的 Shield → 伤害系统的查询自然只见到生效的护盾
+> - `SystemAPI.SetComponentEnabled<Shield>(entity, false)` 后，后续 System 的默认 Query 自动跳过此实体
+> - `.WithOptions(EntityQueryOptions.IgnoreComponentEnabledState)` 用于查询所有 Shield（含 Disabled），充能系统需要它来检测何时恢复
+> - 注意：`RefRW<T>` 写入 Chunk 是直接生效的，不需要 ECB
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> // ========== BuffElement.cs — Buffer Element ==========
+> using Unity.Entities;
+>
+> public enum BuffType : byte
+> {
+>     DamageUp,      // 伤害增加
+>     DamageDown,    // 伤害减少
+>     SpeedUp,       // 速度增加
+>     Invincible     // 无敌
+> }
+>
+> [InternalBufferCapacity(8)]
+> public struct BuffElement : IBufferElementData
+> {
+>     public BuffType Type;
+>     public float Value;      // 效果数值（百分比或绝对值）
+>     public float Duration;   // 剩余持续时间
+>
+>     // 判断是否过期
+>     public bool IsExpired => Duration <= 0f;
+> }
+> ```
+>
+> ```csharp
+> // ========== BuffSystem.cs — 管理 Buff 生命周期 ==========
+> using Unity.Burst;
+> using Unity.Entities;
+>
+> [BurstCompile]
+> public partial struct BuffSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float dt = SystemAPI.Time.DeltaTime;
+>         var ecb = new EntityCommandBuffer(Unity.Collections.Allocator.Temp);
+>
+>         foreach (var (buffers, entity) in
+>                  SystemAPI.Query<DynamicBuffer<BuffElement>>().WithEntityAccess())
+>         {
+>             // 递减所有 Buff 的持续时间
+>             for (int i = 0; i < buffers.Length; i++)
+>             {
+>                 var b = buffers[i];
+>                 b.Duration -= dt;
+>                 buffers[i] = b;
+>             }
+>
+>             // 移除过期的 Buff（倒序遍历避免索引错位）
+>             for (int i = buffers.Length - 1; i >= 0; i--)
+>             {
+>                 if (buffers[i].IsExpired)
+>                     buffers.RemoveAt(i);
+>             }
+>         }
+>
+>         ecb.Playback(state.EntityManager);
+>         ecb.Dispose();
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> ```csharp
+> // ========== 修改后的 DamageSystem — 应用 Buff 修改伤害 ==========
+> [BurstCompile]
+> public partial struct DamageSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         var ecb = new EntityCommandBuffer(Unity.Collections.Allocator.Temp);
+>
+>         foreach (var (health, damageBuffer, buffBuffer, entity) in
+>                  SystemAPI.Query<RefRW<Health>, DynamicBuffer<DamageDealt>,
+>                                 DynamicBuffer<BuffElement>>()
+>                      .WithEntityAccess())
+>         {
+>             float totalDamage = 0;
+>             foreach (var dmg in damageBuffer)
+>                 totalDamage += dmg.Value;
+>
+>             // ========== 应用 Buff 修改伤害 ==========
+>             float damageMultiplier = 1f;
+>             bool isInvincible = false;
+>             foreach (var buff in buffBuffer)
+>             {
+>                 switch (buff.Type)
+>                 {
+>                     case BuffType.DamageUp:
+>                         damageMultiplier *= (1f + buff.Value / 100f); // +30% = *1.3
+>                         break;
+>                     case BuffType.DamageDown:
+>                         damageMultiplier *= (1f - buff.Value / 100f);
+>                         break;
+>                     case BuffType.Invincible:
+>                         isInvincible = true;
+>                         break;
+>                 }
+>             }
+>
+>             if (!isInvincible)
+>                 health.ValueRW.Current -= totalDamage * damageMultiplier;
+>
+>             damageBuffer.Clear();
+>
+>             if (health.ValueRO.Current <= 0f)
+>                 ecb.AddComponent<DeadTag>(entity);
+>         }
+>
+>         ecb.Playback(state.EntityManager);
+>         ecb.Dispose();
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> **设计要点：**
+> - `BuffElement` 是 `IBufferElementData`——一个实体可以有多个 Buff，各自独立计时
+> - `BuffSystem` 负责生命周期（减 Duration、移除过期），`DamageSystem` 负责效果计算——职责分离
+> - 伤害乘算：多个 DamageUp Buff 按 `1 × (1+0.3) × (1+0.2) = 1.56` 叠加（而非简单的 30%+20%=50%）——取决于设计需求
+> - 倒序遍历 RemoveAt 避免索引偏移
+> - `[InternalBufferCapacity(8)]` 预分配 8 个元素在 Chunk 内，减少堆分配
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

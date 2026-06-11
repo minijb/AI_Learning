@@ -223,6 +223,202 @@ public partial struct RotationSystem : ISystem
 - 提示：使用 `[UpdateAfter(typeof(MovementSystem))]` 特性
 - 在 `BoundaryCheckSystem` 中，当实体 Y < -5 时将其 Y 重置为 5
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **效果验证而非代码修改：** 这个练习本身不需要写新代码，而是验证现有 `RotationSystem` 的正确性。
+>
+> **操作步骤：**
+> 1. 在 Hierarchy 中创建 10 个 Cube（命名为 Cube_0 ~ Cube_9）
+> 2. 给每个 Cube 挂载 `RotationSpeedAuthoring`，分别设置 `DegreesPerSecond = 30, 60, 90, 120, 150, 180, 210, 240, 270, 300`
+> 3. 全部放入同一个 SubScene
+> 4. 进入 Play 模式
+>
+> **预期现象与原理：**
+>
+> | 观察点 | 解释 |
+> |--------|------|
+> | System 一个循环处理所有实体 | `SystemAPI.Query<RefRW<LocalTransform>, RefRO<RotationSpeed>>()` 遍历所有匹配 Archetype 的 Chunk，每个 Chunk 内同类型组件连续排列 → 单次 `foreach` 覆盖全部 10 个 Cube |
+> | 各 Cube 旋转速度独立 | 虽然共享同一个 `RotationSystem.OnUpdate` 代码路径，但每个实体的 `RotationSpeed.RadiansPerSecond` 来自各自 Bakered 值，互不干扰 |
+> | 修改值后实时变化 | SubScene 的实时转换机制：在 Inspector 中修改 Authoring 的 `DegreesPerSecond` 后，Baker 自动重新转换，组件值即时更新 |
+>
+> **性能观察：** 10 个 Cube 和 10000 个 Cube 在 System 中的代码路径完全一致——都是 O(n) 遍历。区别仅在于 CPU 工作量线性增长（而非 OOP 虚函数调用的非线性退化）。
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> // ========== FloatAmplitude.cs — 组件定义 ==========
+> using Unity.Entities;
+>
+> public struct FloatAmplitude : IComponentData
+> {
+>     public float Amplitude;   // 浮动幅度（Y 轴偏移量）
+>     public float Frequency;   // 浮动频率（弧度/秒）
+> }
+> ```
+>
+> ```csharp
+> // ========== FloatAmplitudeAuthoring.cs ==========
+> using Unity.Entities;
+> using UnityEngine;
+>
+> public class FloatAmplitudeAuthoring : MonoBehaviour
+> {
+>     public float Amplitude = 0.5f;
+>     public float Frequency = 2f;
+>
+>     class Baker : Baker<FloatAmplitudeAuthoring>
+>     {
+>         public override void Bake(FloatAmplitudeAuthoring authoring)
+>         {
+>             var entity = GetEntity(TransformUsageFlags.Dynamic);
+>             AddComponent(entity, new FloatAmplitude
+>             {
+>                 Amplitude = authoring.Amplitude,
+>                 Frequency = authoring.Frequency
+>             });
+>         }
+>     }
+> }
+> ```
+>
+> ```csharp
+> // ========== FloatSystem.cs ==========
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> [BurstCompile]
+> public partial struct FloatSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<FloatAmplitude>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // SystemAPI.Time.ElapsedTime 从 World 创建起累积的秒数
+>         // 使用它而非 DeltaTime 累加，避免浮点精度漂移
+>         float elapsed = (float)SystemAPI.Time.ElapsedTime;
+>
+>         foreach (var (transform, floatAmp) in
+>                  SystemAPI.Query<RefRW<LocalTransform>, RefRO<FloatAmplitude>>())
+>         {
+>             // 正弦浮动：Y = baseY + Amplitude * sin(频率 * 时间)
+>             // 注意：需要用初始 Y 作为基准，避免漂移
+>             // 这里简化：直接修改 Position.y（不保存基准值）
+>             var pos = transform.ValueRW.Position;
+>             pos.y = floatAmp.ValueRO.Amplitude
+>                   * math.sin(floatAmp.ValueRO.Frequency * elapsed);
+>             transform.ValueRW.Position = pos;
+>         }
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> **与 RotationSystem 的并行执行：** `FloatSystem` 和 `RotationSystem` 都属于 `SimulationSystemGroup`，Unity 自动按 System 创建顺序调度。两者修改的是同一个 `LocalTransform` 的不同字段（Rotation 改旋转、Float 改 Position.y），不冲突。如需保证顺序，可用 `[UpdateBefore]`/`[UpdateAfter]` 特性。
+>
+> **改进提示：** 生产代码应保存实体的初始 Y 值（存入独立组件 `FloatBaseY`），避免 `sin(elapsed)` 在时间超出 float 精度后产生浮点误差。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> // ========== MovementSpeed 组件 ==========
+> using Unity.Entities;
+>
+> public struct MovementSpeed : IComponentData
+> {
+>     public float MetersPerSecond;
+> }
+> ```
+>
+> ```csharp
+> // ========== MovementSystem.cs ==========
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Transforms;
+>
+> [BurstCompile]
+> public partial struct MovementSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<MovementSpeed>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float dt = SystemAPI.Time.DeltaTime;
+>         // 所有实体以各自速度向下移动
+>         foreach (var (transform, speed) in
+>                  SystemAPI.Query<RefRW<LocalTransform>, RefRO<MovementSpeed>>())
+>         {
+>             var pos = transform.ValueRW.Position;
+>             pos.y -= speed.ValueRO.MetersPerSecond * dt;
+>             transform.ValueRW.Position = pos;
+>         }
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> ```csharp
+> // ========== BoundaryCheckSystem.cs ==========
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Transforms;
+>
+> // 关键：确保 BoundaryCheckSystem 在 MovementSystem 之后执行
+> [UpdateAfter(typeof(MovementSystem))]
+> [BurstCompile]
+> public partial struct BoundaryCheckSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         // 只需要 MovementSpeed 确保有可移动的实体
+>         state.RequireForUpdate<MovementSpeed>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         foreach (var transform in
+>                  SystemAPI.Query<RefRW<LocalTransform>>()
+>                      .WithAll<MovementSpeed>())
+>         {
+>             var pos = transform.ValueRW.Position;
+>             if (pos.y < -5f)
+>             {
+>                 pos.y = 5f;           // 重置到上方
+>                 transform.ValueRW.Position = pos;
+>             }
+>         }
+>     }
+>
+>     [BurstCompile]
+>     public void OnDestroy(ref SystemState state) { }
+> }
+> ```
+>
+> **`[UpdateAfter]` 的执行顺序保证：**
+> - Unity 的 System 排序机制在编译期生成依赖图
+> - `BoundaryCheckSystem.UpdateAfter(typeof(MovementSystem))` 确保每次更新循环中，`MovementSystem.OnUpdate` 先执行完毕，然后才执行 `BoundaryCheckSystem.OnUpdate`
+> - 也可用 `[UpdateInGroup(typeof(SimulationSystemGroup))]` 配合 `[UpdateBefore]`/`[UpdateAfter]` 精确控制
+> - 如果两个 System 无依赖声明，Unity 按字母顺序或创建顺序执行（不保证确定性）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

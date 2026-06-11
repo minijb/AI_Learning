@@ -1668,6 +1668,277 @@ var bad = new RequestBuilder()
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：Observer 重构为事件驱动
+> ```csharp
+> // ============================================
+> // 1. 自定义 EventArgs
+> // ============================================
+> public class TemperatureChangedEventArgs : EventArgs
+> {
+>     public string SensorId { get; }
+>     public double OldTemperature { get; }
+>     public double NewTemperature { get; }
+>
+>     public TemperatureChangedEventArgs(string sensorId, double oldTemp, double newTemp)
+>         => (SensorId, OldTemperature, NewTemperature) = (sensorId, oldTemp, newTemp);
+> }
+>
+> // ============================================
+> // 2. TemperatureSensor — 使用 event
+> // ============================================
+> public class TemperatureSensor
+> {
+>     private double _temperature;
+>
+>     public string SensorId { get; }
+>
+>     // 一行声明替代 IObserver 接口 + Attach + Detach + Notify
+>     public event EventHandler<TemperatureChangedEventArgs>? TemperatureChanged;
+>
+>     public double Temperature
+>     {
+>         get => _temperature;
+>         set
+>         {
+>             if (Math.Abs(_temperature - value) > 0.1)
+>             {
+>                 var oldTemp = _temperature;
+>                 _temperature = value;
+>                 OnTemperatureChanged(new TemperatureChangedEventArgs(
+>                     SensorId, oldTemp, _temperature));
+>             }
+>         }
+>     }
+>
+>     public TemperatureSensor(string sensorId) => SensorId = sensorId;
+>
+>     protected virtual void OnTemperatureChanged(TemperatureChangedEventArgs e)
+>         => TemperatureChanged?.Invoke(this, e);
+> }
+>
+> // ============================================
+> // 3. Main — 用 lambda 订阅，不再需要实现接口
+> // ============================================
+> // static void Main()
+> // {
+> //     var sensor = new TemperatureSensor("SENSOR-001");
+> //
+> //     double threshold = 28.0;
+> //     sensor.TemperatureChanged += (_, e) =>
+> //     {
+> //         if (e.NewTemperature > threshold)
+> //             Console.WriteLine(
+> //                 $"ALERT: {e.SensorId} temperature {e.NewTemperature}°C exceeds {threshold}°C!");
+> //     };
+> //
+> //     sensor.TemperatureChanged += (_, e) =>
+> //         Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] {e.SensorId}: {e.NewTemperature}°C");
+> //
+> //     sensor.Temperature = 25.0;
+> //     sensor.Temperature = 25.05; // 变化 < 0.1 → 不触发
+> //     sensor.Temperature = 30.5;
+> // }
+> ```
+
+> [!tip]- 练习 2 参考答案：Iterator 重构为 yield return
+> ```csharp
+> using System.Collections;
+>
+> public class SortedLinkedList<T> : IEnumerable<T> where T : IComparable<T>
+> {
+>     private Node<T>? _head;
+>     private Node<T>? _tail;
+>
+>     public void Insert(T value)
+>     {
+>         var node = new Node<T>(value);
+>         if (_head == null) { _head = _tail = node; return; }
+>
+>         var current = _head;
+>         while (current != null && current.Value.CompareTo(value) < 0)
+>             current = current.Next;
+>
+>         if (current == null)
+>         {
+>             _tail!.Next = node; node.Prev = _tail; _tail = node;
+>         }
+>         else if (current == _head)
+>         {
+>             node.Next = _head; _head.Prev = node; _head = node;
+>         }
+>         else
+>         {
+>             node.Prev = current.Prev;
+>             node.Next = current;
+>             current.Prev!.Next = node;
+>             current.Prev = node;
+>         }
+>     }
+>
+>     // 1. 正序遍历（yield return 编译器生成状态机）
+>     public IEnumerator<T> GetEnumerator()
+>     {
+>         var current = _head;
+>         while (current != null)
+>         {
+>             yield return current.Value;
+>             current = current.Next;
+>         }
+>     }
+>
+>     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+>
+>     // 2. 倒序遍历
+>     public IEnumerable<T> Reverse()
+>     {
+>         var current = _tail;
+>         while (current != null)
+>         {
+>             yield return current.Value;
+>             current = current.Prev;
+>         }
+>     }
+>
+>     // 3. 筛选大于阈值的元素（利用已排序特性提前终止）
+>     public IEnumerable<T> GreaterThan(T threshold)
+>     {
+>         var current = _head;
+>         // 跳过小于等于阈值的元素
+>         while (current != null && current.Value.CompareTo(threshold) <= 0)
+>             current = current.Next;
+>         // 后续所有元素都大于阈值
+>         while (current != null)
+>         {
+>             yield return current.Value;
+>             current = current.Next;
+>         }
+>     }
+> }
+>
+> // 测试：
+> // var list = new SortedLinkedList<int>();
+> // var rand = new Random(42);
+> // for (int i = 0; i < 10; i++)
+> //     list.Insert(rand.Next(1, 100));
+> // Console.WriteLine("正序: " + string.Join(", ", list));
+> // Console.WriteLine("倒序: " + string.Join(", ", list.Reverse()));
+> // Console.WriteLine(">50:  " + string.Join(", ", list.GreaterThan(50)));
+> ```
+
+> [!tip]- 练习 3 参考答案：`record` + `with` vs Builder
+> ```csharp
+> // ============================================
+> // 方案 A：record + with + required
+> // ============================================
+> public enum HttpMethod { Get, Post, Put, Delete }
+>
+> public record RequestConfig
+> {
+>     public required string Url { get; init; }
+>     public required HttpMethod Method { get; init; }
+>
+>     public Dictionary<string, string> Headers { get; init; } = new();
+>     public int TimeoutSeconds { get; init; } = 30;
+>     public int RetryCount { get; init; } = 0;
+>     public string? Body { get; init; }
+>
+>     // 注意：record 无法在编译期强制"GET/DELETE 不应有 Body"
+>     // 这个约束需要运行时检查或 Builder 方案
+> }
+>
+> // 用例 1：最小配置
+> // var req1 = new RequestConfig { Url = "https://api.example.com", Method = HttpMethod.Get };
+>
+> // 用例 2：完整配置
+> // var req2 = new RequestConfig
+> // {
+> //     Url = "https://api.example.com/users",
+> //     Method = HttpMethod.Post,
+> //     Body = """{"name": "Alice"}""",
+> //     Headers = new() { ["Authorization"] = "Bearer xxx" },
+> //     RetryCount = 3
+> // };
+>
+> // 用例 3：从已有配置派生
+> // var withAuth = req1 with
+> // {
+> //     Headers = new() { ["Authorization"] = "Bearer yyy" }
+> // };
+>
+> // ============================================
+> // 方案 B：Builder 模式
+> // ============================================
+> public class RequestBuilder
+> {
+>     private string? _url;
+>     private HttpMethod? _method;
+>     private Dictionary<string, string> _headers = new();
+>     private int _timeoutSeconds = 30;
+>     private int _retryCount = 0;
+>     private string? _body;
+>
+>     public RequestBuilder SetUrl(string url) { _url = url; return this; }
+>     public RequestBuilder SetMethod(HttpMethod method) { _method = method; return this; }
+>     public RequestBuilder SetHeaders(Dictionary<string, string> h) { _headers = h; return this; }
+>     public RequestBuilder SetTimeoutSeconds(int s) { _timeoutSeconds = s; return this; }
+>     public RequestBuilder SetRetryCount(int c) { _retryCount = c; return this; }
+>     public RequestBuilder SetBody(string b) { _body = b; return this; }
+>
+>     public RequestConfig Build()
+>     {
+>         if (string.IsNullOrWhiteSpace(_url))
+>             throw new InvalidOperationException("Url is required");
+>         if (_method == null)
+>             throw new InvalidOperationException("Method is required");
+>
+>         // 用例 4：约束验证 — GET/DELETE 不应有 Body
+>         if ((_method == HttpMethod.Get || _method == HttpMethod.Delete) && _body != null)
+>             throw new InvalidOperationException(
+>                 $"Body not allowed for {_method} requests");
+>
+>         return new RequestConfig
+>         {
+>             Url = _url,
+>             Method = _method.Value,
+>             Headers = new Dictionary<string, string>(_headers),
+>             TimeoutSeconds = _timeoutSeconds,
+>             RetryCount = _retryCount,
+>             Body = _body
+>         };
+>     }
+> }
+>
+> // 用例 4：GET + Body → Build() 抛异常
+> // try
+> // {
+> //     var bad = new RequestBuilder()
+> //         .SetUrl("https://api.example.com")
+> //         .SetMethod(HttpMethod.Get)
+> //         .SetBody("should not be here")
+> //         .Build();
+> // }
+> // catch (InvalidOperationException ex)
+> // {
+> //     Console.WriteLine($"Builder validation: {ex.Message}");
+> // }
+> ```
+>
+> **分析报告：**
+>
+> 对于本场景（API 请求配置），**record + with 更合适**，三点判断依据：
+>
+> 1. **数据本质是"值对象"而非"构建过程"**：API 请求配置是不可变的配置快照——创建后不应修改（不可变性）。`record` 内置值相等比较和 `with` 表达式的非破坏性派生，天然匹配这个语义。Builder 的流式 API 暗示"逐步构建"，但配置对象的字段间没有构建顺序依赖
+> 2. **`with` 解决"派生"场景比 Builder 更自然**：用例 3（从已有配置添加 Header）中，`record` 的 `baseConfig with { Headers = ... }` 一行完成，而 Builder 需要先读取原配置再重新设置所有字段，代码量和出错可能都更大
+> 3. **Builder 的唯一优势（运行时约束验证）在本场景价值有限**：GET/DELETE 不应有 Body 是业务最佳实践，大多数 HTTP 客户端不会因 GET 有 Body 而报错。如果要严格验证，`record` 也可加 `Validate()` 方法在创建后调用
+>
+> **Builder 更合适的场景**：多步骤构建流程（如 Director 协调）、构建中需验证中间状态、需支持"部分构建/增量构建"（如 GUI 表单逐步填写）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 必读

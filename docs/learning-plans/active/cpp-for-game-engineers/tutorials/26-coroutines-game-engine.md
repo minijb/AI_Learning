@@ -679,6 +679,577 @@ Task processPhysicsAndRender() {
 提示：使用第 20-22 节（原子操作、多线程架构、Lock-Free 队列）学到的知识。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：异步资产加载系统
+> ```cpp
+> #include <coroutine>
+> #include <iostream>
+> #include <thread>
+> #include <queue>
+> #include <functional>
+> #include <memory>
+> #include <string>
+> #include <chrono>
+> #include <vector>
+> #include <atomic>
+> #include <mutex>
+> 
+> // ========== 通用协程 Task ==========
+> struct Task {
+>     struct promise_type {
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_never initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_void() {}
+>         void unhandled_exception() { std::terminate(); }
+>     };
+> 
+>     std::coroutine_handle<promise_type> handle;
+> 
+>     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+>     ~Task() { if (handle) handle.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&& other) noexcept : handle(other.handle) { other.handle = nullptr; }
+>     Task& operator=(Task&& other) noexcept {
+>         if (this != &other) {
+>             if (handle) handle.destroy();
+>             handle = other.handle;
+>             other.handle = nullptr;
+>         }
+>         return *this;
+>     }
+>     bool done() const { return handle.done(); }
+>     void resume() { if (!handle.done()) handle.resume(); }
+> };
+> 
+> // ========== 资产类型 ==========
+> struct Texture { std::string data; };
+> struct Mesh { std::string data; };
+> struct Audio { std::string data; };
+> 
+> // ========== 异步 I/O 系统 ==========
+> struct IORequest {
+>     std::string path;
+>     std::function<void(std::string)> onComplete;
+> };
+> 
+> class AsyncIOSystem {
+> public:
+>     void submitRead(std::string path, std::function<void(std::string)> callback) {
+>         std::thread([path = std::move(path), cb = std::move(callback)]() {
+>             std::this_thread::sleep_for(std::chrono::milliseconds(50 + rand() % 200));
+>             std::string result = "binary_data_of_" + path;
+>             cb(std::move(result));
+>         }).detach();
+>     }
+> };
+> 
+> // ========== 带进度回调的 Awaitable ==========
+> template <typename AssetT>
+> struct AsyncAssetLoad {
+>     AsyncIOSystem& io;
+>     std::string path;
+> 
+>     bool await_ready() const noexcept { return false; }
+> 
+>     void await_suspend(std::coroutine_handle<> h) {
+>         io.submitRead(path, [h, this](std::string content) mutable {
+>             result = std::move(content);
+>             if (onProgress) onProgress(path, true);
+>             h.resume();
+>         });
+>     }
+> 
+>     AssetT await_resume() const noexcept {
+>         AssetT asset;
+>         asset.data = std::move(result);
+>         return asset;
+>     }
+> 
+>     std::function<void(std::string, bool)> onProgress;
+>     mutable std::string result;
+> };
+> 
+> // ========== Wait-All 并发加载 ==========
+> struct AssetLoadResult {
+>     std::vector<Texture> textures;
+>     std::vector<Mesh>    meshes;
+>     std::vector<Audio>   audios;
+>     std::vector<std::string> errors;
+> };
+> 
+> // 单个加载请求的包装
+> struct PendingLoad {
+>     std::string path;
+>     bool completed = false;
+>     bool timedOut = false;
+>     std::string result;
+>     std::chrono::steady_clock::time_point startTime;
+>     std::coroutine_handle<> waitingCoroutine = nullptr;
+> };
+> 
+> class AssetLoadBatch {
+> public:
+>     AssetLoadBatch(AsyncIOSystem& io) : io_(io) {}
+> 
+>     void addRequest(const std::string& path) {
+>         PendingLoad req;
+>         req.path = path;
+>         req.startTime = std::chrono::steady_clock::now();
+>         requests_.push_back(std::move(req));
+>     }
+> 
+>     // 等待所有资产加载完成或超时
+>     bool await_ready() const noexcept {
+>         return allDone() || anyTimedOut();
+>     }
+> 
+>     void await_suspend(std::coroutine_handle<> h) {
+>         for (auto& req : requests_) {
+>             req.waitingCoroutine = h;
+>             io_.submitRead(req.path, [this, &req](std::string content) {
+>                 std::lock_guard lock(mutex_);
+>                 req.result = std::move(content);
+>                 req.completed = true;
+>                 ++completedCount_;
+>                 if (onProgress) {
+>                     onProgress(completedCount_, requests_.size());
+>                 }
+>                 tryResumeAll();
+>             });
+>         }
+>         storedHandle_ = h;
+>         // 启动超时检测线程
+>         timeoutThread_ = std::thread([this, h]() {
+>             while (!allDone() && !anyTimedOut()) {
+>                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+>                 auto now = std::chrono::steady_clock::now();
+>                 for (auto& req : requests_) {
+>                     if (!req.completed) {
+>                         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+>                             now - req.startTime).count();
+>                         if (elapsed > 5000) {  // 5秒超时
+>                             req.timedOut = true;
+>                             req.result = "TIMEOUT";
+>                         }
+>                     }
+>                 }
+>             }
+>             h.resume();
+>         });
+>     }
+> 
+>     std::vector<std::string> await_resume() {
+>         if (timeoutThread_.joinable()) timeoutThread_.join();
+>         std::vector<std::string> results;
+>         std::vector<std::string> errors;
+>         for (auto& req : requests_) {
+>             if (req.timedOut) {
+>                 errors.push_back("TIMEOUT: " + req.path);
+>             } else {
+>                 results.push_back(std::move(req.result));
+>             }
+>         }
+>         errors_ = std::move(errors);
+>         return results;
+>     }
+> 
+>     const std::vector<std::string>& errors() const { return errors_; }
+> 
+>     std::function<void(size_t, size_t)> onProgress;
+> 
+> private:
+>     bool allDone() const {
+>         for (auto& req : requests_) if (!req.completed && !req.timedOut) return false;
+>         return true;
+>     }
+>     bool anyTimedOut() const {
+>         for (auto& req : requests_) if (req.timedOut) return true;
+>         return false;
+>     }
+>     void tryResumeAll() {
+>         if (allDone() || anyTimedOut()) {
+>             if (storedHandle_) storedHandle_.resume();
+>         }
+>     }
+> 
+>     AsyncIOSystem& io_;
+>     std::vector<PendingLoad> requests_;
+>     std::vector<std::string> errors_;
+>     std::atomic<size_t> completedCount_{0};
+>     std::coroutine_handle<> storedHandle_;
+>     std::thread timeoutThread_;
+>     std::mutex mutex_;
+> };
+> 
+> // ========== 资产加载协程 ==========
+> Task loadAllAssets(AsyncIOSystem& io, int& progress) {
+>     AssetLoadBatch batch(io);
+>     batch.onProgress = [&progress](size_t done, size_t total) {
+>         progress = static_cast<int>(done * 100 / total);
+>         std::cout << "Progress: " << progress << "% (" << done << "/" << total << ")\n";
+>     };
+> 
+>     // 发起 10 个并发加载
+>     for (int i = 0; i < 10; ++i) {
+>         batch.addRequest("asset_" + std::to_string(i) + ".dat");
+>     }
+> 
+>     auto results = co_await batch;
+> 
+>     std::cout << "Loaded " << results.size() << " assets\n";
+>     if (!batch.errors().empty()) {
+>         for (auto& err : batch.errors()) {
+>             std::cout << "Error: " << err << "\n";
+>         }
+>     }
+> }
+> 
+> // ========== 调度器 ==========
+> class CoroutineScheduler {
+> public:
+>     void schedule(Task task) { pendingTasks_.push(std::move(task)); }
+>     void update(size_t maxResume = 100) {
+>         size_t count = 0;
+>         while (!pendingTasks_.empty() && count < maxResume) {
+>             auto& task = pendingTasks_.front();
+>             if (task.done()) { pendingTasks_.pop(); }
+>             else {
+>                 task.resume();
+>                 if (!task.done()) pendingTasks_.push(std::move(task));
+>                 pendingTasks_.pop();
+>             }
+>             ++count;
+>         }
+>     }
+>     bool hasPending() const { return !pendingTasks_.empty(); }
+> private:
+>     std::queue<Task> pendingTasks_;
+> };
+> 
+> // ========== 演示 ==========
+> void demo() {
+>     AsyncIOSystem io;
+>     CoroutineScheduler scheduler;
+>     int progress = 0;
+> 
+>     scheduler.schedule(loadAllAssets(io, progress));
+> 
+>     for (int frame = 0; frame < 500; ++frame) {
+>         scheduler.update(10);
+>         if (!scheduler.hasPending()) {
+>             std::cout << "All done at frame " << frame << "\n";
+>             break;
+>         }
+>     }
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：行为树协程系统
+> ```cpp
+> #include <coroutine>
+> #include <iostream>
+> #include <queue>
+> #include <functional>
+> #include <memory>
+> #include <vector>
+> #include <string>
+> #include <chrono>
+> 
+> // ========== 基础 Task（同前） ==========
+> struct Task {
+>     struct promise_type {
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_never initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_void() {}
+>         void unhandled_exception() { std::terminate(); }
+>     };
+>     std::coroutine_handle<promise_type> handle;
+>     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+>     ~Task() { if (handle) handle.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&& o) noexcept : handle(o.handle) { o.handle = nullptr; }
+>     Task& operator=(Task&& o) noexcept {
+>         if (this != &o) { if (handle) handle.destroy(); handle = o.handle; o.handle = nullptr; }
+>         return *this;
+>     }
+>     bool done() const { return handle.done(); }
+>     void resume() { if (!handle.done()) handle.resume(); }
+> };
+> 
+> // ========== 行为树节点状态 ==========
+> enum class BTStatus { Running, Success, Failure };
+> 
+> // ========== 行为 Awaitable（挂起直到下一帧） ==========
+> struct BTSuspend {
+>     BTSuspend(BTStatus s) : status(s) {}
+>     bool await_ready() const noexcept { return false; }
+>     void await_suspend(std::coroutine_handle<> h) { storedHandle_ = h; }
+>     BTStatus await_resume() const noexcept { return status; }
+>     static std::coroutine_handle<> storedHandle_;
+>     BTStatus status;
+> };
+> std::coroutine_handle<> BTSuspend::storedHandle_;
+> 
+> // ========== 动作 Awaitable（模拟引擎操作） ==========
+> struct MoveToAwaitable {
+>     float targetX, targetY, targetZ;
+>     float elapsed = 0.0f;
+>     float duration = 1.0f;
+> 
+>     bool await_ready() const noexcept { return elapsed >= duration; }
+>     void await_suspend(std::coroutine_handle<> h) { handle_ = h; }
+>     void await_resume() const noexcept {}
+> 
+>     bool tick(float dt) {
+>         elapsed += dt;
+>         if (elapsed >= duration) { handle_.resume(); return true; }
+>         return false;
+>     }
+>     std::coroutine_handle<> handle_;
+> };
+> 
+> struct WaitAwaitable {
+>     float duration;
+>     float elapsed = 0.0f;
+> 
+>     bool await_ready() const noexcept { return elapsed >= duration; }
+>     void await_suspend(std::coroutine_handle<> h) { handle_ = h; }
+>     void await_resume() const noexcept {}
+> 
+>     bool tick(float dt) {
+>         elapsed += dt;
+>         if (elapsed >= duration) { handle_.resume(); return true; }
+>         return false;
+>     }
+>     std::coroutine_handle<> handle_;
+> };
+> 
+> struct PlayAnimAwaitable {
+>     std::string animName;
+>     float duration = 1.5f;
+>     float elapsed = 0.0f;
+> 
+>     bool await_ready() const noexcept { return elapsed >= duration; }
+>     void await_suspend(std::coroutine_handle<> h) { handle_ = h; }
+>     void await_resume() const noexcept {}
+> 
+>     bool tick(float dt) {
+>         elapsed += dt;
+>         if (elapsed >= duration) { handle_.resume(); return true; }
+>         return false;
+>     }
+>     std::coroutine_handle<> handle_;
+> };
+> 
+> // ========== 行为节点类型 ===
+> // Sequence: 顺序执行，任一失败则失败
+> BTStatus sequenceNode(std::initializer_list<std::function<Task()>> children) {
+>     // 简化版：内联实现
+>     return BTStatus::Success;  // 实际由协程驱动
+> }
+> 
+> // ========== 协程化行为叶子 ==========
+> // 这些函数返回 Task，内部使用 co_await 挂起
+> 
+> MoveToAwaitable moveTo(float x, float y, float z) {
+>     return {{x, y, z}};
+> }
+> 
+> WaitAwaitable waitSeconds(float s) {
+>     return {s};
+> }
+> 
+> PlayAnimAwaitable playAnimation(const std::string& name) {
+>     return {name};
+> }
+> 
+> // ========== 巡逻敌人行为（协程） ==========
+> Task enemyPatrolBehavior(const std::string& name) {
+>     float patrolA[3] = {10.0f, 0.0f, 5.0f};
+>     float patrolB[3] = {-10.0f, 0.0f, -5.0f};
+> 
+>     while (true) {
+>         std::cout << "[" << name << "] Moving to patrol A\n";
+>         co_await moveTo(patrolA[0], patrolA[1], patrolA[2]);
+>         std::cout << "[" << name << "] Arrived at A, waiting 2s\n";
+>         co_await waitSeconds(2.0f);
+> 
+>         std::cout << "[" << name << "] Moving to patrol B\n";
+>         co_await moveTo(patrolB[0], patrolB[1], patrolB[2]);
+>         std::cout << "[" << name << "] Arrived at B, waiting 2s\n";
+>         co_await waitSeconds(2.0f);
+>     }
+> }
+> 
+> // ========== 反应型敌人行为（状态机式协程） ==========
+> Task enemyReactiveBehavior(const std::string& name, bool& playerDetected) {
+>     enum State { Idle, Chase, Attack, Flee };
+>     State state = State::Idle;
+> 
+>     while (true) {
+>         switch (state) {
+>         case State::Idle:
+>             std::cout << "[" << name << "] Idle: looking around\n";
+>             co_await waitSeconds(1.0f);
+>             if (playerDetected) {
+>                 state = State::Chase;
+>                 std::cout << "[" << name << "] Player detected! Chasing!\n";
+>             }
+>             break;
+> 
+>         case State::Chase:
+>             co_await moveTo(0.0f, 0.0f, 0.0f);  // 移向玩家
+>             state = State::Attack;
+>             break;
+> 
+>         case State::Attack:
+>             std::cout << "[" << name << "] Attacking player!\n";
+>             co_await playAnimation("attack");
+>             co_await waitSeconds(0.5f);
+>             if (!playerDetected) {
+>                 state = State::Idle;
+>             }
+>             break;
+> 
+>         case State::Flee:
+>             std::cout << "[" << name << "] Fleeing!\n";
+>             co_await moveTo(50.0f, 0.0f, 50.0f);
+>             playerDetected = false;
+>             state = State::Idle;
+>             break;
+>         }
+>     }
+> }
+> 
+> // ========== 帧调度器 ==========
+> struct ActiveAwaitable {
+>     std::coroutine_handle<> handle;
+>     // tick 函数返回 true 表示完成
+>     std::function<bool(float)> tickFn;
+> };
+> 
+> class BehaviorScheduler {
+> public:
+>     void schedule(Task task) { tasks_.push_back(std::move(task)); }
+> 
+>     void update(float dt) {
+>         // 驱动所有挂起的 awaitable（移动、等待、动画）
+>         for (auto it = awaitables_.begin(); it != awaitables_.end(); ) {
+>             if (it->tickFn(dt)) {
+>                 it = awaitables_.erase(it);
+>             } else {
+>                 ++it;
+>             }
+>         }
+> 
+>         // 恢复就绪的协程
+>         for (auto it = tasks_.begin(); it != tasks_.end(); ) {
+>             if (it->done()) {
+>                 it = tasks_.erase(it);
+>             } else {
+>                 it->resume();
+>                 ++it;
+>             }
+>         }
+>     }
+> 
+>     void registerAwaitable(ActiveAwaitable a) { awaitables_.push_back(std::move(a)); }
+> 
+>     bool empty() const { return tasks_.empty(); }
+> 
+> private:
+>     std::vector<Task> tasks_;
+>     std::vector<ActiveAwaitable> awaitables_;
+> };
+> 
+> // ========== 演示主循环 ==========
+> void demoBehaviorTree() {
+>     BehaviorScheduler scheduler;
+>     bool playerDetected = false;
+> 
+>     scheduler.schedule(enemyPatrolBehavior("PatrolGuard"));
+>     scheduler.schedule(enemyReactiveBehavior("ReactiveGuard", playerDetected));
+> 
+>     // 模拟 60fps 运行 10 秒
+>     for (int frame = 0; frame < 600; ++frame) {
+>         float dt = 1.0f / 60.0f;
+> 
+>         // 模拟玩家在 frame 200 被检测到
+>         if (frame == 200) {
+>             playerDetected = true;
+>             std::cout << ">>> Player entered detection zone\n";
+>         }
+>         // 模拟玩家在 frame 400 逃离
+>         if (frame == 400) {
+>             playerDetected = false;
+>             std::cout << ">>> Player left detection zone\n";
+>         }
+> 
+>         scheduler.update(dt);
+>     }
+> }
+> ```
+
+> [!info]- 思考题参考答案：协程 + Job System 集成设计要点
+> ```cpp
+> // 关键设计：
+> // 1. Job 完成后通过原子标志 + coroutine_handle 恢复协程
+> // 2. 工作窃取：每个 Worker 线程有自己的协程队列
+> //    空闲时从其他线程的队列 steal 可恢复协程
+> // 3. 性能对比应关注：
+> //    - 回调方式：每个依赖是一个 std::function 堆分配
+> //    - 协程方式：帧 + awaitable 对象，通常更紧凑
+> 
+> // 简化版 Job System + Coroutine 集成示例：
+> #include <atomic>
+> #include <deque>
+> #include <thread>
+> #include <mutex>
+> 
+> struct Job {
+>     std::function<void()> work;
+>     std::atomic<bool> completed{false};
+>     std::coroutine_handle<> waitingCoroutine;
+> 
+>     void execute() {
+>         work();
+>         completed.store(true, std::memory_order_release);
+>         if (waitingCoroutine) {
+>             waitingCoroutine.resume();  // 跨线程安全恢复协程
+>         }
+>     }
+> };
+> 
+> struct JobAwaitable {
+>     std::atomic<bool>& completed;
+>     bool await_ready() const noexcept {
+>         return completed.load(std::memory_order_acquire);
+>     }
+>     void await_suspend(std::coroutine_handle<> h) {
+>         // Job 完成后会调用 h.resume()
+>     }
+>     void await_resume() const noexcept {}
+> };
+> 
+> // 协程等待 Job：主线程不阻塞
+> Task processWithJobs() {
+>     auto job = submitPhysicsJob();
+>     co_await JobAwaitable{job->completed};
+>     // 物理完成后继续
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。协程的 API 设计、调度策略有多种合理选择；重点理解协程帧的分配策略、挂起/恢复机制和零开销调度的核心思想。
 
 ## 4. 扩展阅读
 

@@ -593,6 +593,824 @@ g++ -std=c++17 -I. scripting_system.cpp -o scripting_system -llua5.3
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1：Lua 状态机
+> #### C++ 侧 — 状态机组件与逐帧驱动
+> ```cpp
+> // NpcStateMachine.h
+> #pragma once
+> #include <sol/sol.hpp>
+> #include <string>
+>
+> class NpcStateMachine {
+> public:
+>     explicit NpcStateMachine(sol::state& lua, const std::string& scriptPath);
+>     ~NpcStateMachine();
+>
+>     std::string Update(float deltaTime);
+>     // 返回当前状态名，供外部调试/显示
+>
+> private:
+>     sol::state& m_lua;
+>     sol::coroutine m_coroutine;
+>     std::string m_currentState;
+>     bool m_coroutineDead = false;
+> };
+> ```
+>
+> ```cpp
+> // NpcStateMachine.cpp
+> #include "NpcStateMachine.h"
+> #include <iostream>
+>
+> NpcStateMachine::NpcStateMachine(sol::state& lua, const std::string& scriptPath)
+>     : m_lua(lua)
+> {
+>     // 执行脚本，脚本返回一个 coroutine 工厂函数
+>     sol::protected_function_result loadResult = lua.safe_script_file(
+>         scriptPath, sol::script_pass_on_error);
+>     if (!loadResult.valid()) {
+>         sol::error err = loadResult;
+>         std::cerr << "Failed to load state machine script: " << err.what() << '\n';
+>         m_coroutineDead = true;
+>         return;
+>     }
+>
+>     // 脚本定义了 CreateNpcAI() 返回一个 coroutine
+>     sol::protected_function factory = lua["CreateNpcAI"];
+>     if (!factory.valid()) {
+>         std::cerr << "CreateNpcAI not found in script\n";
+>         m_coroutineDead = true;
+>         return;
+>     }
+>
+>     sol::protected_function_result callResult = factory();
+>     if (!callResult.valid()) {
+>         sol::error err = callResult;
+>         std::cerr << "CreateNpcAI error: " << err.what() << '\n';
+>         m_coroutineDead = true;
+>         return;
+>     }
+>
+>     m_coroutine = callResult.get<sol::coroutine>();
+>     m_currentState = "Idle";
+> }
+>
+> NpcStateMachine::~NpcStateMachine() {
+>     // coroutine 随 sol::state 生命周期自动清理
+> }
+>
+> std::string NpcStateMachine::Update(float deltaTime) {
+>     if (m_coroutineDead) return m_currentState;
+>
+>     sol::protected_function_result result = m_coroutine(deltaTime);
+>     if (!result.valid()) {
+>         sol::error err = result;
+>         // coroutine 正常结束不是错误；sol2 中死 coroutine 再次调用会抛错
+>         std::string errMsg = err.what();
+>         if (errMsg.find("dead coroutine") != std::string::npos) {
+>             m_coroutineDead = true;
+>             return m_currentState;
+>         }
+>         std::cerr << "State machine error: " << errMsg << '\n';
+>         m_coroutineDead = true;
+>         return m_currentState;
+>     }
+>
+>     // yield 返回 {stateName, ...其他数据}
+>     if (result.return_count() >= 1) {
+>         m_currentState = result.get<std::string>(0);
+>     }
+>     return m_currentState;
+> }
+> ```
+>
+> #### Lua 侧 — 协程状态机脚本
+> ```lua
+> -- npc_ai.lua
+> -- 三个状态协程，通过外层协程调度
+>
+> local function IdleState(deltaTime)
+>     while true do
+>         -- 模拟待机行为
+>         deltaTime = coroutine.yield("Idle")
+>         -- 简化：随机切换到 Patrol
+>         if math.random() < 0.01 then
+>             return "Patrol"
+>         end
+>     end
+> end
+>
+> local function PatrolState(deltaTime)
+>     local elapsed = 0
+>     while true do
+>         elapsed = elapsed + deltaTime
+>         deltaTime = coroutine.yield("Patrol")
+>         -- 巡逻 5 秒后切换
+>         if elapsed > 5.0 then
+>             return "Idle"
+>         end
+>         -- 检测到玩家则追击
+>         if DetectPlayer() then
+>             return "Chase"
+>         end
+>     end
+> end
+>
+> local function ChaseState(deltaTime)
+>     while true do
+>         deltaTime = coroutine.yield("Chase")
+>         -- 丢失目标后回到巡逻
+>         if not DetectPlayer() then
+>             return "Patrol"
+>         end
+>     end
+> end
+>
+> -- 辅助：检测玩家（由 C++ 注入实现）
+> function DetectPlayer()
+>     -- 实际实现通过 C++ 绑定提供
+>     return false
+> end
+>
+> -- 调度器：按状态名查找协程函数并 resume 它
+> local stateFunctions = {
+>     Idle   = IdleState,
+>     Patrol = PatrolState,
+>     Chase  = ChaseState,
+> }
+>
+> function CreateNpcAI()
+>     return coroutine.create(function()
+>         local current = "Idle"
+>         while true do
+>             local stateFn = stateFunctions[current]
+>             if not stateFn then
+>                 LogError("Unknown state: " .. tostring(current))
+>                 return
+>             end
+>             -- 创建子协程执行具体状态
+>             local stateCo = coroutine.create(stateFn)
+>             while true do
+>                 local ok, nextState = coroutine.resume(stateCo, GetDeltaTime())
+>                 if not ok then
+>                     LogError("State coroutine error: " .. tostring(nextState))
+>                     return
+>                 end
+>                 -- 如果状态函数返回了字符串，说明需要切换状态
+>                 if type(nextState) == "string" then
+>                     current = nextState
+>                     break  -- 跳出内层 while，进入新状态
+>                 end
+>                 -- 否则 yield 当前状态名给 C++ 侧
+>                 coroutine.yield(current)
+>             end
+>         end
+>     end)
+> end
+> ```
+>
+> #### 集成到 ScriptSystem::Update
+> ```cpp
+> // 在 ScriptSystem 中持有 state machines
+> std::vector<std::unique_ptr<NpcStateMachine>> m_stateMachines;
+>
+> // Update 中逐帧驱动
+> void ScriptSystem::Update(float deltaTime) {
+>     // 设置 deltaTime 供 Lua 脚本使用
+>     m_lua["_dt"] = deltaTime;
+>
+>     for (auto& sm : m_stateMachines) {
+>         std::string state = sm->Update(deltaTime);
+>         // 可选：打印或记录状态变化
+>     }
+>
+>     // 同时也更新 ScriptComponent
+>     for (ScriptComponent* script : m_scriptComponents) {
+>         if (script) script->Update(deltaTime);
+>     }
+> }
+> ```
+
+---
+
+> [!tip]- 练习 2：脚本事件系统
+> #### C++ 侧 — EventBus 类定义与绑定
+> ```cpp
+> // EventBus.h
+> #pragma once
+> #include <sol/sol.hpp>
+> #include <string>
+> #include <vector>
+> #include <unordered_map>
+> #include <functional>
+>
+> class EventBus {
+> public:
+>     // 订阅：返回订阅 ID，用于取消订阅
+>     int Subscribe(const std::string& eventName, sol::protected_function callback);
+>     void Unsubscribe(const std::string& eventName, int subscriptionId);
+>     void UnsubscribeAll(const std::string& eventName);
+>
+>     // 发布：可变参数传递给所有订阅者
+>     void Publish(const std::string& eventName, sol::variadic_args args);
+>
+>     // 热重载清理：移除所有 Lua 侧订阅（C++ 侧订阅保留）
+>     void ClearAllLuaSubscriptions();
+>
+> private:
+>     int m_nextId = 1;
+>
+>     struct Subscription {
+>         int id;
+>         sol::protected_function callback;
+>         // 标记来源：C++ 或 Lua
+>         bool fromLua = false;
+>         // 可选：关联的脚本路径，用于热重载时按路径清理
+>         std::string scriptPath;
+>     };
+>
+>     // eventName → 订阅列表
+>     std::unordered_map<std::string, std::vector<Subscription>> m_subscribers;
+> };
+> ```
+>
+> ```cpp
+> // EventBus.cpp
+> #include "EventBus.h"
+> #include <iostream>
+> #include <algorithm>
+>
+> int EventBus::Subscribe(const std::string& eventName, sol::protected_function callback) {
+>     int id = m_nextId++;
+>     m_subscribers[eventName].push_back({id, callback, true, ""});
+>     return id;
+> }
+>
+> void EventBus::Unsubscribe(const std::string& eventName, int subscriptionId) {
+>     auto it = m_subscribers.find(eventName);
+>     if (it == m_subscribers.end()) return;
+>
+>     auto& vec = it->second;
+>     vec.erase(
+>         std::remove_if(vec.begin(), vec.end(),
+>             [subscriptionId](const Subscription& s) { return s.id == subscriptionId; }),
+>         vec.end()
+>     );
+> }
+>
+> void EventBus::UnsubscribeAll(const std::string& eventName) {
+>     m_subscribers.erase(eventName);
+> }
+>
+> void EventBus::Publish(const std::string& eventName, sol::variadic_args args) {
+>     auto it = m_subscribers.find(eventName);
+>     if (it == m_subscribers.end()) return;
+>
+>     // 复制订阅列表，防止回调中修改订阅列表导致迭代器失效
+>     auto subsCopy = it->second;
+>     for (auto& sub : subsCopy) {
+>         sol::protected_function_result result = sub.callback(args);
+>         if (!result.valid()) {
+>             sol::error err = result;
+>             std::cerr << "[EventBus] Error in subscriber #" << sub.id
+>                       << " for event '" << eventName << "': " << err.what() << '\n';
+>             // 错误不终止其他订阅者
+>         }
+>     }
+> }
+>
+> void EventBus::ClearAllLuaSubscriptions() {
+>     for (auto& [eventName, subs] : m_subscribers) {
+>         subs.erase(
+>             std::remove_if(subs.begin(), subs.end(),
+>                 [](const Subscription& s) { return s.fromLua; }),
+>             subs.end()
+>         );
+>     }
+> }
+> ```
+>
+> #### C++ 侧 — 绑定到 Lua
+> ```cpp
+> void ScriptSystem::BindEventBus() {
+>     // 将 EventBus 作为单例 usertype
+>     m_lua.new_usertype<EventBus>("EventBus",
+>         "Subscribe",      &EventBus::Subscribe,
+>         "Unsubscribe",    &EventBus::Unsubscribe,
+>         "UnsubscribeAll", &EventBus::UnsubscribeAll,
+>         "Publish",        &EventBus::Publish
+>     );
+>
+>     // 将全局 EventBus 实例暴露为 m_eventBus 的指针/usertype
+>     // 方式一：直接设置全局变量（注意生命周期 — m_eventBus 是 ScriptSystem 成员）
+>     m_lua["EventBus"] = &m_eventBus;
+>
+>     // 方式二（更安全）：通过函数获取，确保 Lua 不会持有悬空指针
+>     m_lua.set_function("GetEventBus", [this]() -> EventBus* { return &m_eventBus; });
+> }
+> ```
+>
+> #### Lua 侧 — 脚本订阅事件
+> ```lua
+> -- player_health.lua — 监听伤害事件的范例脚本
+>
+> local subIds = {}   -- 记录所有订阅 ID，便于清理
+>
+> function SubscribePlayerEvents()
+>     local id1 = EventBus:Subscribe("OnPlayerDamaged",
+>         function(player, damage, attacker)
+>             LogInfo(string.format("[Event] %s took %.0f damage from %s",
+>                 player:GetName(), damage, attacker))
+>
+>             -- 业务逻辑：扣血后检查是否死亡
+>             local newHealth = health - damage
+>             if newHealth <= 0 then
+>                 EventBus:Publish("OnPlayerDied", player)
+>             end
+>         end)
+>     table.insert(subIds, id1)
+>
+>     local id2 = EventBus:Subscribe("OnPlayerHealed",
+>         function(player, amount)
+>             LogInfo(string.format("[Event] %s healed %.0f HP", player:GetName(), amount))
+>         end)
+>     table.insert(subIds, id2)
+>
+>     local id3 = EventBus:Subscribe("OnPlayerDied",
+>         function(player)
+>             LogInfo("[Event] Game Over — player has died!")
+>             -- 触发复活或游戏结束逻辑
+>         end)
+>     table.insert(subIds, id3)
+> end
+>
+> -- 热重载时调用：清理所有旧订阅，避免重复回调
+> function OnReload()
+>     for _, id in ipairs(subIds) do
+>         EventBus:Unsubscribe("OnPlayerDamaged", id)
+>         EventBus:Unsubscribe("OnPlayerHealed", id)
+>         EventBus:Unsubscribe("OnPlayerDied", id)
+>     end
+>     subIds = {}
+>     -- 重新订阅
+>     SubscribePlayerEvents()
+> end
+>
+> -- 初始化
+> SubscribePlayerEvents()
+> ```
+>
+> #### C++ 侧 — 游戏逻辑发布事件
+> ```cpp
+> // 伤害系统中发布事件
+> void DamageSystem::ApplyDamage(GameObject* target, float amount, GameObject* attacker) {
+>     // 扣血逻辑...
+>     // target->health -= amount;
+>
+>     // 发布参数化事件
+>     m_eventBus.Publish("OnPlayerDamaged", target, amount, attacker);
+> }
+>
+> // 热重载流程中的订阅清理
+> void ScriptSystem::ReloadScript(const std::string& path) {
+>     // 1. 通知旧脚本清理其订阅
+>     m_lua.safe_script("if OnReload then OnReload() end");
+>
+>     // 2. 重新执行脚本
+>     ExecuteScript(path);
+>
+>     // 3. 重新绑定回调
+>     // ... ScriptComponent::Initialize 会重新获取 Update 等
+> }
+> ```
+
+---
+
+> [!tip]- 练习 3（可选）：可视化脚本系统
+> #### C++ 侧 — 节点与连接定义
+> ```cpp
+> // VisualScript.h
+> #pragma once
+> #include <string>
+> #include <vector>
+> #include <unordered_map>
+> #include <memory>
+> #include <any>
+> #include <functional>
+> #include <nlohmann/json.hpp>  // 使用 nlohmann/json 进行序列化
+>
+> using json = nlohmann::json;
+>
+> // ============================================================
+> // 端口定义
+> // ============================================================
+> enum class PortDirection { Input, Output };
+> enum class PortType { Flow, Float, Vec3, Bool, Any };
+>
+> struct Port {
+>     std::string name;
+>     PortDirection direction;
+>     PortType type;
+>     std::any defaultValue;  // 输入端口可设默认值
+> };
+>
+> // ============================================================
+> // 连接定义
+> // ============================================================
+> struct Link {
+>     int sourceNodeId;
+>     std::string sourcePort;   // 输出端口名
+>     int targetNodeId;
+>     std::string targetPort;   // 输入端口名
+> };
+>
+> // ============================================================
+> // 节点基类
+> // ============================================================
+> struct Node {
+>     int id;
+>     std::string type;   // "Start", "Update", "Move", "Rotate", "If", "Loop"
+>     std::vector<Port> ports;
+>
+>     Node(int id_, const std::string& type_) : id(id_), type(type_) {}
+>     virtual ~Node() = default;
+> };
+>
+> // ============================================================
+> // 脚本图
+> // ============================================================
+> class ScriptGraph {
+> public:
+>     int AddNode(const std::string& type);
+>     bool Connect(int srcId, const std::string& srcPort,
+>                  int dstId, const std::string& dstPort);
+>     void RemoveNode(int id);
+>
+>     std::string Serialize() const;
+>     static std::unique_ptr<ScriptGraph> Deserialize(const std::string& jsonStr);
+>
+>     // 给解释器使用
+>     const std::unordered_map<int, std::unique_ptr<Node>>& GetNodes() const { return m_nodes; }
+>     const std::vector<Link>& GetLinks() const { return m_links; }
+>
+> private:
+>     int m_nextId = 1;
+>     std::unordered_map<int, std::unique_ptr<Node>> m_nodes;
+>     std::vector<Link> m_links;
+>
+>     // 工厂：根据类型创建带默认端口的节点
+>     static std::unique_ptr<Node> CreateNode(int id, const std::string& type);
+> };
+> ```
+>
+> #### 节点工厂 — 各类型节点的端口预设
+> ```cpp
+> // NodeFactory.cpp (内联在 ScriptGraph 实现中)
+> std::unique_ptr<Node> ScriptGraph::CreateNode(int id, const std::string& type) {
+>     auto node = std::make_unique<Node>(id, type);
+>
+>     if (type == "Start") {
+>         node->ports = {
+>             Port{"Out", PortDirection::Output, PortType::Flow},
+>         };
+>     } else if (type == "Update") {
+>         node->ports = {
+>             Port{"DeltaTime", PortDirection::Input, PortType::Float, 0.016f},
+>             Port{"Out", PortDirection::Output, PortType::Flow},
+>         };
+>     } else if (type == "Move") {
+>         node->ports = {
+>             Port{"In",       PortDirection::Input,  PortType::Flow},
+>             Port{"Target",   PortDirection::Input,  PortType::Vec3},
+>             Port{"Speed",    PortDirection::Input,  PortType::Float, 1.0f},
+>             Port{"Out",      PortDirection::Output, PortType::Flow},
+>         };
+>     } else if (type == "Rotate") {
+>         node->ports = {
+>             Port{"In",       PortDirection::Input,  PortType::Flow},
+>             Port{"Angle",    PortDirection::Input,  PortType::Float},
+>             Port{"Axis",     PortDirection::Input,  PortType::Vec3},
+>             Port{"Out",      PortDirection::Output, PortType::Flow},
+>         };
+>     } else if (type == "If") {
+>         node->ports = {
+>             Port{"In",       PortDirection::Input,  PortType::Flow},
+>             Port{"Condition",PortDirection::Input,  PortType::Bool},
+>             Port{"True",     PortDirection::Output, PortType::Flow},
+>             Port{"False",    PortDirection::Output, PortType::Flow},
+>         };
+>     } else if (type == "Loop") {
+>         node->ports = {
+>             Port{"In",       PortDirection::Input,  PortType::Flow},
+>             Port{"Count",    PortDirection::Input,  PortType::Float, 1.0f},
+>             Port{"LoopBody", PortDirection::Output, PortType::Flow},
+>             Port{"Out",      PortDirection::Output, PortType::Flow},
+>         };
+>     }
+>
+>     return node;
+> }
+>
+> int ScriptGraph::AddNode(const std::string& type) {
+>     int id = m_nextId++;
+>     m_nodes[id] = CreateNode(id, type);
+>     return id;
+> }
+>
+> bool ScriptGraph::Connect(int srcId, const std::string& srcPort,
+>                            int dstId, const std::string& dstPort) {
+>     if (!m_nodes.count(srcId) || !m_nodes.count(dstId))
+>         return false;
+>     m_links.push_back({srcId, srcPort, dstId, dstPort});
+>     return true;
+> }
+>
+> void ScriptGraph::RemoveNode(int id) {
+>     m_nodes.erase(id);
+>     m_links.erase(
+>         std::remove_if(m_links.begin(), m_links.end(),
+>             [id](const Link& l) { return l.sourceNodeId == id || l.targetNodeId == id; }),
+>         m_links.end()
+>     );
+> }
+> ```
+>
+> #### JSON 序列化
+> ```cpp
+> std::string ScriptGraph::Serialize() const {
+>     json j;
+>     j["nodes"] = json::array();
+>     for (const auto& [id, node] : m_nodes) {
+>         json nj;
+>         nj["id"]   = node->id;
+>         nj["type"] = node->type;
+>         nj["ports"] = json::array();
+>         for (const auto& p : node->ports) {
+>             json pj;
+>             pj["name"]      = p.name;
+>             pj["direction"] = (p.direction == PortDirection::Input) ? "in" : "out";
+>             pj["portType"]  = static_cast<int>(p.type);
+>             nj["ports"].push_back(pj);
+>         }
+>         j["nodes"].push_back(nj);
+>     }
+>
+>     j["links"] = json::array();
+>     for (const auto& l : m_links) {
+>         json lj;
+>         lj["srcId"]     = l.sourceNodeId;
+>         lj["srcPort"]   = l.sourcePort;
+>         lj["dstId"]     = l.targetNodeId;
+>         lj["dstPort"]   = l.targetPort;
+>         j["links"].push_back(lj);
+>     }
+>
+>     return j.dump(2);
+> }
+>
+> std::unique_ptr<ScriptGraph> ScriptGraph::Deserialize(const std::string& jsonStr) {
+>     json j = json::parse(jsonStr);
+>     auto graph = std::make_unique<ScriptGraph>();
+>
+>     // 先恢复节点，记录旧 id → 新 id 映射
+>     std::unordered_map<int, int> idMap;
+>     for (const auto& nj : j["nodes"]) {
+>         int oldId = nj["id"].get<int>();
+>         int newId = graph->AddNode(nj["type"].get<std::string>());
+>         idMap[oldId] = newId;
+>     }
+>
+>     // 恢复连接（使用映射后的新 ID）
+>     for (const auto& lj : j["links"]) {
+>         int srcId = idMap.at(lj["srcId"].get<int>());
+>         int dstId = idMap.at(lj["dstId"].get<int>());
+>         graph->Connect(srcId, lj["srcPort"], dstId, lj["dstPort"]);
+>     }
+>
+>     return graph;
+> }
+> ```
+>
+> #### 解释器 — 执行脚本图
+> ```cpp
+> // ScriptInterpreter.h
+> #pragma once
+> #include "VisualScript.h"
+> #include <stack>
+>
+> class ScriptInterpreter {
+> public:
+>     explicit ScriptInterpreter(ScriptGraph* graph);
+>
+>     // 从 Start 节点开始执行
+>     void Execute(float deltaTime);
+>
+>     // 获取/设置变量（如节点执行过程中产生的中间值）
+>     std::any GetVariable(const std::string& name) const;
+>     void SetVariable(const std::string& name, std::any value);
+>
+> private:
+>     // 获取连接：给定源节点和源端口，找目标节点
+>     std::vector<std::pair<Node*, std::string>> GetConnectedTargets(
+>         int srcNodeId, const std::string& srcPort) const;
+>
+>     // 获取输入值：沿连接回溯或使用默认值
+>     std::any GetInputValue(int nodeId, const std::string& portName) const;
+>
+>     // 执行单个节点，返回下一个要执行的节点列表（Flow 端口连接的目标）
+>     std::vector<Node*> ExecuteNode(Node* node);
+>
+>     ScriptGraph* m_graph;
+>     std::unordered_map<std::string, std::any> m_variables;
+>     std::unordered_map<int, int> m_loopCounters; // nodeId → 剩余循环次数
+>     float m_deltaTime = 0.0f;
+> };
+> ```
+>
+> ```cpp
+> // ScriptInterpreter.cpp
+> #include "ScriptInterpreter.h"
+> #include <queue>
+> #include <cassert>
+>
+> ScriptInterpreter::ScriptInterpreter(ScriptGraph* graph)
+>     : m_graph(graph) {}
+>
+> std::vector<std::pair<Node*, std::string>> ScriptInterpreter::GetConnectedTargets(
+>         int srcNodeId, const std::string& srcPort) const {
+>     std::vector<std::pair<Node*, std::string>> results;
+>     for (const auto& link : m_graph->GetLinks()) {
+>         if (link.sourceNodeId == srcNodeId && link.sourcePort == srcPort) {
+>             auto it = m_graph->GetNodes().find(link.targetNodeId);
+>             if (it != m_graph->GetNodes().end()) {
+>                 results.emplace_back(it->second.get(), link.targetPort);
+>             }
+>         }
+>     }
+>     return results;
+> }
+>
+> std::any ScriptInterpreter::GetInputValue(int nodeId, const std::string& portName) const {
+>     // 查找是否有连接提供此输入端口的输入
+>     for (const auto& link : m_graph->GetLinks()) {
+>         if (link.targetNodeId == nodeId && link.targetPort == portName) {
+>             // 从源节点的输出端口获取值（简化：查变量表）
+>             std::string key = std::to_string(link.sourceNodeId) + ":" + link.sourcePort;
+>             auto it = m_variables.find(key);
+>             if (it != m_variables.end()) return it->second;
+>         }
+>     }
+>     // 回退到端口的默认值
+>     auto nodeIt = m_graph->GetNodes().find(nodeId);
+>     if (nodeIt != m_graph->GetNodes().end()) {
+>         for (const auto& p : nodeIt->second->ports) {
+>             if (p.name == portName && p.direction == PortDirection::Input) {
+>                 return p.defaultValue;
+>             }
+>         }
+>     }
+>     return {};
+> }
+>
+> std::vector<Node*> ScriptInterpreter::ExecuteNode(Node* node) {
+>     std::vector<Node*> nextNodes;
+>
+>     if (node->type == "Start") {
+>         auto targets = GetConnectedTargets(node->id, "Out");
+>         for (auto& [tgt, _] : targets) nextNodes.push_back(tgt);
+>     }
+>     else if (node->type == "Update") {
+>         auto dt = GetInputValue(node->id, "DeltaTime");
+>         if (dt.has_value()) m_deltaTime = std::any_cast<float>(dt);
+>         auto targets = GetConnectedTargets(node->id, "Out");
+>         for (auto& [tgt, _] : targets) nextNodes.push_back(tgt);
+>     }
+>     else if (node->type == "Move") {
+>         // 读取 Target 和 Speed，执行移动逻辑
+>         auto target  = GetInputValue(node->id, "Target");
+>         auto speed   = GetInputValue(node->id, "Speed");
+>         // 实际实现中会调用引擎 API 移动对象；这里简化
+>         float sp = speed.has_value() ? std::any_cast<float>(speed) : 1.0f;
+>         // ... Lerp toward target by sp * m_deltaTime
+>
+>         auto targets = GetConnectedTargets(node->id, "Out");
+>         for (auto& [tgt, _] : targets) nextNodes.push_back(tgt);
+>     }
+>     else if (node->type == "Rotate") {
+>         auto angleVal = GetInputValue(node->id, "Angle");
+>         auto axisVal  = GetInputValue(node->id, "Axis");
+>         float angle = angleVal.has_value() ? std::any_cast<float>(angleVal) : 0.0f;
+>         // ... 执行旋转
+>
+>         auto targets = GetConnectedTargets(node->id, "Out");
+>         for (auto& [tgt, _] : targets) nextNodes.push_back(tgt);
+>     }
+>     else if (node->type == "If") {
+>         auto cond = GetInputValue(node->id, "Condition");
+>         bool result = cond.has_value() ? std::any_cast<bool>(cond) : false;
+>
+>         std::string portName = result ? "True" : "False";
+>         auto targets = GetConnectedTargets(node->id, portName);
+>         for (auto& [tgt, _] : targets) nextNodes.push_back(tgt);
+>     }
+>     else if (node->type == "Loop") {
+>         auto& counter = m_loopCounters[node->id];
+>         // 首次进入：读取 Count 输入端口的初始值
+>         if (counter == 0) {
+>             auto cnt = GetInputValue(node->id, "Count");
+>             counter = static_cast<int>(cnt.has_value() ? std::any_cast<float>(cnt) : 1.0f);
+>         }
+>
+>         if (counter > 0) {
+>             --counter;
+>             auto bodyTargets = GetConnectedTargets(node->id, "LoopBody");
+>             for (auto& [tgt, _] : bodyTargets) nextNodes.push_back(tgt);
+>         } else {
+>             // 循环结束，走 Out 端口
+>             counter = 0;  // 重置
+>             auto outTargets = GetConnectedTargets(node->id, "Out");
+>             for (auto& [tgt, _] : outTargets) nextNodes.push_back(tgt);
+>         }
+>     }
+>
+>     return nextNodes;
+> }
+>
+> void ScriptInterpreter::Execute(float deltaTime) {
+>     m_deltaTime = deltaTime;
+>
+>     // BFS 遍历执行图：从 Start 节点开始
+>     std::queue<Node*> queue;
+>     for (const auto& [id, node] : m_graph->GetNodes()) {
+>         if (node->type == "Start") {
+>             queue.push(node.get());
+>             break;
+>         }
+>     }
+>
+>     std::unordered_set<int> visited;
+>     while (!queue.empty()) {
+>         Node* current = queue.front();
+>         queue.pop();
+>
+>         // 避免无限循环（Loop 节点由内部计数控制，这里只防普通环路）
+>         if (visited.count(current->id)) continue;
+>         visited.insert(current->id);
+>
+>         auto next = ExecuteNode(current);
+>         for (Node* n : next) {
+>             queue.push(n);
+>         }
+>     }
+> }
+>
+> std::any ScriptInterpreter::GetVariable(const std::string& name) const {
+>     auto it = m_variables.find(name);
+>     return (it != m_variables.end()) ? it->second : std::any{};
+> }
+>
+> void ScriptInterpreter::SetVariable(const std::string& name, std::any value) {
+>     m_variables[name] = std::move(value);
+> }
+> ```
+>
+> #### 使用示例：构建并执行一个简单的脚本图
+> ```cpp
+> void DemoVisualScript() {
+>     ScriptGraph graph;
+>
+>     // 创建节点
+>     int startId  = graph.AddNode("Start");
+>     int updateId = graph.AddNode("Update");
+>     int moveId   = graph.AddNode("Move");
+>     int loopId   = graph.AddNode("Loop");
+>     int ifId     = graph.AddNode("If");
+>     int rotateId = graph.AddNode("Rotate");
+>
+>     // 连接节点
+>     graph.Connect(startId,  "Out",       updateId,  "In");
+>     graph.Connect(updateId, "Out",       loopId,    "In");
+>     graph.Connect(loopId,   "LoopBody",  ifId,      "In");
+>     graph.Connect(ifId,     "True",      moveId,    "In");
+>     graph.Connect(ifId,     "False",     rotateId,  "In");
+>     graph.Connect(moveId,   "Out",       loopId,    "In");     // 回到 Loop
+>     graph.Connect(rotateId, "Out",       loopId,    "In");     // 回到 Loop
+>
+>     // 序列化
+>     std::string json = graph.Serialize();
+>     std::cout << "Serialized graph:\n" << json << '\n';
+>
+>     // 反序列化
+>     auto restored = ScriptGraph::Deserialize(json);
+>
+>     // 执行
+>     ScriptInterpreter interpreter(restored.get());
+>     interpreter.SetVariable(std::to_string(ifId) + ":Condition", true);
+>     interpreter.Execute(0.016f);
+> }
+> ```
 ## 4. 扩展阅读
 
 ### 书籍

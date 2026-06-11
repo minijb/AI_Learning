@@ -2406,6 +2406,365 @@ Query found 4 overlapping objects
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // OBB-Sphere 相交测试（基于SAT思想）
+>
+> // 将球心投影到OBB的某个轴上，计算投影区间重叠
+> bool OBBSphereIntersect(const OBB& obb, const Sphere& sphere,
+>                         Vec3& mtv) {
+>     // 将球心转换到OBB局部坐标
+>     Vec3 localCenter = obb.WorldToLocal(sphere.center);
+>
+>     // 找到OBB表面离球心最近的点（在局部坐标系中）
+>     Vec3 closest;
+>     closest.x = std::max(-obb.halfExtents.x,
+>                        std::min(localCenter.x, obb.halfExtents.x));
+>     closest.y = std::max(-obb.halfExtents.y,
+>                        std::min(localCenter.y, obb.halfExtents.y));
+>     closest.z = std::max(-obb.halfExtents.z,
+>                        std::min(localCenter.z, obb.halfExtents.z));
+>
+>     // 最近点与球心的距离
+>     Vec3 diff = closest - localCenter;
+>     float distSq = diff.LengthSq();
+>     float rSq = sphere.radius * sphere.radius;
+>
+>     if (distSq > rSq) return false;  // 不相交
+>
+>     // 计算MTV：需要测试以下轴
+>     // 1. OBB的3个局部轴
+>     // 2. 球心到OBB最近点的方向
+>
+>     float dist = std::sqrt(distSq);
+>
+>     if (dist < 1e-6f) {
+>         // 球心在OBB内部或表面上，选择穿透最小的OBB轴
+>         float overlapX = obb.halfExtents.x
+>                        - std::abs(localCenter.x);
+>         float overlapY = obb.halfExtents.y
+>                        - std::abs(localCenter.y);
+>         float overlapZ = obb.halfExtents.z
+>                        - std::abs(localCenter.z);
+>
+>         float minOverlap = std::min({overlapX, overlapY, overlapZ});
+>         mtv = obb.axes[0] * (overlapX + sphere.radius);
+>         if (overlapY <= overlapX && overlapY <= overlapZ)
+>             mtv = obb.axes[1] * (overlapY + sphere.radius);
+>         if (overlapZ <= overlapX && overlapZ <= overlapY)
+>             mtv = obb.axes[2] * (overlapZ + sphere.radius);
+>
+>         // 方向修正：push sphere out of OBB
+>         Vec3 worldCenter = obb.center;
+>         if (Dot(mtv, sphere.center - worldCenter) < 0)
+>             mtv = mtv * -1.0f;
+>     } else {
+>         float penetration = sphere.radius - dist;
+>
+>         // 最近点方向（在局部空间）
+>         Vec3 localNormal = diff / dist;
+>
+>         // 转换到世界空间
+>         Vec3 worldNormal = obb.LocalToWorld(localNormal)
+>                          - obb.center;
+>         worldNormal.Normalize();
+>
+>         mtv = worldNormal * penetration;
+>     }
+>
+>     return true;
+> }
+>
+> // 测试函数
+> void TestOBBSphere() {
+>     // 创建旋转45度的OBB
+>     float angle = 3.14159265f / 4.0f;  // 45度
+>     Vec3 axisX(std::cos(angle), std::sin(angle), 0);
+>     Vec3 axisY(-std::sin(angle), std::cos(angle), 0);
+>     Vec3 axisZ(0, 0, 1);
+>     Vec3 axes[3] = {axisX, axisY, axisZ};
+>     OBB obb(Vec3(0, 0, 0), axes, Vec3(2, 1, 1));
+>
+>     // 球体部分穿透OBB
+>     Sphere sphere(Vec3(2.5, 0.5, 0), 1.0f);
+>
+>     Vec3 mtv;
+>     bool hit = OBBSphereIntersect(obb, sphere, mtv);
+>     std::cout << "OBB-Sphere Intersect: " << hit
+>               << " (expected: 1)\n";
+>     if (hit) {
+>         std::cout << "MTV: (" << mtv.x << ", "
+>                   << mtv.y << ", " << mtv.z << ")\n";
+>     }
+>
+>     // 不穿透测试
+>     Sphere farSphere(Vec3(10, 10, 0), 1.0f);
+>     hit = OBBSphereIntersect(obb, farSphere, mtv);
+>     std::cout << "OBB-Sphere Far: " << hit
+>               << " (expected: 0)\n";
+> }
+> ```
+>
+> **核心思路**：OBB-Sphere相交检测分两步：(1)将球心变换到OBB局部坐标——此时OBB退化为AABB(-halfExtents, +halfExtents)，问题简化为AABB-Sphere检测；(2)计算最近点和穿透深度。当球心在OBB内部时，MTV方向取穿透最小的OBB轴；球心在外时，MTV方向由最近点→球心方向决定。SAT需要测试OBB的3个轴加上球心到最近点的方向，但通过坐标变换实际上将问题退化到了更简单的形式。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 优化 GJK 算法
+>
+> class OptimizedGJK {
+> public:
+>     // 缓存的上次查询信息
+>     struct GJKCache {
+>         Vec3 lastDirection;   // 上次分离轴方向
+>         bool isValid = false;
+>     };
+>
+>     // 包围体预检测 + 缓存加速 + 距离模式
+>     struct GJKResult {
+>         bool intersect;
+>         float distance;        // 不相交时的最短距离
+>         Vec3 closestA, closestB;  // 最短距离对应的最近点对
+>         Vec3 separatingAxis;   // 分离轴（缓存下次使用）
+>     };
+>
+>     // 1. 早期退出：包围体预检测
+>     bool EarlyOut(const ConvexShape& a, const ConvexShape& b) {
+>         // AABB快速预检测
+>         AABB aabbA = a.GetAABB();
+>         AABB aabbB = b.GetAABB();
+>         if (!AABBIntersect(aabbA, aabbB)) return false;
+>
+>         // Sphere可选预检测
+>         Sphere sphereA = a.GetBoundingSphere();
+>         Sphere sphereB = b.GetBoundingSphere();
+>         float distSq = (sphereA.center - sphereB.center).LengthSq();
+>         float rSum = sphereA.radius + sphereB.radius;
+>         if (distSq > rSum * rSum) return false;
+>
+>         return true;  // 包围体重叠，需要精确检测
+>     }
+>
+>     // 2. 带缓存的GJK查询
+>     GJKResult ComputeDistance(const ConvexShape& a,
+>                                const ConvexShape& b,
+>                                GJKCache& cache) {
+>         GJKResult result;
+>         result.intersect = false;
+>         result.distance = std::numeric_limits<float>::max();
+>
+>         // 早期退出
+>         if (!EarlyOut(a, b)) {
+>             // 不相交：用分离轴方向估算距离
+>             // ...
+>             cache.lastDirection =
+>                 (b.GetBoundingSphere().center
+>                  - a.GetBoundingSphere().center).Normalized();
+>             cache.isValid = true;
+>             return result;
+>         }
+>
+>         // 使用缓存的方向作为初始搜索方向
+>         // 如果缓存有效且物体相邻帧变化不大，通常1-2次迭代就收敛
+>         Vec3 direction;
+>         if (cache.isValid) {
+>             direction = cache.lastDirection;
+>         } else {
+>             // 首次查询用随机方向或质心方向
+>             direction = (b.GetBoundingSphere().center
+>                        - a.GetBoundingSphere().center);
+>             if (direction.LengthSq() < 1e-6f)
+>                 direction = Vec3(1, 0, 0);
+>             direction.Normalize();
+>         }
+>
+>         // 标准GJK迭代（这里简化为框架）
+>         Simplex simplex;
+>         int maxIter = 32;
+>
+>         for (int iter = 0; iter < maxIter; ++iter) {
+>             Vec3 supportA = a.Support(direction);
+>             Vec3 supportB = b.Support(-direction);
+>             Vec3 supportPoint = supportA - supportB;
+>
+>             // 如果支持点不在原点方向，物体分离
+>             float dot = Dot(supportPoint, direction);
+>             if (dot < 0) {
+>                 result.intersect = false;
+>                 // 3. 距离模式：计算两个形状之间的最短距离
+>                 result.distance =
+>                     ComputeClosestDistance(simplex, a, b);
+>                 break;
+>             }
+>
+>             simplex.Add(supportPoint);
+>
+>             if (simplex.ContainsOrigin()) {
+>                 result.intersect = true;
+>                 result.distance = 0.0f;
+>                 break;
+>             }
+>
+>             // 更新方向
+>             direction = simplex.ComputeNewDirection();
+>         }
+>
+>         // 缓存分离轴方向
+>         cache.lastDirection = direction;
+>         cache.isValid = true;
+>
+>         return result;
+>     }
+>
+>     // 最短距离计算（两个分离凸体之间）
+>     float ComputeClosestDistance(const Simplex& simplex,
+>                                   const ConvexShape& a,
+>                                   const ConvexShape& b) {
+>         // 使用单纯形中的点计算最近点对
+>         // Johnson算法：求解单纯形中离原点最近的点
+>         Vec3 closestPoint;  // Minkowski差中离原点最近的点
+>         // ... (具体实现依赖单纯形数据结构)
+>         return closestPoint.Length();
+>     }
+> };
+>
+> // 性能基准测试
+> void BenchmarkGJK() {
+>     OptimizedGJK gjk;
+>     std::vector<ConvexShape> shapes = GenerateRandomShapes(1000);
+>
+>     auto start = std::chrono::high_resolution_clock::now();
+>     int hitCount = 0;
+>     for (size_t i = 0; i < shapes.size(); ++i) {
+>         for (size_t j = i + 1; j < shapes.size(); ++j) {
+>             OptimizedGJK::GJKCache cache;  // 每对有自己的缓存
+>             auto result = gjk.ComputeDistance(
+>                 shapes[i], shapes[j], cache);
+>             if (result.intersect) hitCount++;
+>         }
+>     }
+>     auto end = std::chrono::high_resolution_clock::now();
+>     auto ms = std::chrono::duration_cast<
+>         std::chrono::milliseconds>(end - start).count();
+>
+>     std::cout << "Tested " << (shapes.size() * (shapes.size()-1)/2)
+>               << " pairs in " << ms << "ms\n";
+>     std::cout << "Hits: " << hitCount << "\n";
+> }
+> ```
+>
+> **核心思路**：(1)AABB/Sphere包围体预检测用O(1)操作排除大量不可能碰撞对，对n=1000的场景通常排除90%+对。(2)缓存支持方向利用"时间相干性"——相邻帧物体的相对位置变化很小，上一帧的分离轴方向很可能仍是本帧的有效方向，通常只需1-2次迭代。(3)距离模式在分离时返回最短距离和最近点对（如Johnson算法或Casey算法），这对物理引擎的穿透/分离反馈至关重要。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // CCD.hpp —— 基于 Conservative Advancement 的连续碰撞检测
+>
+> class SphereCCD {
+> public:
+>     struct CCDResult {
+>         bool hit;
+>         float toi;  // Time of Impact [0, 1]
+>         Vec3 contactPoint;
+>         Vec3 contactNormal;
+>     };
+>
+>     // Conservative Advancement: 安全推进直到碰撞或时间耗尽
+>     CCDResult Detect(const Sphere& a, const Vec3& velA,
+>                      const Sphere& b, const Vec3& velB,
+>                      float dt) {
+>         CCDResult result;
+>         result.hit = false;
+>         result.toi = 0.0f;
+>
+>         float t = 0.0f;
+>         Vec3 posA = a.center;
+>         Vec3 posB = b.center;
+>
+>         const float TOLERANCE = 0.001f;
+>         int maxIter = 100;
+>
+>         for (int iter = 0; iter < maxIter; ++iter) {
+>             // 当前位置的距离
+>             Vec3 diff = posB - posA;
+>             float dist = diff.Length();
+>             float minDist = a.radius + b.radius;
+>
+>             // 已经相交
+>             if (dist <= minDist + TOLERANCE) {
+>                 result.hit = true;
+>                 result.toi = t;
+>                 Vec3 dir = diff.Normalized();
+>                 result.contactNormal = dir;
+>                 result.contactPoint = posA + dir * a.radius;
+>                 return result;
+>             }
+>
+>             // 相对速度沿连心线方向的分量
+>             Vec3 relVel = velB - velA;
+>             Vec3 dir = -diff.Normalized();  // A→B方向
+>             float closingSpeed = Dot(relVel, dir);
+>
+>             // 如果不再接近，本次时间步不会碰撞
+>             if (closingSpeed <= 1e-6f) {
+>                 return result;  // no hit
+>             }
+>
+>             // 安全推进距离（不会产生穿透的最大步长）
+>             float safeAdvance = (dist - minDist) / closingSpeed;
+>
+>             // 确保推进不过头
+>             if (t + safeAdvance > dt) {
+>                 t = dt;
+>                 break;
+>             }
+>
+>             // 推进时间
+>             t += safeAdvance + TOLERANCE;
+>             if (t >= dt) break;
+>
+>             // 更新位置
+>             posA = a.center + velA * t;
+>             posB = b.center + velB * t;
+>         }
+>
+>         return result;
+>     }
+> };
+>
+> // CCD vs DCD 对比测试
+> void TestCCDvsDCD() {
+>     // 两个高速球体：一帧内移动距离 > 直径之和
+>     Sphere bullet(Vec3(0, 0, 0), 0.1f);      // 子弹（小）
+>     Sphere target(Vec3(1.0f, 0.02f, 0), 0.2f); // 靶子
+>     float dt = 1.0f / 60.0f;  // 16.67ms
+>
+>     // 子弹速度极快：一帧穿越靶子
+>     Vec3 bulletVel(100.0f, 0, 0);  // 100 m/s
+>     Vec3 targetVel(0, 0, 0);
+>
+>     // DCD检测
+>     Vec3 bulletEnd = bullet.center + bulletVel * dt;
+>     Sphere bulletEndSphere(bulletEnd, bullet.radius);
+>     bool dcdHit = SphereIntersect(bulletEndSphere, target);
+>     std::cout << "DCD: " << (dcdHit ? "HIT" : "MISS")
+>               << " — 子弹穿过靶子，DCD漏检!\n";
+>
+>     // CCD检测
+>     SphereCCD ccd;
+>     auto ccdResult = ccd.Detect(bullet, bulletVel,
+>                                  target, targetVel, dt);
+>     std::cout << "CCD: " << (ccdResult.hit ? "HIT" : "MISS")
+>               << " — TOI=" << ccdResult.toi
+>               << " (正确捕获碰撞)\n";
+> }
+> ```
+>
+> **核心思路**：Conservative Advancement通过"最大安全步长"避免了隧道效应。每次迭代计算当前位置下两球体的距离d和接近速度v，安全推进`(d - r1 - r2) / v`的距离——这个步长保证了推进后两球体不会超过切线接触的位置，因此不会产生穿透。DCD（离散碰撞检测）只检查帧末位置，如果物体速度足够快可以在一帧内完全穿越另一个物体（隧道效应），CCD通过沿轨迹连续采样消除了这个盲区。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 经典文献

@@ -604,6 +604,250 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **纹理预算计算：**
+>
+> ```
+> 总显存:                    8.0 GB  = 8192 MB
+> 渲染目标 (G-Buffer + 深度等):  -800 MB
+> Mesh 数据:                  -1200 MB
+> 其他 (CB/Shader/RT):         -500 MB
+> ─────────────────────────────────────────
+> 纹理可用预算:               5692 MB
+> ```
+>
+> **方案 A：BC7 2K 纹理：**
+> ```
+> 单张 2K BC7 纹理 (含 Mipmap): 2048×2048/16 blocks × 16 bytes/block × 4/3
+>                             = 262,144 × 16 × 1.333
+>                             = 5,592,405 bytes ≈ 5.33 MB
+>
+> 每个材质 4 张贴图:          ≈ 21.33 MB
+> 最多材质数:                 5692 / 21.33 ≈ 267 个材质
+> ```
+>
+> **方案 B：ASTC 6×6 2K 纹理：**
+> ```
+> 单张 2K ASTC 6×6 纹理 (含 Mipmap): 2048×2048/36 blocks × 16 bytes/block × 4/3
+>                                   = 116,508 × 16 × 1.333
+>                                   = 2,484,061 bytes ≈ 2.37 MB
+>
+> 每个材质 4 张贴图:          ≈ 9.48 MB
+> 最多材质数:                 5692 / 9.48 ≈ 600 个材质
+> ```
+>
+> | 格式 | 单张 2K 大小 | 4 张/材质 | 最多材质数 |
+> |------|------------|----------|-----------|
+> | BC7 | 5.33 MB | 21.33 MB | ~267 |
+> | ASTC 6×6 | 2.37 MB | 9.48 MB | ~600 |
+>
+> **结论**：使用 ASTC 6×6 可支持的材质数量是 BC7 的 2.25 倍。但注意：ASTC 在 PC 上需要 DX11+ 或 Vulkan 支持。
+
+> [!tip]- 练习 2 参考答案
+> **Unity 中分析纹理的操作步骤：**
+>
+> 1. **打开 Project 窗口，按大小排序**：
+>    - Project 窗口 → 右上角菜单 → "One Column Layout" 或使用 `Editor.dll` 扩展
+>    - 更直接的方法：Window → Analysis → **Asset Manager** (Unity 2022+) 或使用 **Build Report**
+>    - 或者写 Editor 脚本：
+>      ```csharp
+>      // 在 Unity Editor 中运行
+>      var textures = AssetDatabase.FindAssets("t:Texture2D")
+>          .Select(guid => AssetDatabase.GUIDToAssetPath(guid))
+>          .Select(path => AssetImporter.GetAtPath(path) as TextureImporter)
+>          .Where(imp => imp != null);
+>      foreach (var t in textures.OrderByDescending(t => {
+>          var info = new FileInfo(t.assetPath);
+>          return info.Exists ? info.Length : 0;
+>      }).Take(10)) {
+>          var info = new FileInfo(t.assetPath);
+>          Debug.Log($"{t.name}: {info.Length / 1024 / 1024}MB, "
+>                  + $"MaxSize={t.maxTextureSize}, Format={t.textureFormat}");
+>      }
+>      ```
+>
+> 2. **逐一判断**（对最大的 10 个纹理）：
+>    ```
+>    纹理名              分辨率       格式     大小      建议
+>    ────────────────────────────────────────────────────────────
+>    Skybox_HDRI         4096×2048    RGBA Half  32 MB   可降为 2048×1024 (8MB)
+>    Terrain_Diffuse     4096×4096    BC7       21 MB    地形可拆分多 Tile
+>    Character_Body      4096×4096    BC7       21 MB    主角保持，NPC 降为 2K
+>    UI_Background       4096×4096    RGBA32    64 MB    无脑用 4K 浪费！降为 1024
+>    Props_Atlas         4096×4096    BC7       21 MB    合理 - 图集合批
+>    Foliage_Atlas       4096×4096    BC7       21 MB    合理
+>    Building_Facade     4096×4096    BC7       21 MB    远景建筑 2K 足够
+>    Ground_Mud          2048×2048    BC7       5.3 MB   可接受
+>    Particle_Sheet      2048×2048    BC7       5.3 MB   可接受
+>    Logo_Splash         2048×2048    RGBA32   16 MB    用 BC7 代替 RGBA32!
+>    ────────────────────────────────────────────────────────────
+>    节省显存估算:          ~100 MB
+>    ```
+>
+> 3. **常见"无脑 4K"的浪费场景**：
+>    - UI 背景图：屏幕上的 UI 通常只有 1920×1080 或更小，4K 完全浪费
+>    - 小型道具：玩家永远不会靠近到能看到 4K 细节的距离
+>    - 天空盒：2048×1024 已经足够（是环绕的，每个方向只占部分）
+>    - UI 按钮/图标：256×256 或 512×512 即可
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```python
+> # bin_packing_atlas.py — First Fit Decreasing Height 纹理打包
+> # 运行: python bin_packing_atlas.py
+>
+> from dataclasses import dataclass
+> from typing import List, Tuple
+> import math
+>
+> @dataclass
+> class TextureRect:
+>     name: str
+>     width: int
+>     height: int
+>     x: int = 0   # 图集中的位置 (填充)
+>     y: int = 0
+>     u0: float = 0.0
+>     v0: float = 0.0
+>     u1: float = 0.0
+>     v1: float = 0.0
+>     padding: int = 2
+>
+> @dataclass
+> class AtlasResult:
+>     atlas_width: int
+>     atlas_height: int
+>     rects: List[TextureRect]
+>     occupancy: float  # 空间利用率
+>
+> def next_power_of_two(n: int) -> int:
+>     """返回 ≥ n 的最小 2 的幂"""
+>     p = 1
+>     while p < n:
+>         p *= 2
+>     return p
+>
+> def pack_textures(
+>     textures: List[Tuple[str, int, int]],
+>     padding: int = 2,
+>     max_size: int = 4096
+> ) -> AtlasResult:
+>     """
+>     First Fit Decreasing Height 算法：
+>     1. 按高度降序排列纹理
+>     2. 每个纹理放在第一个能容纳它的"货架"上
+>     3. 货架满后开启新货架
+>     """
+>     # 创建对象并加 padding
+>     rects = []
+>     for name, w, h in textures:
+>         r = TextureRect(name=name, width=w + 2*padding, height=h + 2*padding, padding=padding)
+>         rects.append(r)
+>
+>     # 按高度降序排列 (FFDH)
+>     rects.sort(key=lambda r: r.height, reverse=True)
+>
+>     # 简易货架算法
+>     class Shelf:
+>         def __init__(self, y, height, max_w):
+>             self.y = y
+>             self.height = height
+>             self.remaining_x = 0
+>             self.max_width = max_w
+>
+>         def try_place(self, w):
+>             if self.remaining_x + w <= self.max_width:
+>                 x = self.remaining_x
+>                 self.remaining_x += w
+>                 return x, self.y
+>             return None
+>
+>     shelves: List[Shelf] = []
+>     total_h = 0
+>     max_w_used = 0
+>
+>     for rect in rects:
+>         placed = False
+>         # 尝试放入现有货架
+>         for shelf in shelves:
+>             result = shelf.try_place(rect.width)
+>             if result is not None:
+>                 rect.x, rect.y = result
+>                 placed = True
+>                 max_w_used = max(max_w_used, rect.x + rect.width)
+>                 break
+>
+>         if not placed:
+>             # 新建货架
+>             new_shelf = Shelf(total_h, rect.height, max_size)
+>             rect.x, rect.y = new_shelf.try_place(rect.width)
+>             total_h += rect.height
+>             shelves.append(new_shelf)
+>             max_w_used = max(max_w_used, rect.width)
+>
+>     # 取 2 的幂作为图集尺寸
+>     atlas_w = next_power_of_two(max_w_used)
+>     atlas_h = next_power_of_two(total_h)
+>
+>     # 计算 UV 坐标
+>     for rect in rects:
+>         pad = rect.padding
+>         rect.u0 = (rect.x + pad + 0.5) / atlas_w
+>         rect.v0 = (rect.y + pad + 0.5) / atlas_h
+>         rect.u1 = (rect.x + rect.width - pad - 0.5) / atlas_w
+>         rect.v1 = (rect.y + rect.height - pad - 0.5) / atlas_h
+>
+>     # 计算空间利用率
+>     used_area = sum(r.width * r.height for r in rects)
+>     occupancy = used_area / (atlas_w * atlas_h) * 100
+>
+>     return AtlasResult(atlas_w, atlas_h, rects, occupancy)
+>
+>
+> # ====== 测试 ======
+> if __name__ == "__main__":
+>     # 各种尺寸的纹理
+>     textures = [
+>         ("rock_diffuse",    512, 512),
+>         ("grass_diffuse",   256, 256),
+>         ("wood_planks",     512, 256),
+>         ("metal_panel",     256, 512),
+>         ("dirt_ground",    1024, 1024),
+>         ("brick_wall",      512, 512),
+>         ("stone_tile",      256, 256),
+>         ("roof_shingle",    512, 256),
+>         ("glass_window",    128, 256),
+>         ("door_wood",       256, 512),
+>         ("fence_iron",      256, 128),
+>         ("ivy_vine",        512, 128),
+>         ("crate_wood",      512, 512),
+>         ("barrel_metal",    256, 256),
+>     ]
+>
+>     result = pack_textures(textures, padding=2)
+>
+>     print(f"图集尺寸: {result.atlas_width}×{result.atlas_height}")
+>     print(f"空间利用率: {result.occupancy:.1f}%\n")
+>     print(f"{'纹理名':<20} {'原始尺寸':<12} {'图集位置':<12} {'UV 坐标'}")
+>     print("-" * 70)
+>     for r in result.rects:
+>         print(f"{r.name:<20} {r.width-4}×{r.height-4:<6} "
+>               f"({r.x},{r.y}:{r.width}×{r.height}) "
+>               f"({r.u0:.4f},{r.v0:.4f})-({r.u1:.4f},{r.v1:.4f})")
+>
+>     print(f"\n注意: 每个纹理周围有 2px padding 防止 Mipmap 渗漏")
+> ```
+>
+> **设计要点：**
+> - FFDH（First Fit Decreasing Height）：按高度降序排列，放入第一个能容纳的货架
+> - 图集尺寸取 2 的幂（GPU 要求）
+> - 每个纹理周围 2px padding 防止 Mipmap 低层颜色渗漏
+> - UV 坐标加半像素偏移避免边缘采样问题
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **NVIDIA Texture Compression Guide** — https://developer.nvidia.com/astc-texture-compression-for-game-assets：ASTC 和 BCn 的详细对比

@@ -726,6 +726,576 @@ public interface IDocumentTemplate : ICloneable
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // 手写递归深拷贝实现
+> // ============================================
+> public class GameCharacter
+> {
+>     public string Name { get; set; } = "";
+>     public int Level { get; set; }
+>     public Equipment? Weapon { get; set; }
+>     public Equipment? Armor { get; set; }
+>     public List<Skill> Skills { get; set; } = new();
+>
+>     /// <summary>手写递归深拷贝：完全独立的副本</summary>
+>     public GameCharacter DeepClone()
+>     {
+>         var clone = new GameCharacter
+>         {
+>             Name = this.Name,
+>             Level = this.Level,
+>             // 深拷贝嵌套对象（处理 null）
+>             Weapon = this.Weapon?.DeepClone(),
+>             Armor = this.Armor?.DeepClone(),
+>             // 深拷贝 List：创建新列表 + 每个元素递归克隆
+>             Skills = this.Skills.Select(s => s.DeepClone()).ToList()
+>         };
+>         return clone;
+>     }
+> }
+>
+> public class Equipment
+> {
+>     public string Name { get; set; } = "";
+>     public int Durability { get; set; }
+>     public List<string> Enchantments { get; set; } = new();
+>
+>     /// <summary>深拷贝装备：Enchantments 需要新 List</summary>
+>     public Equipment DeepClone()
+>     {
+>         return new Equipment
+>         {
+>             Name = this.Name,
+>             Durability = this.Durability,
+>             // 字符串是不可变的，只需浅拷贝 List 本身
+>             Enchantments = new List<string>(this.Enchantments)
+>         };
+>     }
+> }
+>
+> public class Skill
+> {
+>     public string Name { get; set; } = "";
+>     public int Level { get; set; }
+>
+>     public Skill DeepClone()
+>     {
+>         return new Skill
+>         {
+>             Name = this.Name,
+>             Level = this.Level
+>         };
+>     }
+> }
+>
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static void TestDeepClone()
+> {
+>     var original = new GameCharacter
+>     {
+>         Name = "勇者",
+>         Level = 50,
+>         Weapon = new Equipment
+>         {
+>             Name = "圣剑",
+>             Durability = 100,
+>             Enchantments = new List<string> { "火属性", "光属性" }
+>         },
+>         Armor = null, // 故意为 null — 测试空引用处理
+>         Skills = new List<Skill>
+>         {
+>             new Skill { Name = "劈斩", Level = 5 },
+>             new Skill { Name = "火球术", Level = 3 }
+>         }
+>     };
+>
+>     var clone = original.DeepClone();
+>
+>     // 修改副本的引用类型字段
+>     clone.Weapon!.Enchantments.Add("冰属性");
+>     clone.Weapon.Name = "魔剑";
+>     clone.Skills[0].Level = 10;
+>     clone.Skills.Add(new Skill { Name = "治疗", Level = 1 });
+>
+>     // 验证原对象不受影响
+>     Console.WriteLine("=== 原对象 ===");
+>     Console.WriteLine($"Weapon.Name: {original.Weapon!.Name}");         // 圣剑
+>     Console.WriteLine($"Enchantments: [{string.Join(", ", original.Weapon.Enchantments)}]");
+>     // 火属性, 光属性（没有冰属性）
+>     Console.WriteLine($"Skills[0].Level: {original.Skills[0].Level}");  // 5
+>     Console.WriteLine($"Skills.Count: {original.Skills.Count}");        // 2
+>     Console.WriteLine($"Armor: {original.Armor?.Name ?? "null"}");      // null
+>
+>     Console.WriteLine("\n=== 副本 ===");
+>     Console.WriteLine($"Weapon.Name: {clone.Weapon.Name}");             // 魔剑
+>     Console.WriteLine($"Enchantments: [{string.Join(", ", clone.Weapon.Enchantments)}]");
+>     // 火属性, 光属性, 冰属性
+>     Console.WriteLine($"Skills[0].Level: {clone.Skills[0].Level}");     // 10
+>     Console.WriteLine($"Skills.Count: {clone.Skills.Count}");           // 3
+>     Console.WriteLine($"Armor: {clone.Armor?.Name ?? "null"}");         // null
+>
+>     // 关键断言
+>     System.Diagnostics.Debug.Assert(
+>         original.Weapon.Enchantments.Count == 2,
+>         "原对象的 Enchantments 不应被修改");
+>     System.Diagnostics.Debug.Assert(
+>         original.Skills.Count == 2,
+>         "原对象的 Skills 列表不应被修改");
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // 1. 文档模板接口
+> // ============================================
+> public interface IDocumentTemplate : ICloneable
+> {
+>     string TemplateName { get; }
+>     string Category { get; }
+>     IDocumentTemplate CloneTemplate();
+> }
+>
+> // ============================================
+> // 2. 三种具体模板
+> // ============================================
+> public class InvoiceTemplate : IDocumentTemplate
+> {
+>     public string TemplateName { get; set; } = "";
+>     public string Category => "发票";
+>     public string CompanyName { get; set; } = "";
+>     public string TaxId { get; set; } = "";
+>     public decimal TaxRate { get; set; } = 0.13m;
+>     public string BankAccount { get; set; } = "";
+>
+>     public object Clone() => MemberwiseClone();
+>     public IDocumentTemplate CloneTemplate() =>
+>         (InvoiceTemplate)MemberwiseClone();
+> }
+>
+> public class ReportTemplate : IDocumentTemplate
+> {
+>     public string TemplateName { get; set; } = "";
+>     public string Category => "报告";
+>     public string Header { get; set; } = "";
+>     public string Footer { get; set; } = "";
+>     public string FontFamily { get; set; } = "SimSun";
+>     public int FontSize { get; set; } = 12;
+>
+>     public object Clone() => MemberwiseClone();
+>     public IDocumentTemplate CloneTemplate() =>
+>         (ReportTemplate)MemberwiseClone();
+> }
+>
+> public class ContractTemplate : IDocumentTemplate
+> {
+>     public string TemplateName { get; set; } = "";
+>     public string Category => "合同";
+>     public string PartyA { get; set; } = "";    // 甲方
+>     public string PartyB { get; set; } = "";    // 乙方
+>     public string GoverningLaw { get; set; } = "中华人民共和国法律";
+>     public List<string> Clauses { get; set; } = new();
+>
+>     // 合同模板的 CloneTemplate 需要深拷贝 Clauses 列表
+>     // （Invoice/Report 的字段都是值类型/string，浅拷贝够用）
+>     public object Clone()
+>     {
+>         var clone = (ContractTemplate)MemberwiseClone();
+>         clone.Clauses = new List<string>(this.Clauses);
+>         return clone;
+>     }
+>     public IDocumentTemplate CloneTemplate() =>
+>         (ContractTemplate)Clone();
+> }
+>
+> // ============================================
+> // 3. 模板注册表
+> // ============================================
+> public class TemplateRegistry
+> {
+>     private readonly Dictionary<string, IDocumentTemplate> _templates = new();
+>
+>     public void Register(IDocumentTemplate template)
+>     {
+>         if (template == null)
+>             throw new ArgumentNullException(nameof(template));
+>         _templates[template.TemplateName] = template;
+>     }
+>
+>     public void Unregister(string templateName)
+>     {
+>         _templates.Remove(templateName);
+>     }
+>
+>     /// <summary>按模板名称创建（克隆）</summary>
+>     public IDocumentTemplate Create(string templateName)
+>     {
+>         if (!_templates.TryGetValue(templateName, out var prototype))
+>             throw new KeyNotFoundException(
+>                 $"模板 '{templateName}' 不存在");
+>         return prototype.CloneTemplate();
+>     }
+>
+>     /// <summary>按类别查询所有模板名</summary>
+>     public IEnumerable<string> GetTemplateNamesByCategory(string category)
+>     {
+>         return _templates.Values
+>             .Where(t => t.Category == category)
+>             .Select(t => t.TemplateName);
+>     }
+>
+>     /// <summary>列出所有分类</summary>
+>     public IEnumerable<string> GetAllCategories()
+>     {
+>         return _templates.Values
+>             .Select(t => t.Category)
+>             .Distinct();
+>     }
+> }
+>
+> // ============================================
+> // 4. 预置模板加载
+> // ============================================
+> public static class DefaultTemplates
+> {
+>     public static TemplateRegistry LoadDefaults()
+>     {
+>         var registry = new TemplateRegistry();
+>
+>         registry.Register(new InvoiceTemplate
+>         {
+>             TemplateName = "标准发票",
+>             CompanyName = "示例科技有限公司",
+>             TaxId = "91110000MA00000000",
+>             TaxRate = 0.13m,
+>             BankAccount = "6222 0000 0000 0000 000"
+>         });
+>
+>         registry.Register(new InvoiceTemplate
+>         {
+>             TemplateName = "出口发票",
+>             CompanyName = "示例科技有限公司",
+>             TaxId = "91110000MA00000000",
+>             TaxRate = 0.00m,  // 出口零税率
+>             BankAccount = "6222 0000 0000 0000 001"
+>         });
+>
+>         registry.Register(new ReportTemplate
+>         {
+>             TemplateName = "周报",
+>             Header = "每周工作汇报",
+>             Footer = "—— 示例科技内部文档 ——"
+>         });
+>
+>         registry.Register(new ContractTemplate
+>         {
+>             TemplateName = "销售合同",
+>             PartyA = "示例科技有限公司",
+>             PartyB = "（待填写）",
+>             Clauses = new List<string>
+>             {
+>                 "第一条: 标的物",
+>                 "第二条: 付款方式",
+>                 "第三条: 违约责任"
+>             }
+>         });
+>
+>         return registry;
+>     }
+> }
+>
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static void TestTemplateRegistry()
+> {
+>     var registry = DefaultTemplates.LoadDefaults();
+>
+>     // 按类别查询
+>     Console.WriteLine("=== 发票模板 ===");
+>     foreach (var name in registry.GetTemplateNamesByCategory("发票"))
+>         Console.WriteLine($"  - {name}");
+>
+>     // 克隆并修改
+>     var invoice = (InvoiceTemplate)registry.Create("标准发票");
+>     invoice.CompanyName = "客户定制公司";
+>     invoice.TaxRate = 0.06m;
+>
+>     // 再克隆一个 — 原型不变
+>     var invoice2 = (InvoiceTemplate)registry.Create("标准发票");
+>     Console.WriteLine($"\ninvoice2.CompanyName: {invoice2.CompanyName}");
+>     // "示例科技有限公司" — 原型未被污染
+>
+>     // 验证合同模板的 Clauses 独立
+>     var contract1 = (ContractTemplate)registry.Create("销售合同");
+>     contract1.Clauses.Add("第四条: 保密条款");
+>     var contract2 = (ContractTemplate)registry.Create("销售合同");
+>     Console.WriteLine($"contract1.Clauses: {contract1.Clauses.Count} 条"); // 4
+>     Console.WriteLine($"contract2.Clauses: {contract2.Clauses.Count} 条"); // 3
+> }
+> ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> 以下为 BenchmarkDotNet 基准测试的完整实现。使用前需安装 NuGet 包：
+> ```bash
+> dotnet add package BenchmarkDotNet
+> ```
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+> using System.Text.Json;
+> using BenchmarkDotNet.Attributes;
+> using BenchmarkDotNet.Running;
+> using BenchmarkDotNet.Columns;
+> using BenchmarkDotNet.Configs;
+>
+> // ============================================
+> // 复杂测试对象定义（5+ 层嵌套）
+> // ============================================
+> public class ComplexObject
+> {
+>     public int Id { get; set; }
+>     public string Name { get; set; } = "";
+>     public DateTime CreatedAt { get; set; }
+>     public List<Order> Orders { get; set; } = new();
+>     public Dictionary<string, ConfigEntry> Config { get; set; } = new();
+>     public MetaInfo Meta { get; set; } = new();
+>
+>     public ComplexObject ShallowClone() => (ComplexObject)MemberwiseClone();
+>
+>     public ComplexObject JsonDeepClone()
+>     {
+>         var json = JsonSerializer.Serialize(this);
+>         return JsonSerializer.Deserialize<ComplexObject>(json)!;
+>     }
+>
+>     public ComplexObject ManualDeepClone()
+>     {
+>         var clone = (ComplexObject)MemberwiseClone();
+>         clone.Name = this.Name;
+>         clone.Orders = this.Orders.Select(o => o.DeepClone()).ToList();
+>         clone.Config = new Dictionary<string, ConfigEntry>(
+>             this.Config.Select(kv =>
+>                 new KeyValuePair<string, ConfigEntry>(kv.Key, kv.Value.DeepClone())));
+>         clone.Meta = this.Meta.DeepClone();
+>         return clone;
+>     }
+> }
+>
+> public class Order
+> {
+>     public string OrderId { get; set; } = "";
+>     public decimal Amount { get; set; }
+>     public List<OrderItem> Items { get; set; } = new();
+>
+>     public Order DeepClone()
+>     {
+>         var clone = (Order)MemberwiseClone();
+>         clone.Items = this.Items.Select(i => i.DeepClone()).ToList();
+>         return clone;
+>     }
+> }
+>
+> public class OrderItem
+> {
+>     public string ProductName { get; set; } = "";
+>     public int Quantity { get; set; }
+>     public PriceInfo Price { get; set; } = new();
+>
+>     public OrderItem DeepClone()
+>     {
+>         var clone = (OrderItem)MemberwiseClone();
+>         clone.Price = this.Price.DeepClone();
+>         return clone;
+>     }
+> }
+>
+> public class PriceInfo
+> {
+>     public decimal UnitPrice { get; set; }
+>     public string Currency { get; set; } = "CNY";
+>     public Discount? Discount { get; set; }
+>
+>     public PriceInfo DeepClone()
+>     {
+>         var clone = (PriceInfo)MemberwiseClone();
+>         if (this.Discount != null)
+>             clone.Discount = new Discount
+>             {
+>                 Rate = this.Discount.Rate,
+>                 Reason = this.Discount.Reason
+>             };
+>         return clone;
+>     }
+> }
+>
+> public class Discount
+> {
+>     public decimal Rate { get; set; }
+>     public string Reason { get; set; } = "";
+> }
+>
+> public class ConfigEntry
+> {
+>     public string Value { get; set; } = "";
+>     public DateTime UpdatedAt { get; set; }
+>
+>     public ConfigEntry DeepClone()
+>     {
+>         return (ConfigEntry)MemberwiseClone();
+>     }
+> }
+>
+> public class MetaInfo
+> {
+>     public string CreatedBy { get; set; } = "";
+>     public List<string> Tags { get; set; } = new();
+>     public NestedData Nested { get; set; } = new();
+>
+>     public MetaInfo DeepClone()
+>     {
+>         var clone = (MetaInfo)MemberwiseClone();
+>         clone.Tags = new List<string>(this.Tags);
+>         clone.Nested = this.Nested.DeepClone();
+>         return clone;
+>     }
+> }
+>
+> public class NestedData
+> {
+>     public string Data { get; set; } = "";
+>     public List<int> Values { get; set; } = new();
+>
+>     public NestedData DeepClone()
+>     {
+>         var clone = (NestedData)MemberwiseClone();
+>         clone.Values = new List<int>(this.Values);
+>         return clone;
+>     }
+> }
+>
+> // ============================================
+> // BenchmarkDotNet 基准测试
+> // ============================================
+> [MemoryDiagnoser]
+> [RankColumn]
+> public class CloneBenchmark
+> {
+>     private ComplexObject _source = null!;
+>
+>     [GlobalSetup]
+>     public void Setup()
+>     {
+>         _source = CreateComplexObject();
+>     }
+>
+>     [Benchmark(Baseline = true)]
+>     public ComplexObject MemberwiseClone() => _source.ShallowClone();
+>
+>     [Benchmark]
+>     public ComplexObject JsonSerializerClone() => _source.JsonDeepClone();
+>
+>     [Benchmark]
+>     public ComplexObject ManualDeepClone() => _source.ManualDeepClone();
+>
+>     private static ComplexObject CreateComplexObject()
+>     {
+>         var obj = new ComplexObject
+>         {
+>             Id = 1,
+>             Name = "测试对象",
+>             CreatedAt = DateTime.UtcNow,
+>             Meta = new MetaInfo
+>             {
+>                 CreatedBy = "system",
+>                 Tags = new List<string> { "critical", "production" },
+>                 Nested = new NestedData
+>                 {
+>                     Data = "layer-5-data",
+>                     Values = new List<int> { 1, 2, 3, 4, 5 }
+>                 }
+>             }
+>         };
+>
+>         // 填充 Orders（含嵌套）
+>         for (int i = 0; i < 20; i++)
+>         {
+>             var order = new Order
+>             {
+>                 OrderId = $"ORD-{i:D4}",
+>                 Amount = 100m + i * 10
+>             };
+>             for (int j = 0; j < 3; j++)
+>             {
+>                 order.Items.Add(new OrderItem
+>                 {
+>                     ProductName = $"产品-{i}-{j}",
+>                     Quantity = j + 1,
+>                     Price = new PriceInfo
+>                     {
+>                         UnitPrice = 10.5m + j,
+>                         Discount = j > 0 ? new Discount { Rate = 0.1m, Reason = "批量" } : null
+>                     }
+>                 });
+>             }
+>             obj.Orders.Add(order);
+>         }
+>
+>         // 填充 Config
+>         for (int i = 0; i < 10; i++)
+>         {
+>             obj.Config[$"key-{i}"] = new ConfigEntry
+>             {
+>                 Value = $"value-{i}",
+>                 UpdatedAt = DateTime.UtcNow
+>             };
+>         }
+>
+>         return obj;
+>     }
+> }
+>
+> // Program.cs 入口:
+> // BenchmarkRunner.Run<CloneBenchmark>();
+> ```
+>
+> **性能分析（典型结果趋势）：**
+>
+> | 方案 | 耗时（参考） | 内存分配 | 适用场景 |
+> |------|-------------|----------|---------|
+> | MemberwiseClone | 最快（基线） | 最低 | **不保证深拷贝**，仅当对象无可变引用字段时安全 |
+> | 手写递归 Clone | 基线的 2-5 倍 | 低 | 对象结构已知、性能敏感、零依赖 |
+> | JsonSerializer | 基线的 50-200 倍 | 高（序列化 + 反序列化全量字符串） | 通用、可靠、一行代码、适合非热路径 |
+>
+> **结论：**
+> 1. **MemberwiseClone 不是深拷贝** — 它比手写深拷贝快，是因为它不做任何引用类型的克隆。直接比较"性能"无意义。
+> 2. 手写递归深拷贝在性能上远优于 JsonSerializer（通常快 20-50 倍），且内存分配少得多。
+> 3. JsonSerializer 深拷贝适合**非热路径**（如配置加载、请求级对象复制），不推荐用于每帧/每秒高频调用。
+> 4. 如果对象结构稳定不会频繁变更，**值得**手写深拷贝来避免序列化依赖；但如果对象字段频繁增删，JsonSerializer 的零维护成本可能更划算。
+> 5. 生产环境推荐优先级：**record + with（不可变对象）> 手写 Clone > JsonSerializer > 第三方库**。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
+
 ## 4. 扩展阅读
 
 - [[06-builder|建造者模式]] — Builder 分步构建 vs Prototype 一次克隆，两种"复杂对象创建"的不同思路
@@ -788,6 +1358,7 @@ public MyClass DeepClone()
 `BinaryFormatter` 从 .NET 5 开始标记 `[Obsolete]`，.NET 8+ 默认抛出 `PlatformNotSupportedException`（安全漏洞 CVE：反序列化可执行任意代码）。
 
 **替代方案：**
+
 | 方案 | 性能 | 适用场景 |
 |------|------|---------|
 | `System.Text.Json` | 中 | 通用深拷贝、跨平台 |

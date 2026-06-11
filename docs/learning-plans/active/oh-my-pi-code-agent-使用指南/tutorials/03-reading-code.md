@@ -147,6 +147,78 @@ read memory://root
 2. 查看某个表的结构和示例数据
 3. 用 where 条件过滤特定记录
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在不熟悉的项目中启动 OMP，按以下顺序操作：
+>
+> ```text
+> 1. "展示项目根目录结构"
+>    → OMP 调用 read . （无选择器，返回按时间排序的目录列表）
+>    → 观察：子目录和关键文件一目了然
+>
+> 2. "读取 package.json（或其他构建配置文件）"
+>    → OMP 调用 read package.json 或 read Cargo.toml 等
+>    → 从中了解：项目名、依赖、脚本、入口文件路径
+>
+> 3. "找到入口文件并读取其结构摘要"
+>    → OMP 根据 package.json 的 main/exports 字段定位入口
+>    → 使用 read src/index.ts 返回结构摘要（函数/类签名字段，体省略）
+>    → 观察：摘要中的 `..` 和 `…` 表示省略的函数体
+>
+> 4. "追踪一个关键函数，使用行范围逐步阅读"
+>    → 从摘要中找到目标函数签名所在行号
+>    → 例如："读取 src/index.ts 中 main 函数的完整实现"
+>    → OMP 会先定位函数行号，然后 read src/index.ts:42-80
+> ```
+>
+> **思考题答案：** OMP 使用结构摘要（无选择器）作为"目录"——快速了解文件有哪些函数/类，然后通过行范围精确读取需要的部分。这种"先俯瞰、再聚焦"的策略避免了全量读取大文件。
+
+> [!tip]- 练习 2 参考答案
+> 在一个超 500 行的文件中：
+>
+> ```text
+> 1. "只读取 src/large-file.ts 的 import 部分"
+>    → OMP 通常使用 read src/large-file.ts:1-30
+>    → import 一般在文件头部，所以从第 1 行起读取
+>
+> 2. "读取 processData 函数的完整实现"
+>    → OMP 会先用无选择器 read 获取结构摘要
+>    → 从摘要中找到 processData 的行号位置（如第 200 行）
+>    → 然后 read src/large-file.ts:200+80 读取函数体
+>
+> 3. "读取文件末尾的 exports 部分"
+>    → OMP 可能使用 read src/large-file.ts:450-520
+>    → 或者先用 bash: wc -l 获取文件总行数，再从尾部读取
+> ```
+>
+> **关键技巧：** 当你知道目标但不知道行号时，告诉 OMP 你要找的函数/变量/模式名——它会先用结构摘要或 search 定位，再用精确行范围读取。
+
+> [!tip]- 练习 3 参考答案
+> 如果有 SQLite 数据库（如 `app.db`）：
+>
+> ```text
+> 1. "列出 app.db 中的所有表"
+>    → OMP 调用 read app.db
+>    → 返回非系统表的列表，含行数统计：
+>      users     (150 rows)
+>      posts     (320 rows)
+>      comments  (890 rows)
+>
+> 2. "查看 users 表的结构和示例数据"
+>    → OMP 调用 read app.db:users
+>    → 返回：列定义 + 前 5 条记录作为示例
+>
+> 3. "查询 status='active' 的 users 记录"
+>    → OMP 调用 read app.db:users?where=status='active'&limit=20
+>    → 或 read app.db?q=SELECT * FROM users WHERE status='active' LIMIT 20
+> ```
+>
+> **思考题答案：** OMP 的 SQLite 读取器支持两种模式——`表名:筛选` 的便利语法和 `?q=SELECT` 的完整 SQL。便利语法适用于简单过滤，复杂查询（JOIN、GROUP BY 等）需要用 `?q=` 模式。两种模式都是只读的，不能执行 INSERT/UPDATE/DELETE。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

@@ -691,6 +691,307 @@ GB 30×30          4           37.4ms       1027         6724         1.53ms    
 
 在 200×200 网格上与标准 Dijkstra 对比查询性能。由于网格的规则结构，CH 在网格上的优势不如道路网络明显——这本身就是一个有价值的发现。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 双向 Goal Bounding 需要对每个节点同时预计算**出边 bounds**（前向：从这条边出发能到达哪些区域）和**入边 bounds**（反向：从哪些区域出发能通过这条边到达当前节点）。查询时：前向搜索用出边 bounds 剪枝，反向搜索用入边 bounds 剪枝，两边相遇时取最短路径。
+>
+> ```cpp
+> // 双向 Goal Bounding 关键改动（在 GoalBounding 类中）
+> 
+> // 新增：入边 bounds（反向）
+> // 对于节点 n 的入边 (prev, n)，bounds 存储"从 prev 出发能到达哪些区域"
+> // 查询时反向搜索从 goal 出发，检查入边 bounds 来决定是否扩展
+> std::vector<std::array<RegionSet, 8>> reverse_bounds;
+> 
+> // precompute_reverse: 对每个节点，计算所有入边的 bounds
+> // 入边 (prev, n) 的 bounds = 从 prev 出发生成的区域集 —— 本质上就是用 prev 的出边 bounds
+> // 因此可以复用正向预计算的结果，只是索引方式不同
+> void precompute_reverse() {
+>     reverse_bounds.resize(grid.w * grid.h);
+>     for (auto& arr : reverse_bounds) arr.fill(0);
+> 
+>     for (int y = 0; y < grid.h; ++y) {
+>         for (int x = 0; x < grid.w; ++x) {
+>             if (!grid.walkable(x, y)) continue;
+>             int idx = to_index(x, y);
+>             for (int d = 0; d < 8; ++d) {
+>                 Point nb{x + DIRS[d].x, y + DIRS[d].y};
+>                 if (!grid.walkable(nb)) continue;
+>                 // 入边 (nb→x,y) 的方向是 (d+4)%8（反向）
+>                 // 该入边的 bounds = 从 nb 出发的正向 bounds[d]
+>                 int rev_d = (d + 4) % 8;
+>                 int nb_idx = to_index(nb);
+>                 reverse_bounds[idx][rev_d] = bounds[nb_idx][d];
+>             }
+>         }
+>     }
+> }
+> 
+> // 双向搜索：前向用 bounds，反向用 reverse_bounds
+> AStarResult bidirectional_gb_search(Point s, Point t) {
+>     int target_region = region_of(t);
+>     int start_region  = region_of(s);
+>     RegionSet target_mask = RegionSet(1) << target_region;
+>     RegionSet start_mask  = RegionSet(1) << start_region;
+> 
+>     // 两边各自维护 open/closed/g 值
+>     // forward: 从 s 出发，沿出边，用 bounds 剪枝
+>     // backward: 从 t 出发，沿入边（反向），用 reverse_bounds 剪枝
+>     // 当某节点在两边都被关闭时，检查 dist_fwd[node] + dist_bwd[node] 是否优于当前最佳
+> 
+>     // ...（完整双向实现约 120 行，关键改动如上）
+>     // 性能预期：双向 Goal Bounding = 单向 GB 的 0.5-0.7 倍探索节点数
+> }
+> ```
+>
+> **核心思路**：反向搜索沿**入边**前进，所以用 `reverse_bounds` 而非 `bounds`。反向搜索的目标区域是 start 所在的区域，所以剪枝条件变成 `!(reverse_bounds[cur][d] & start_mask)`。
+>
+> **关键观察**：双向 Goal Bounding 在长距离查询上优势明显（两端搜索树在中间相遇，每端只探索一半距离的节点）。但预处理开销翻倍（需要同时存储出边和入边 bounds）。
+
+> [!tip]- 练习 2 参考答案
+> 自动化区域大小选择的核心洞察是 **预处理时间与查询速度的权衡**：区域越小→bounds 越精确→查询越快，但预处理时间随区域数平方增长。
+>
+> ```cpp
+> // 启发式：给定预处理时间预算，选择最佳区域大小
+> struct RegionSizeHeuristic {
+>     // 输入参数
+>     int map_w, map_h;        // 地图尺寸
+>     double obs_density;      // 障碍物密度 (0~1)
+>     double time_budget_ms;   // 预处理时间预算
+> 
+>     // 输出
+>     int best_rw, best_rh;
+>     double estimated_query_speedup;
+> 
+>     void compute() {
+>         // 步骤 1: 估算可行走格子数
+>         int total_cells = map_w * map_h;
+>         int walkable = (int)(total_cells * (1.0 - obs_density));
+> 
+>         // 步骤 2: 对每种候选区域大小评估
+>         struct Candidate { int rw, rh; double prep_ms, speedup, score; };
+>         std::vector<Candidate> candidates;
+> 
+>         // 候选区域大小：从 4×4 到 map_w/2 × map_h/2
+>         for (int rw = 4; rw <= map_w / 2; rw += 2) {
+>             for (int rh = 4; rh <= map_h / 2; rh += 2) {
+>                 int regions_x = (map_w + rw - 1) / rw;
+>                 int regions_y = (map_h + rh - 1) / rh;
+>                 int n_regions = regions_x * regions_y;
+> 
+>                 // 预处理时间估算（关键模型）
+>                 // 每个 walkable 节点：对每条出边做一个 BFS
+>                 // BFS 覆盖面积 ≈ map_w * map_h * (1 - obs_density) 个格子
+>                 // 总操作数 ≈ walkable × avg_degree × BFS_visited_cells
+>                 double avg_degree = 6.5;  // 8方向网格，扣除边界和障碍
+>                 double bfs_cells = walkable * 0.7;  // BFS 平均覆盖 70% 的可行走区域
+>                 double ops = walkable * avg_degree * bfs_cells;
+>                 // 转换到时间（假设 ~10M ops/ms）
+>                 double prep_ms = ops / 10'000'000.0;
+> 
+>                 // 查询加速比估算（关键模型）
+>                 // 加速比 ∝ 1 / (区域面积)^α，α ≈ 0.3~0.5
+>                 double area_ratio = (double)(rw * rh) / total_cells;
+>                 double speedup = 1.0 + 5.0 * std::pow(1.0 / (area_ratio + 0.01), 0.35);
+>                 // 障碍物密度修正：高密度→bounds 更有效→加速比更大
+>                 speedup *= (1.0 + obs_density * 1.5);
+> 
+>                 // 综合得分：加速比 / log(预处理时间) —— 偏向查询速度但惩罚过度预处理
+>                 double score = speedup / (1.0 + std::log2(1.0 + prep_ms));
+> 
+>                 if (prep_ms <= time_budget_ms) {
+>                     candidates.push_back({rw, rh, prep_ms, speedup, score});
+>                 }
+>             }
+>         }
+> 
+>         // 步骤 3: 选最高分
+>         auto best = std::max_element(candidates.begin(), candidates.end(),
+>             [](auto& a, auto& b) { return a.score < b.score; });
+> 
+>         if (best != candidates.end()) {
+>             best_rw = best->rw; best_rh = best->rh;
+>             estimated_query_speedup = best->speedup;
+>         } else {
+>             // 预算太紧：选最大区域（最少预处理）
+>             best_rw = std::min(map_w / 2, 30);
+>             best_rh = std::min(map_h / 2, 30);
+>             estimated_query_speedup = 1.5;
+>         }
+>     }
+> };
+> ```
+>
+> **验证策略**：在 3 种不同地图（稀疏障碍 10%、中等 25%、密集 40%）上测试，每种地图用自动选择 vs 固定 10×10 区域，对比预处理时间和查询节点数。预期自动选择在给定预算内比固定大小多节省 15-30% 的查询时间。
+>
+> **关键因素分析**：
+> - **地图总面积**：决定预处理的基础工作量 O(V²)，大面积地图下区域不能太小
+> - **障碍物密度**：高密度 → 每个 BFS 更快（被阻挡）→ 可承受更多区域；且剪枝更有效
+> - **连通分量数量**：多个孤立区域时，bounds 的 bitset 中只有少数 bit 被置位，bitset 压缩效果好，可以承受更多区域
+
+> [!tip]- 练习 3 参考答案（可选）
+> 在 2D 网格上实现简化 CH。网格的规则性使 CH 的优势不如道路网络明显，但核心机制仍然有效。
+>
+> ```cpp
+> // 简化 Contraction Hierarchies（网格版）
+> #include <vector>
+> #include <queue>
+> #include <algorithm>
+> 
+> struct CHEdge {
+>     int to;
+>     double cost;
+>     bool is_shortcut;  // true = 捷径边
+> };
+> 
+> class SimpleCH {
+> public:
+>     int n;  // 节点数 = rows × cols
+>     std::vector<std::vector<CHEdge>> forward;   // 前向边（低→高）
+>     std::vector<std::vector<CHEdge>> backward;  // 反向边（高→低）
+>     std::vector<int> level;  // 收缩层级，-1 = 未收缩
+>     std::vector<int> order;  // 收缩顺序，order[i] = 第 i 个被收缩的节点
+> 
+>     SimpleCH(int rows, int cols, const std::vector<bool>& walkable)
+>         : n(rows * cols), forward(n), backward(n), level(n, -1)
+>     {
+>         // 构建初始图：4方向或8方向邻居
+>         for (int r = 0; r < rows; ++r) {
+>             for (int c = 0; c < cols; ++c) {
+>                 int u = r * cols + c;
+>                 if (!walkable[u]) continue;
+>                 for (int d = 0; d < 4; ++d) {
+>                     int nr = r + DX_4[d], nc = c + DY_4[d];
+>                     if (nr < 0 || nr >= rows || nc < 0 || nc >= cols) continue;
+>                     int v = nr * cols + nc;
+>                     if (!walkable[v]) continue;
+>                     forward[u].push_back({v, 1.0, false});
+>                     backward[v].push_back({u, 1.0, false});
+>                 }
+>             }
+>         }
+>     }
+> 
+>     // 节点排序：按度（度数低的先收缩）
+>     void compute_order() {
+>         struct NodeInfo { int id, degree; };
+>         std::vector<NodeInfo> nodes;
+>         for (int i = 0; i < n; ++i) {
+>             if (forward[i].empty() && backward[i].empty()) continue;
+>             int deg = (int)(forward[i].size() + backward[i].size());
+>             nodes.push_back({i, deg});
+>         }
+>         std::sort(nodes.begin(), nodes.end(),
+>             [](auto& a, auto& b) { return a.degree < b.degree; });
+>         for (auto& ni : nodes) order.push_back(ni.id);
+>     }
+> 
+>     // 收缩一个节点
+>     void contract(int v) {
+>         // 对 v 的每对入边/出边邻居 (u, w)，检查是否需要添加快捷边
+>         for (auto& in : backward[v]) {
+>             int u = in.to;
+>             if (level[u] != -1) continue;  // u 已被收缩，跳过
+>             for (auto& out : forward[v]) {
+>                 int w = out.to;
+>                 if (level[w] != -1) continue;
+>                 if (u == w) continue;
+> 
+>                 double sc_cost = in.cost + out.cost;
+> 
+>                 // 检查 u→w 是否已经存在更优的边
+>                 bool exists_better = false;
+>                 for (auto& e : forward[u]) {
+>                     if (e.to == w && e.cost <= sc_cost) {
+>                         exists_better = true; break;
+>                     }
+>                 }
+>                 if (exists_better) continue;
+> 
+>                 // 添加快捷边
+>                 forward[u].push_back({w, sc_cost, true});
+>                 backward[w].push_back({u, sc_cost, true});
+>             }
+>         }
+> 
+>         // 标记已收缩（边保留但方向约束在查询时生效）
+>         level[v] = (int)order.size();  // 分配层级号
+>     }
+> 
+>     void contract_all() {
+>         compute_order();
+>         for (int v : order) contract(v);
+>     }
+> 
+>     // 双向 Dijkstra 查询：两端只向更高层级前进
+>     double query(int s, int t) {
+>         const double INF = 1e18;
+>         std::vector<double> dist_fwd(n, INF), dist_bwd(n, INF);
+>         using Entry = std::pair<double, int>;
+>         std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> pq_fwd, pq_bwd;
+> 
+>         dist_fwd[s] = 0; pq_fwd.push({0, s});
+>         dist_bwd[t] = 0; pq_bwd.push({0, t});
+> 
+>         double best = INF;
+> 
+>         while (!pq_fwd.empty() || !pq_bwd.empty()) {
+>             // 前向扩展
+>             if (!pq_fwd.empty()) {
+>                 auto [d, u] = pq_fwd.top(); pq_fwd.pop();
+>                 if (d > dist_fwd[u]) continue;
+>                 // 相遇检查
+>                 if (dist_bwd[u] < INF)
+>                     best = std::min(best, d + dist_bwd[u]);
+>                 // 只沿"向更高层级"的方向扩展
+>                 for (auto& e : forward[u]) {
+>                     if (level[e.to] <= level[u]) continue;  // CH 核心：只向高处走
+>                     double nd = d + e.cost;
+>                     if (nd < dist_fwd[e.to]) {
+>                         dist_fwd[e.to] = nd;
+>                         pq_fwd.push({nd, e.to});
+>                     }
+>                 }
+>             }
+> 
+>             // 反向扩展（同理，但方向相反）
+>             if (!pq_bwd.empty()) {
+>                 auto [d, u] = pq_bwd.top(); pq_bwd.pop();
+>                 if (d > dist_bwd[u]) continue;
+>                 if (dist_fwd[u] < INF)
+>                     best = std::min(best, d + dist_fwd[u]);
+>                 for (auto& e : backward[u]) {
+>                     if (level[e.to] <= level[u]) continue;
+>                     double nd = d + e.cost;
+>                     if (nd < dist_bwd[e.to]) {
+>                         dist_bwd[e.to] = nd;
+>                         pq_bwd.push({nd, e.to});
+>                     }
+>                 }
+>             }
+> 
+>             // 剪枝：两端最小 key 之和已经不小于 best
+>             if (!pq_fwd.empty() && !pq_bwd.empty()) {
+>                 if (pq_fwd.top().first + pq_bwd.top().first >= best) break;
+>             }
+>         }
+>         return best;
+>     }
+> };
+> ```
+>
+> **在 200×200 网格上的预期表现**：
+> - 预处理时间：~5-15 秒（取决于障碍密度和节点排序策略）
+> - 捷径边数量：约为原始边数的 1.5-3 倍（网格的规则邻居结构限制了大量捷径）
+> - 查询速度：比标准 Dijkstra 快 5-15 倍，但**远不如道路网络上的 100-1000 倍**——因为网格中每个节点的度较低（4-8），收缩后层级深度浅
+> - 与 Goal Bounding 对比：在 200×200 网格上，Goal Bounding (10×10 区域) 通常比简化 CH 更快、预处理更便宜
+>
+> **核心发现**（这是练习最有价值的收获）：CH 的设计假设是**图中有大量不同度数的节点**，可以在收缩时形成深层次结构。网格的规则性（每个节点度 ≈ 4-8）使层级深度有限，CH 的优势被稀释。这说明算法选型必须匹配数据特征——在网格上 Goal Bounding 性价比更高，在道路网络上 CH 无可匹敌。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Rabin (2000): "Speed-Up Techniques for Pathfinding"** — 最早将二分区域 Goal Bounding 引入游戏寻路的文章（Game Programming Gems 1）

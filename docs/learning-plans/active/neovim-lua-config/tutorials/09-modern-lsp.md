@@ -217,6 +217,68 @@ Neovim 0.12 引入了统一的 `:lsp` 命令。尝试：
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 以 Python/Pyright 为例，在 `servers` 表中添加：
+>
+> ```lua
+> local servers = {
+>   stylua = {},
+>   lua_ls = { ... },  -- 保持现有配置
+>
+>   -- 新增
+>   pyright = {},
+> }
+> ```
+>
+> 重启 Neovim 后，mason-tool-installer 会自动安装 `pyright`。验证步骤：
+> 1. 打开 `.py` 文件，执行 `:checkhealth vim.lsp` — 应看到 `pyright` 的状态为 "attached"
+> 2. 输入 `import os` 后悬停 `os` 按 `K` — 应弹出模块文档
+> 3. 故意的语法错误（如 `prin("hello")`）应在 signcolumn 显示诊断标记
+>
+> **关键点**：空表 `{}` 表示使用 lspconfig 提供的默认配置。如果要自定义，例如设置 Python 虚拟环境路径：
+>
+> ```lua
+> pyright = {
+>   settings = {
+>     python = { pythonPath = ".venv/bin/python" },
+>   },
+> },
+> ```
+>
+> **Rust/Go 同理**：将 `pyright` 换为 `rust_analyzer` 或 `gopls`，重启后 mason 自动安装对应服务器。
+
+> [!tip]- 练习 2 参考答案
+> 诊断导航的工作流：
+>
+> 1. **引入错误**：在 Lua 文件中写 `vim.ketmap`（故意拼错 `keymap`），保存后 lua_ls 会标记该行
+> 2. **观察标记**：signcolumn（左侧符号列）出现红色 `E` 标记
+> 3. **跳转导航**：
+>    - `[d` — 跳转到上一个诊断（向文件顶部）
+>    - `]d` — 跳转到下一个诊断（向文件底部）
+> 4. **浮动窗口**：每次跳转时，`jump.on_jump` 回调自动在那个诊断位置弹出浮动窗口，显示错误详情（错误码、消息、来源服务器）
+> 5. **`:lua vim.diagnostic.open_float()`** — 手动打开当前光标下的诊断浮动窗口
+>
+> **背后机制**：`vim.diagnostic.config` 的 `jump.on_jump` 在 kickstart 中配置为自动打开浮动窗口，这样你不需要额外按键就能看到诊断内容。这个行为是可选的——如果把 `jump.on_jump` 设为 `nil`，跳转后不会有浮动窗口弹出。
+
+> [!tip]- 练习 3 参考答案
+> Neovim 0.12 的 `:lsp` 命令族统一了 LSP 生命周期管理：
+>
+> | 命令 | 作用 | 使用场景 |
+> |------|------|---------|
+> | `:lsp start` | 手动启动当前 buffer 的 LSP 服务器（如已附着则无操作） | 手动启动某个被停止的服务器 |
+> | `:lsp stop` | 停止当前 buffer 附着的所有 LSP 服务器 | 临时关闭 LSP 以排查问题（确认某个行为是否由 LSP 引起） |
+> | `:lsp restart` | 先 stop 再 start（等价于 `:lsp stop` 后 `:lsp start`） | 修改 LSP 配置后使改动生效（无需重启 Neovim） |
+>
+> **实践场景**：
+> - 修改了 `lua_ls` 的 `settings.Lua.runtime.version` 后：执行 `:lsp restart` 生效
+> - LSP 服务器卡住或行为异常时：`:lsp stop` → 检查 → `:lsp start`
+> - 注意：`:lsp restart` 会重新创建 `LspAttach` 事件，因此你在 `LspAttach` 回调中设置的 buffer-local keymaps 会被重新设置
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [`:help vim.lsp.config`](https://neovim.io/doc/user/lsp.html#vim.lsp.config) — 新 API 完整参考

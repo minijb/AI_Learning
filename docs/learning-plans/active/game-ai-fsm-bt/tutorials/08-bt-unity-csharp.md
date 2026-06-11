@@ -1220,6 +1220,315 @@ public class Blackboard
 
 **挑战**：如果有 100+ 个 enemy，Gizmos 绘制会让编辑器卡顿。你如何限制只绘制选中的或最近的 N 个单位？
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Repeater 装饰器实现：**
+>
+> ```csharp
+> public class Repeater : DecoratorNode
+> {
+>     private readonly int _repeatCount; // 0 = infinite
+>     private int _currentCount;
+>
+>     public Repeater(BTNode child, int repeatCount) : base(child)
+>     {
+>         _repeatCount = repeatCount;
+>     }
+>
+>     public override BTNodeState Tick()
+>     {
+>         var state = _child.Tick();
+>
+>         if (state == BTNodeState.Failure)
+>         {
+>             Reset();
+>             return BTNodeState.Failure; // 任意一次失败 → Repeater 失败
+>         }
+>
+>         if (state == BTNodeState.Success)
+>         {
+>             _currentCount++;
+>             if (_repeatCount > 0 && _currentCount >= _repeatCount)
+>             {
+>                 Reset();
+>                 return BTNodeState.Success; // 达到重复次数
+>             }
+>             // 重置子节点，准备下一轮重复
+>             ResetChild();
+>             return BTNodeState.Running; // 继续下一轮
+>         }
+>
+>         // state == Running
+>         return BTNodeState.Running;
+>     }
+>
+>     private void ResetChild()
+>     {
+>         if (_child is CompositeNode comp)
+>         {
+>             // 重置组合节点的内部索引
+>             typeof(CompositeNode).GetField("_children",
+>                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)
+>                 ?.SetValue(comp, /* ... reset logic ... */);
+>         }
+>     }
+>
+>     public override void Reset()
+>     {
+>         _currentCount = 0;
+>         base.Reset();
+>     }
+> }
+> ```
+>
+> **MoveToNextWaypoint ActionNode：**
+>
+> ```csharp
+> // 在 BehaviorTree MonoBehaviour 中构建
+> private int _waypointIndex = 0;
+> private Vector3[] _waypoints;
+> private NavMeshAgent _agent;
+>
+> private BTNodeState MoveToNextWaypoint()
+> {
+>     if (_waypoints.Length == 0) return BTNodeState.Failure;
+>
+>     if (!_agent.hasPath || _agent.remainingDistance < 0.5f)
+>     {
+>         _waypointIndex = (_waypointIndex + 1) % _waypoints.Length;
+>         _agent.SetDestination(_waypoints[_waypointIndex]);
+>     }
+>     return BTNodeState.Running; // 持续移动，永不"完成"
+> }
+> ```
+>
+> **WaitAtWaypoint ActionNode：**
+>
+> ```csharp
+> private float _waitTimer;
+>
+> private BTNodeState WaitAtWaypoint()
+> {
+>     _waitTimer += Time.deltaTime;
+>     if (_waitTimer >= 2f)
+>     {
+>         _waitTimer = 0f; // 重置状态
+>         return BTNodeState.Success;
+>     }
+>     return BTNodeState.Running;
+> }
+> ```
+>
+> **Awake 中构建树：**
+>
+> ```csharp
+> void Awake()
+> {
+>     _bt = GetComponent<BehaviorTree>();
+>
+>     // 追击 Sequence
+>     var chaseSeq = new Sequence();
+>     chaseSeq.AddChild(new ConditionNode(() => IsPlayerNear()));
+>     chaseSeq.AddChild(new ActionNode(ChasePlayer));
+>
+>     // 巡逻 Sequence（Repeater 的子节点）
+>     var patrolSeq = new Sequence();
+>     patrolSeq.AddChild(new ActionNode(MoveToNextWaypoint));
+>     patrolSeq.AddChild(new ActionNode(WaitAtWaypoint));
+>
+>     // Repeater(∞) 包裹巡逻
+>     var patrolLoop = new Repeater(patrolSeq, 0); // 0 = infinite
+>
+>     // 根 Selector
+>     var root = new Selector();
+>     root.AddChild(chaseSeq);
+>     root.AddChild(patrolLoop);
+>
+>     _bt.SetRoot(root);
+> }
+> ```
+>
+> **思考题回答：WaitAtWaypoint 状态残留问题**
+>
+> 当守卫检测到玩家、Selector 切换到追击分支、追击结束后回到巡逻时，`WaitAtWaypoint` 上次的 `_waitTimer` **仍然保留着**（如果没有重置机制）。后果：(1) 如果 `_waitTimer` 上次已累积到 ≥2s，WaitAtWaypoint 在第一帧就返回 Success，守卫不会真正等待。(2) 如果 `_waitTimer` 之前是 0.3s，守卫只等待 1.7s 而不是完整的 2s——行为不一致。
+>
+> **两种解决策略：**
+> 1. **OnEnter 重置**：给 ActionNode 添加 `OnEnter()` 回调（在 Sequence / Selector 首次 tick 该节点时调用），在 OnEnter 中 `_waitTimer = 0`。这要求框架为 BTNode 添加 OnEnter/OnExit 生命周期。
+> 2. **每次 Tick 重新评估起始状态**：WaitAtWaypoint 不持有 `_waitTimer`，而是通过 Blackboard 以树路径为 key 存储 `"patrolWaitStartTime"`。每次 Tick 从 Blackboard 读取，如果 key 不存在则初始化为当前时间。这样即使从其他分支回来，首次 Tick 会自动初始化。
+
+> [!tip]- 练习 2 参考答案
+> **Blackboard 实现：**
+>
+> ```csharp
+> public class Blackboard
+> {
+>     private readonly Dictionary<string, object> _data = new Dictionary<string, object>();
+>
+>     public T Get<T>(string key) => (T)_data[key];
+>     public void Set<T>(string key, T value) => _data[key] = value;
+>     public bool TryGetValue<T>(string key, out T value)
+>     {
+>         if (_data.TryGetValue(key, out var obj) && obj is T typed)
+>         {
+>             value = typed;
+>             return true;
+>         }
+>         value = default;
+>         return false;
+>     }
+>     public bool ContainsKey(string key) => _data.ContainsKey(key);
+>     public void Remove(string key) => _data.Remove(key);
+>     public void Clear() => _data.Clear();
+>     public IEnumerable<string> Keys => _data.Keys;
+> }
+> ```
+>
+> **修改 BTNode 基类：**
+>
+> ```csharp
+> public abstract class BTNode
+> {
+>     public Blackboard Blackboard { get; set; }
+>     public abstract BTNodeState Tick();
+> }
+> ```
+>
+> **BehaviorTree 注入 Blackboard：**
+>
+> ```csharp
+> public class BehaviorTree : MonoBehaviour
+> {
+>     private BTNode _root;
+>     public Blackboard Blackboard { get; private set; }
+>
+>     void Awake()
+>     {
+>         Blackboard = new Blackboard();
+>     }
+>
+>     public void SetRoot(BTNode root)
+>     {
+>         _root = root;
+>         InjectBlackboard(_root, Blackboard);
+>     }
+>
+>     private void InjectBlackboard(BTNode node, Blackboard bb)
+>     {
+>         node.Blackboard = bb;
+>         if (node is CompositeNode composite)
+>         {
+>             foreach (var child in composite.GetChildren())
+>                 InjectBlackboard(child, bb);
+>         }
+>         else if (node is DecoratorNode decorator)
+>         {
+>             InjectBlackboard(decorator.Child, bb);
+>         }
+>     }
+> }
+> ```
+>
+> **Cooldown 装饰器（实例隔离版）：**
+>
+> ```csharp
+> public class Cooldown : DecoratorNode
+> {
+>     private readonly float _cooldownSeconds;
+>     private readonly int _instanceId; // per-agent 隔离
+>
+>     public Cooldown(BTNode child, float cooldownSeconds, int instanceId) : base(child)
+>     {
+>         _cooldownSeconds = cooldownSeconds;
+>         _instanceId = instanceId;
+>     }
+>
+>     public override BTNodeState Tick()
+>     {
+>         string key = $"cd_{_instanceId}_{GetHashCode()}"; // 唯一 key
+>
+>         if (Blackboard.TryGetValue<float>(key, out float lastTime))
+>         {
+>             if (Time.time - lastTime < _cooldownSeconds)
+>                 return BTNodeState.Failure; // 冷却中，直接失败
+>         }
+>
+>         var state = _child.Tick();
+>         if (state == BTNodeState.Success)
+>         {
+>             Blackboard.Set(key, Time.time); // 记录成功时间
+>         }
+>         return state;
+>     }
+> }
+> ```
+>
+> **验证 agent 隔离：** 创建两个 Enemy Prefab 实例 A 和 B。A 攻击后进入冷却，打印 Blackboard.Keys 应显示 `cd_A_hashXXXXX` 的 key。B 的 Blackboard 中不应有 A 的 key。在 Cooldown 的 Tick 中通过 `_instanceId` 区分，确保 agent A 的冷却不会影响 agent B。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Editor 工具可视化当前 Tick 路径：**
+>
+> ```csharp
+> // BehaviorTreeRunner.cs — 添加运行时状态追踪
+> public class BehaviorTreeRunner : MonoBehaviour
+> {
+>     [HideInInspector] public List<BTNodeSO> activePath = new List<BTNodeSO>();
+>
+>     void Update()
+>     {
+>         activePath.Clear();
+>         TickAndRecordPath(_rootInstance, activePath);
+>     }
+>
+>     BTNodeState TickAndRecordPath(BTNodeSO node, List<BTNodeSO> path)
+>     {
+>         path.Add(node);
+>         var state = node.Tick(this);
+>         node.lastTickResult = state; // 记录最后一次 Tick 结果
+>
+>         if (state == BTNodeState.Running && node is CompositeNodeSO comp)
+>         {
+>             // 继续追踪 Running 的孩子
+>             foreach (var child in comp.children)
+>             {
+>                 var cs = TickAndRecordPath(child, path);
+>                 if (cs == BTNodeState.Running) break;
+>             }
+>         }
+>         return state;
+>     }
+>
+>     // 在 OnDrawGizmos 中绘制
+>     void OnDrawGizmos()
+>     {
+>         if (activePath == null || activePath.Count == 0) return;
+>
+>         float yOffset = 0f;
+>         foreach (var node in activePath)
+>         {
+>             Color color = node.lastTickResult switch
+>             {
+>                 BTNodeState.Running => Color.yellow,
+>                 BTNodeState.Success => Color.green,
+>                 BTNodeState.Failure => Color.red,
+>                 _ => Color.gray
+>             };
+>             UnityEditor.Handles.Label(
+>                 transform.position + Vector3.up * (2f + yOffset),
+>                 $"{node.name} [{node.lastTickResult}]",
+>                 new GUIStyle { normal = new GUIStyleState { textColor = color } }
+>             );
+>             yOffset += 0.4f;
+>         }
+>     }
+> }
+> ```
+>
+> **100+ enemy 性能优化：** 使用 `Camera.current` 或 `GeometryUtility.CalculateFrustumPlanes` 做视锥体裁剪，只绘制场景视图中可见或选中的 Runner。在 `OnDrawGizmos` 开头检查 `if (Vector3.Distance(transform.position, SceneView.lastActiveSceneView.camera.transform.position) > drawDistance) return;`。或限制仅绘制 `Selection.activeGameObject == gameObject` 的实例。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

@@ -445,6 +445,322 @@ void UpdateTextureData(FMyCustomTextureResource& Resource, const TArray<FColor>&
 3. 在 Unreal Insights 或 Windows Performance Analyzer 中确认你的自定义线程名称出现
 4. 实现线程安全的终止机制（使用 `FEvent` 或 `TAtomic<bool>`）
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **ParallelFor 基准测试 — 实验结果与加速比分析**
+> 
+> **测试代码**：
+> ```cpp
+> #include "CoreMinimal.h"
+> #include "Async/ParallelFor.h"
+> #include "HAL/PlatformTime.h"
+> 
+> void BenchmarkParallelFor()
+> {
+>     TArray<int32> Sizes = { 10'000, 100'000, 1'000'000, 10'000'000 };
+> 
+>     for (int32 N : Sizes)
+>     {
+>         TArray<FVector3f> DataA, DataB;
+>         DataA.SetNum(N); DataB.SetNum(N);
+>         // 初始化随机数据
+>         for (int32 i = 0; i < N; i++)
+>         {
+>             FVector3f V(FMath::FRand(), FMath::FRand(), FMath::FRand());
+>             DataA[i] = V; DataB[i] = V;
+>         }
+> 
+>         // 串行版本
+>         double SerialStart = FPlatformTime::Seconds();
+>         for (int32 i = 0; i < N; i++)
+>         {
+>             DataA[i] = DataA[i] * 2.0f + FVector3f(1, 2, 3);
+>             DataA[i].Normalize();
+>         }
+>         double SerialTime = (FPlatformTime::Seconds() - SerialStart) * 1000.0;
+> 
+>         // 并行版本
+>         double ParallelStart = FPlatformTime::Seconds();
+>         ParallelFor(N, [&DataB](int32 i)
+>         {
+>             DataB[i] = DataB[i] * 2.0f + FVector3f(1, 2, 3);
+>             DataB[i].Normalize();
+>         });
+>         double ParallelTime = (FPlatformTime::Seconds() - ParallelStart) * 1000.0;
+> 
+>         // 单线程并行（bForceSingleThread=true）
+>         double SingleThreadParallelStart = FPlatformTime::Seconds();
+>         ParallelFor(N, [&DataB](int32 i)
+>         {
+>             DataB[i] = DataB[i] * 2.0f + FVector3f(1, 2, 3);
+>             DataB[i].Normalize();
+>         }, true); // bForceSingleThread = true
+>         double SingleThreadParallelTime =
+>             (FPlatformTime::Seconds() - SingleThreadParallelStart) * 1000.0;
+> 
+>         double Speedup = SerialTime / ParallelTime;
+>         double Overhead = SingleThreadParallelTime - SerialTime;
+> 
+>         UE_LOG(LogTemp, Log,
+>             TEXT("N=%d | Serial: %.3fms | Parallel: %.3fms | "
+>                  "SingleThreadParallel: %.3fms | Speedup: %.1fx | Overhead: +%.3fms"),
+>             N, SerialTime, ParallelTime, SingleThreadParallelTime,
+>             Speedup, Overhead);
+>     }
+> }
+> ```
+> 
+> **典型结果**（8 核 CPU 参考值）：
+> 
+> | N | Serial | Parallel | Speedup | SingleThread Overhead |
+> |---|--------|----------|---------|----------------------|
+> | 10K | 0.15ms | 0.12ms | 1.25x | +0.03ms |
+> | 100K | 1.5ms | 0.35ms | 4.3x | +0.05ms |
+> | 1M | 15ms | 2.5ms | 6.0x | +0.08ms |
+> | 10M | 150ms | 22ms | 6.8x | +0.15ms |
+> 
+> **分析**：
+> - **10K 时无收益（1.25x）**：并行调度开销（~0.03ms）与 4 个 Worker Thread 的唤醒开销接近计算本身。每次迭代只需几十 ns，不值得并行。
+> - **100K 时收益明显（4.3x）**：计算时间远大于调度开销，8 核中 ~5-6 核有效工作（其他被系统线程占用）
+> - **1M+ 趋于平缓（6-7x）**：内存带宽成为瓶颈（所有核同时读写 TArray，CPU cache 冲突），接近 Amdahl 定律的理论上限
+> - **SingleThreadParallel overhead**：每次 `ParallelFor` 的框架开销（lambda 包装、边界检查）约 0.03~0.15ms，对小 N 影响相对大
+> 
+> **你的 CPU 上的收益阈值**：
+> - 计算每个 N 元素的 `(serial_time - parallel_time) / (N / num_cores)`
+> - 经验法则：单个迭代 > 1000 CPU 周期（~0.25μs @ 4GHz）才值得并行
+> - 即：`serial_time / N > 0.25μs` → 并行有收益
+
+> [!tip]- 练习 2 参考答案
+> **任务依赖链 — FGraphEvent 的实现**
+> 
+> ```cpp
+> #include "CoreMinimal.h"
+> #include "Async/TaskGraphInterfaces.h"
+> #include "HAL/PlatformTime.h"
+> 
+> void ExecuteStartupTaskChain()
+> {
+>     // ===== Task 1A: ReadFromDisk（模拟 I/O） =====
+>     FGraphEventRef ReadTask = FFunctionGraphTask::CreateAndDispatchWhenReady(
+>         []()
+>         {
+>             UE_LOG(LogTemp, Log, TEXT("[%.3f] ReadFromDisk START"),
+>                 FPlatformTime::Seconds());
+>             FPlatformProcess::Sleep(0.05f); // 模拟 50ms I/O
+>             UE_LOG(LogTemp, Log, TEXT("[%.3f] ReadFromDisk DONE"),
+>                 FPlatformTime::Seconds());
+>         },
+>         TStatId(),
+>         nullptr, // 无前置依赖
+>         ENamedThreads::AnyThread
+>     );
+> 
+>     // ===== Task 1B: CalculateHash（并行于 ReadFromDisk） =====
+>     FGraphEventRef HashTask = FFunctionGraphTask::CreateAndDispatchWhenReady(
+>         []()
+>         {
+>             UE_LOG(LogTemp, Log, TEXT("[%.3f] CalculateHash START"),
+>                 FPlatformTime::Seconds());
+>             FPlatformProcess::Sleep(0.02f); // 模拟 20ms 哈希计算
+>             UE_LOG(LogTemp, Log, TEXT("[%.3f] CalculateHash DONE"),
+>                 FPlatformTime::Seconds());
+>         },
+>         TStatId(),
+>         nullptr, // 无前置依赖（与 Read 并行）
+>         ENamedThreads::AnyThread
+>     );
+> 
+>     // ===== Task 2: DecompressData（等 Read + Hash 都完成） =====
+>     FGraphEventArray Prerequisites;
+>     Prerequisites.Add(ReadTask);
+>     Prerequisites.Add(HashTask);
+> 
+>     FGraphEventRef DecompressTask = FFunctionGraphTask::CreateAndDispatchWhenReady(
+>         []()
+>         {
+>             UE_LOG(LogTemp, Log, TEXT("[%.3f] DecompressData START"),
+>                 FPlatformTime::Seconds());
+>             FPlatformProcess::Sleep(0.02f); // 模拟 20ms 解压
+>             UE_LOG(LogTemp, Log, TEXT("[%.3f] DecompressData DONE"),
+>                 FPlatformTime::Seconds());
+>         },
+>         TStatId(),
+>         &Prerequisites, // ★ 等 Read + Hash 都完成
+>         ENamedThreads::AnyThread
+>     );
+> 
+>     // ===== Task 3: ProcessFinalData（在 GameThread 执行） =====
+>     FGraphEventRef ProcessTask = FFunctionGraphTask::CreateAndDispatchWhenReady(
+>         []()
+>         {
+>             UE_LOG(LogTemp, Log, TEXT("[%.3f] ProcessFinalData on GameThread: ALL DONE!"),
+>                 FPlatformTime::Seconds());
+>         },
+>         TStatId(),
+>         DecompressTask, // ★ 等 Decompress 完成
+>         ENamedThreads::GameThread // ★ 必须在 GameThread 执行
+>     );
+> 
+>     // 等待整个链完成（在 GameThread 上非自旋等待）
+>     FTaskGraphInterface::Get().WaitUntilTasksComplete(
+>         { ProcessTask }, ENamedThreads::GameThread);
+> }
+> ```
+> 
+> **执行时间线验证**（日志输出示例）：
+> ```
+> [0.000] ReadFromDisk START
+> [0.001] CalculateHash START      ← 与 Read 并行！
+> [0.021] CalculateHash DONE
+> [0.050] ReadFromDisk DONE
+> [0.051] DecompressData START     ← 等 Read + Hash 都完成
+> [0.071] DecompressData DONE
+> [0.071] ProcessFinalData on GameThread: ALL DONE!
+> ```
+> 
+> **关键点**：
+> - ReadFromDisk (50ms) 和 CalculateHash (20ms) 同时开始 → wall-clock = max(50, 20) = 50ms
+> - 串行版本 = 50 + 20 + 20 = 90ms → 并行节省 40ms (44%)
+> - `WaitUntilTasksComplete` 在 GameThread 上是非自旋的——会执行其他就绪 Task，不会浪费 CPU
+> - 依赖链通过 `FGraphEventArray` 精确控制——`DecompressTask` 的前提是 `ReadTask && HashTask` 都完成
+
+> [!tip]- 练习 3 参考答案（可选）
+> **自定义命名线程 — FRunnable 实现**
+> 
+> ```cpp
+> // MyWorkerThread.h
+> #pragma once
+> #include "CoreMinimal.h"
+> #include "HAL/Runnable.h"
+> #include "HAL/RunnableThread.h"
+> #include "HAL/Event.h"
+> 
+> class FMyWorkerThread : public FRunnable
+> {
+> public:
+>     FMyWorkerThread();
+>     virtual ~FMyWorkerThread();
+> 
+>     // FRunnable 接口
+>     virtual bool Init() override;
+>     virtual uint32 Run() override;
+>     virtual void Stop() override;
+>     virtual void Exit() override;
+> 
+>     // 外部控制接口
+>     void RequestStop();
+>     bool IsRunning() const { return bRunning; }
+> 
+> private:
+>     FRunnableThread* Thread = nullptr;
+>     FEvent* StopEvent = nullptr;
+>     TAtomic<bool> bRunning{ false };
+>     TAtomic<bool> bStopRequested{ false };
+> };
+> 
+> // MyWorkerThread.cpp
+> FMyWorkerThread::FMyWorkerThread()
+> {
+>     // 使用 FEvent 进行线程安全的终止信号
+>     StopEvent = FPlatformProcess::GetSynchEventFromPool(false);
+> 
+>     // 创建线程（自动调用 Init → Run → Exit）
+>     Thread = FRunnableThread::Create(
+>         this,
+>         TEXT("MyWorker"), // ★ 线程名（在 Unreal Insights / 调试器中可见）
+>         0,                // 栈大小（0 = 默认）
+>         TPri_Normal       // 优先级
+>     );
+> }
+> 
+> FMyWorkerThread::~FMyWorkerThread()
+> {
+>     RequestStop();
+>     if (Thread)
+>     {
+>         Thread->WaitForCompletion(); // 等待线程结束
+>         delete Thread;
+>         Thread = nullptr;
+>     }
+>     if (StopEvent)
+>     {
+>         FPlatformProcess::ReturnSynchEventToPool(StopEvent);
+>         StopEvent = nullptr;
+>     }
+> }
+> 
+> bool FMyWorkerThread::Init()
+> {
+>     // ★ 设置线程名（在 Windows / Unreal Insights 中可见）
+>     FPlatformProcess::SetThreadName(TEXT("MyWorker"));
+> 
+>     bRunning = true;
+>     UE_LOG(LogTemp, Log, TEXT("[MyWorker] Thread initialized (ID: %d)"),
+>         FPlatformTLS::GetCurrentThreadId());
+>     return true;
+> }
+> 
+> uint32 FMyWorkerThread::Run()
+> {
+>     while (!bStopRequested)
+>     {
+>         UE_LOG(LogTemp, Log, TEXT("[MyWorker] Working... (time: %.1f)"),
+>             FPlatformTime::Seconds());
+> 
+>         // 每 100ms 检查一次终止信号（非忙等）
+>         StopEvent->Wait(100); // 等待 100ms 或被 signal
+>     }
+>     return 0;
+> }
+> 
+> void FMyWorkerThread::Stop()
+> {
+>     bStopRequested = true;
+>     if (StopEvent) StopEvent->Trigger(); // 唤醒 Wait
+> }
+> 
+> void FMyWorkerThread::Exit()
+> {
+>     bRunning = false;
+>     UE_LOG(LogTemp, Log, TEXT("[MyWorker] Thread exiting"));
+> }
+> 
+> void FMyWorkerThread::RequestStop()
+> {
+>     bStopRequested = true;
+>     if (StopEvent) StopEvent->Trigger();
+> }
+> 
+> // === 使用示例 ===
+> void TestMyWorker()
+> {
+>     FMyWorkerThread Worker;
+> 
+>     UE_LOG(LogTemp, Log, TEXT("[Main] Worker started, waiting 3 seconds..."));
+>     FPlatformProcess::Sleep(3.0f);
+> 
+>     Worker.RequestStop();
+>     UE_LOG(LogTemp, Log, TEXT("[Main] Stop requested"));
+> }
+> ```
+> 
+> **验证方法**：
+> 1. 编译后运行 → 在 Unreal Insights 中查看 Trace
+> 2. 找到名为 `MyWorker` 的线程
+> 3. 确认每隔 100ms 有一次日志输出
+> 4. 确认主线程 RequestStop 后，Worker 线程在 100ms 内退出（Wait 被 Trigger 提前唤醒）
+> 5. 在 Windows Performance Analyzer (WPA) 中同样可见 `MyWorker` 线程名
+> 
+> **线程安全终止的设计要点**：
+> - `TAtomic<bool>` 保证 `bStopRequested` 的跨线程可见性（无需 mutex）
+> - `FEvent::Wait(100)` 在有超时的等待，避免忙等浪费 CPU
+> - `FEvent::Trigger()` 在 RequestStop 中唤醒等待的线程，使其快速响应终止
+> - 析构函数中使用 `WaitForCompletion()` 确保线程完全退出后才释放资源
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

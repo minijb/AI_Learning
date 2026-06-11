@@ -1276,6 +1276,450 @@ public class AsyncCommandQueue
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // MacroCommand — 实现 ICommand 的命令组合
+> // ============================================
+> public class MacroCommand : ICommand
+> {
+>     private readonly List<ICommand> _commands = new();
+>
+>     public string Description => $"宏命令 ({_commands.Count} 个子命令)";
+>
+>     public MacroCommand() { }
+>
+>     public MacroCommand(IEnumerable<ICommand> commands)
+>     {
+>         _commands.AddRange(commands);
+>     }
+>
+>     public void Add(ICommand command)
+>     {
+>         _commands.Add(command);
+>     }
+>
+>     /// <summary>按正序执行所有子命令</summary>
+>     public void Execute()
+>     {
+>         Console.WriteLine($"  [Macro] 开始执行 {_commands.Count} 个子命令:");
+>         for (int i = 0; i < _commands.Count; i++)
+>         {
+>             Console.WriteLine($"    [{i + 1}/{_commands.Count}] {_commands[i].Description}");
+>             _commands[i].Execute();
+>         }
+>         Console.WriteLine($"  [Macro] 全部子命令执行完成 ✓");
+>     }
+>
+>     /// <summary>按逆序撤销所有子命令</summary>
+>     public void Undo()
+>     {
+>         Console.WriteLine($"  [Macro] 开始逆序撤销 {_commands.Count} 个子命令:");
+>         for (int i = _commands.Count - 1; i >= 0; i--)
+>         {
+>             Console.WriteLine($"    [{_commands.Count - i}/{_commands.Count}] 撤销: {_commands[i].Description}");
+>             _commands[i].Undo();
+>         }
+>         Console.WriteLine($"  [Macro] 全部子命令撤销完成 ✓");
+>     }
+> }
+>
+> // ============================================
+> // 验证：在文本编辑器中测试 插入 Hello + 插入 World + 加粗
+> // ============================================
+> var doc = new Document();
+> var invoker = new CommandInvoker(doc);
+>
+> Console.WriteLine("=== 宏命令演示 ===\n");
+>
+> // 创建宏命令
+> var macro = new MacroCommand();
+> macro.Add(new InsertCommand(doc, 0, "Hello"));
+> macro.Add(new InsertCommand(doc, 5, " World"));
+> macro.Add(new BoldCommand(doc, 0, 5));  // 加粗 Hello
+>
+> Console.WriteLine("1. 执行宏命令:");
+> invoker.ExecuteCommand(macro);
+> Console.WriteLine($"   文档: \"{doc.Text}\"");
+> Console.WriteLine($"   加粗位置: [{string.Join(", ", doc.BoldPositions)}]");
+> Console.WriteLine($"   历史深度: {invoker.HistoryCount}\n");
+>
+> // 一次性撤销（逆序：先取消加粗 → 删除 World → 删除 Hello）
+> Console.WriteLine("2. 撤销宏命令:");
+> invoker.Undo();
+> Console.WriteLine($"   文档: \"{doc.Text}\"");
+> Console.WriteLine($"   加粗位置: [{string.Join(", ", doc.BoldPositions)}]");
+> Console.WriteLine($"   历史深度: {invoker.HistoryCount}\n");
+>
+> // 也可以逐步添加子命令
+> var macro2 = new MacroCommand();
+> macro2.Add(new InsertCommand(doc, 0, "CSharp "));
+> macro2.Add(new InsertCommand(doc, 7, "Rocks"));
+>
+> Console.WriteLine("3. 执行第二个宏命令:");
+> invoker.ExecuteCommand(macro2);
+> Console.WriteLine($"   文档: \"{doc.Text}\"");
+>
+> Console.WriteLine("4. 撤销第二个宏命令:");
+> invoker.Undo();
+> Console.WriteLine($"   文档: \"{doc.Text}\"");
+> ```
+>
+> **关键点**：
+> - `MacroCommand` 实现 `ICommand`——它是 Composite 模式在命令模式中的应用（组合命令）
+> - `Execute()` 正序遍历，`Undo()` 逆序遍历——符合"后进先出"的撤销语义
+> - `MacroCommand` 被推入 `Invoker._history` 作为一个整体——撤销时一次性回滚所有子命令
+> - 可用构造函数批量传入或 `Add()` 逐步构建——两种方式等价
+
+> [!tip]- 练习 2 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+>
+> // ============================================
+> // CommandInvoker — 支持 Undo/Redo
+> // ============================================
+> public class CommandInvoker
+> {
+>     private readonly Stack<ICommand> _undoStack = new();
+>     private readonly Stack<ICommand> _redoStack = new();
+>     private readonly int _maxHistory;
+>
+>     public CommandInvoker(int maxHistory = 100)
+>     {
+>         _maxHistory = maxHistory;
+>     }
+>
+>     public void ExecuteCommand(ICommand command)
+>     {
+>         command.Execute();
+>         _undoStack.Push(command);
+>
+>         // 关键：执行新命令时清空 redo 栈（标准行为）
+>         _redoStack.Clear();
+>
+>         // 限制历史栈大小
+>         if (_undoStack.Count > _maxHistory)
+>         {
+>             // 将最旧的命令移出（无法再撤销）
+>             var old = _undoStack.ToArray()[_undoStack.Count - 1];
+>             // 简易处理：重建栈（Stack 不支持从底部移除）
+>             var temp = new Stack<ICommand>(_undoStack.Take(_maxHistory).Reverse());
+>             _undoStack.Clear();
+>             foreach (var cmd in temp.Reverse())
+>                 _undoStack.Push(cmd);
+>         }
+>     }
+>
+>     public void Undo()
+>     {
+>         if (_undoStack.Count == 0)
+>         {
+>             Console.WriteLine("  [Invoker] 没有可撤销的操作");
+>             return;
+>         }
+>
+>         ICommand command = _undoStack.Pop();
+>         command.Undo();
+>         _redoStack.Push(command);
+>         Console.WriteLine($"  [Invoker] 已撤销: {command.Description}");
+>     }
+>
+>     public void Redo()
+>     {
+>         if (_redoStack.Count == 0)
+>         {
+>             Console.WriteLine("  [Invoker] 没有可重做的操作");
+>             return;
+>         }
+>
+>         ICommand command = _redoStack.Pop();
+>         command.Execute();
+>         _undoStack.Push(command);
+>         Console.WriteLine($"  [Invoker] 已重做: {command.Description}");
+>     }
+>
+>     public int UndoCount => _undoStack.Count;
+>     public int RedoCount => _redoStack.Count;
+> }
+>
+> // ============================================
+> // 验证：展示 Undo → Redo → Undo → 新操作 → Redo 不可用
+> // ============================================
+> var doc = new Document();
+> var invoker = new CommandInvoker(maxHistory: 100);
+>
+> Console.WriteLine("=== 撤销/重做演示 ===\n");
+>
+> Console.WriteLine("--- 步骤 1：执行 3 个操作 ---");
+> invoker.ExecuteCommand(new InsertCommand(doc, 0, "A"));
+> Console.WriteLine($"  文档: \"{doc.Text}\"");
+>
+> invoker.ExecuteCommand(new InsertCommand(doc, 1, "B"));
+> Console.WriteLine($"  文档: \"{doc.Text}\"");
+>
+> invoker.ExecuteCommand(new InsertCommand(doc, 2, "C"));
+> Console.WriteLine($"  文档: \"{doc.Text}\"");
+> Console.WriteLine($"  Undo: {invoker.UndoCount}, Redo: {invoker.RedoCount}\n");
+>
+> Console.WriteLine("--- 步骤 2：撤销两次 ---");
+> invoker.Undo();  // 撤销 C
+> Console.WriteLine($"  文档: \"{doc.Text}\"");
+> invoker.Undo();  // 撤销 B
+> Console.WriteLine($"  文档: \"{doc.Text}\"");
+> Console.WriteLine($"  Undo: {invoker.UndoCount}, Redo: {invoker.RedoCount}\n");
+>
+> Console.WriteLine("--- 步骤 3：重做一次 ---");
+> invoker.Redo();  // 重做 B
+> Console.WriteLine($"  文档: \"{doc.Text}\"");
+> Console.WriteLine($"  Undo: {invoker.UndoCount}, Redo: {invoker.RedoCount}\n");
+>
+> Console.WriteLine("--- 步骤 4：执行新操作（插入 X）---");
+> invoker.ExecuteCommand(new InsertCommand(doc, 0, "X"));
+> Console.WriteLine($"  文档: \"{doc.Text}\"");
+> Console.WriteLine($"  Undo: {invoker.UndoCount}, Redo: {invoker.RedoCount}\n");
+>
+> Console.WriteLine("--- 步骤 5：尝试重做（应不可用，因为 redo 栈已被清空）---");
+> invoker.Redo();
+> Console.WriteLine($"  Undo: {invoker.UndoCount}, Redo: {invoker.RedoCount}");
+> ```
+>
+> **关键点**：
+> - 两个栈：`_undoStack` 和 `_redoStack`
+> - `Undo()`：弹出 undo 栈 → 执行 Undo → 推入 redo 栈
+> - `Redo()`：弹出 redo 栈 → 执行 Execute → 推入 undo 栈
+> - 执行新命令时清空 redo 栈——这是标准行为（Word、VS Code 都是如此：撤销后做了新操作，之前被撤销的操作无法再重做）
+> - `_maxHistory` 限制历史深度——避免长时间运行内存溢出。栈的底部移除实现较粗糙，生产环境可用 `LinkedList<ICommand>` 或自定义环形缓冲区
+
+> [!tip]- 练习 3 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Threading.Channels;
+> using System.Threading.Tasks;
+>
+> // ============================================
+> // IAsyncCommand 接口
+> // ============================================
+> public interface IAsyncCommand
+> {
+>     Task ExecuteAsync();
+>     Task UndoAsync();
+>     string Description { get; }
+> }
+>
+> // ============================================
+> // 具体异步命令 — 文件操作模拟
+> // ============================================
+> public class CopyFileCommand : IAsyncCommand
+> {
+>     private readonly string _source;
+>     private readonly string _dest;
+>
+>     public string Description => $"复制文件: {_source} → {_dest}";
+>
+>     public CopyFileCommand(string source, string dest)
+>     {
+>         _source = source; _dest = dest;
+>     }
+>
+>     public async Task ExecuteAsync()
+>     {
+>         Console.WriteLine($"  [Copy] 开始 {_source} → {_dest}");
+>         await Task.Delay(1000); // 模拟 I/O
+>         Console.WriteLine($"  [Copy] 完成 ✓");
+>     }
+>
+>     public async Task UndoAsync()
+>     {
+>         Console.WriteLine($"  [Copy-Undo] 删除 {_dest}");
+>         await Task.Delay(500);
+>         Console.WriteLine($"  [Copy-Undo] 完成 ✓");
+>     }
+> }
+>
+> public class MoveFileCommand : IAsyncCommand
+> {
+>     private readonly string _source;
+>     private readonly string _dest;
+>
+>     public string Description => $"移动文件: {_source} → {_dest}";
+>
+>     public MoveFileCommand(string source, string dest)
+>     {
+>         _source = source; _dest = dest;
+>     }
+>
+>     public async Task ExecuteAsync()
+>     {
+>         Console.WriteLine($"  [Move] 开始 {_source} → {_dest}");
+>         await Task.Delay(1000);
+>         Console.WriteLine($"  [Move] 完成 ✓");
+>     }
+>
+>     public async Task UndoAsync()
+>     {
+>         Console.WriteLine($"  [Move-Undo] 移回 {_dest} → {_source}");
+>         await Task.Delay(500);
+>         Console.WriteLine($"  [Move-Undo] 完成 ✓");
+>     }
+> }
+>
+> public class DeleteFileCommand : IAsyncCommand
+> {
+>     private readonly string _path;
+>
+>     public string Description => $"删除文件: {_path}";
+>
+>     public DeleteFileCommand(string path) => _path = path;
+>
+>     public async Task ExecuteAsync()
+>     {
+>         Console.WriteLine($"  [Delete] 删除 {_path}");
+>         await Task.Delay(1000);
+>         Console.WriteLine($"  [Delete] 完成 ✓");
+>     }
+>
+>     public async Task UndoAsync()
+>     {
+>         // 实际场景中需要在 ExecuteAsync 时先备份到回收站
+>         Console.WriteLine($"  [Delete-Undo] 从回收站恢复 {_path}");
+>         await Task.Delay(500);
+>         Console.WriteLine($"  [Delete-Undo] 完成 ✓");
+>     }
+> }
+>
+> // ============================================
+> // AsyncCommandQueue — 异步命令队列
+> // ============================================
+> public class AsyncCommandQueue : IAsyncDisposable
+> {
+>     private readonly Channel<IAsyncCommand> _channel;
+>     private readonly Stack<IAsyncCommand> _completed = new();
+>     private readonly Task _consumerTask;
+>     private readonly CancellationTokenSource _cts = new();
+>
+>     public AsyncCommandQueue(int capacity = 100)
+>     {
+>         _channel = Channel.CreateBounded<IAsyncCommand>(new BoundedChannelOptions(capacity)
+>         {
+>             FullMode = BoundedChannelFullMode.Wait  // 队列满时生产者等待
+>         });
+>
+>         // 启动后台消费循环
+>         _consumerTask = Task.Run(() => ConsumeLoop(_cts.Token));
+>     }
+>
+>     /// <summary>将命令加入队列</summary>
+>     public async ValueTask Enqueue(IAsyncCommand command)
+>     {
+>         Console.WriteLine($"[Queue] 入队: {command.Description}");
+>         await _channel.Writer.WriteAsync(command, _cts.Token);
+>     }
+>
+>     /// <summary>撤销最近完成执行的命令</summary>
+>     public async Task UndoLast()
+>     {
+>         if (_completed.Count == 0)
+>         {
+>             Console.WriteLine("[Queue] 没有可撤销的异步命令");
+>             return;
+>         }
+>
+>         var command = _completed.Pop();
+>         Console.WriteLine($"[Queue] 撤销: {command.Description}");
+>         await command.UndoAsync();
+>     }
+>
+>     public int PendingCount => _channel.Reader.Count;
+>     public int CompletedCount => _completed.Count;
+>
+>     private async Task ConsumeLoop(CancellationToken ct)
+>     {
+>         Console.WriteLine("[Queue] 消费者已启动");
+>
+>         await foreach (var command in _channel.Reader.ReadAllAsync(ct))
+>         {
+>             Console.WriteLine($"[Queue] 开始执行: {command.Description}");
+>             try
+>             {
+>                 await command.ExecuteAsync();
+>                 _completed.Push(command);  // 执行成功后记录
+>                 Console.WriteLine($"[Queue] 完成 ✓ (已完成 {_completed.Count} 个)");
+>             }
+>             catch (Exception ex)
+>             {
+>                 Console.WriteLine($"[Queue] 执行失败: {ex.Message}");
+>                 // 失败的命令不推入 completed 栈（不可撤销）
+>             }
+>         }
+>
+>         Console.WriteLine("[Queue] 消费者已停止");
+>     }
+>
+>     /// <summary>完成队列写入并等待所有命令执行完毕</summary>
+>     public async Task CompleteAsync()
+>     {
+>         _channel.Writer.Complete();
+>         await _consumerTask;
+>     }
+>
+>     public async ValueTask DisposeAsync()
+>     {
+>         _cts.Cancel();
+>         _channel.Writer.TryComplete();
+>         try { await _consumerTask; } catch (OperationCanceledException) { }
+>         _cts.Dispose();
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> await using var queue = new AsyncCommandQueue(capacity: 10);
+>
+> Console.WriteLine("=== 异步命令队列演示 ===\n");
+>
+> // 入队 3 个命令
+> await queue.Enqueue(new CopyFileCommand("data.csv", "backup/data.csv"));
+> await queue.Enqueue(new MoveFileCommand("temp.txt", "archive/temp.txt"));
+> await queue.Enqueue(new DeleteFileCommand("junk.log"));
+>
+> Console.WriteLine($"\n队列状态: 待处理 {queue.PendingCount} 个\n");
+>
+> // 等待所有命令执行完毕
+> await queue.CompleteAsync();
+>
+> Console.WriteLine($"\n队列状态: 待处理 {queue.PendingCount}, 已完成 {queue.CompletedCount}\n");
+>
+> // 撤销最近完成的命令（后进先出）
+> Console.WriteLine("--- 依次撤销 ---");
+> await queue.UndoLast();  // 撤销 DeleteFileCommand
+> await queue.UndoLast();  // 撤销 MoveFileCommand
+> await queue.UndoLast();  // 撤销 CopyFileCommand
+> await queue.UndoLast();  // 无更多命令
+> ```
+>
+> **关键点**：
+> - `Channel<IAsyncCommand>` 是 .NET 内置的高性能生产者-消费者通道（比 `BlockingCollection` 更现代，支持 async）
+> - 后台 `ConsumeLoop` 使用 `await foreach` + `ReadAllAsync` 持续消费（直到 `channel.Writer.Complete()`）
+> - `Enqueue` 是 async——队列满时生产者自动等待（`BoundedChannelFullMode.Wait`），避免 OOM
+> - 执行成功的命令推入 `_completed` 栈——失败的命令不进栈，因为部分执行状态不可靠
+> - `UndoLast()` 后进先出——符合命令模式的撤销语义
+> - `IAsyncDisposable` 实现优雅关闭：取消 token → 完成 channel → 等待消费循环退出
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 相关模式

@@ -987,6 +987,279 @@ if __name__ == "__main__":
 
 **验收标准**：产出一份 1 页的方案文档（可以用中文），包含流程图和边界情况处理方案。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Google Benchmark — sort vs stable_sort 性能对比**
+> 
+> ```cpp
+> // sort_benchmark.cpp
+> #include <benchmark/benchmark.h>
+> #include <vector>
+> #include <algorithm>
+> #include <random>
+> 
+> std::vector<int> GenerateData(int count) {
+>     std::vector<int> data(count);
+>     std::mt19937 rng(42);
+>     std::uniform_int_distribution<int> dist(0, count * 10);
+>     for (int i = 0; i < count; ++i) data[i] = dist(rng);
+>     return data;
+> }
+> 
+> static void BM_Sort(benchmark::State& state) {
+>     int count = state.range(0);
+>     auto baseData = GenerateData(count);
+>     for (auto _ : state) {
+>         state.PauseTiming();  // 暂停计时：拷贝数据不计入测量
+>         std::vector<int> data = baseData;
+>         state.ResumeTiming();
+>         std::sort(data.begin(), data.end());
+>         benchmark::DoNotOptimize(data);
+>     }
+>     state.SetItemsProcessed(state.iterations() * count);
+>     state.SetComplexityN(count);
+> }
+> 
+> static void BM_StableSort(benchmark::State& state) {
+>     int count = state.range(0);
+>     auto baseData = GenerateData(count);
+>     for (auto _ : state) {
+>         state.PauseTiming();
+>         std::vector<int> data = baseData;
+>         state.ResumeTiming();
+>         std::stable_sort(data.begin(), data.end());
+>         benchmark::DoNotOptimize(data);
+>     }
+>     state.SetItemsProcessed(state.iterations() * count);
+> }
+> 
+> BENCHMARK(BM_Sort)->RangeMultiplier(10)->Range(1000, 100000)->Complexity();
+> BENCHMARK(BM_StableSort)->RangeMultiplier(10)->Range(1000, 100000)->Complexity();
+> BENCHMARK_MAIN();
+> ```
+> 
+> **运行与导出**：
+> ```bash
+> cmake -B build -DCMAKE_BUILD_TYPE=Release
+> cmake --build build --config Release
+> ./build/sort_benchmark --benchmark_out=results.json --benchmark_out_format=json
+> ```
+> 
+> **典型结果与分析**：
+> 
+> | 数据量 | sort (ns) | stable_sort (ns) | 差异 | 说明 |
+> |--------|-----------|------------------|------|------|
+> | 1,000 | ~8,000 | ~15,000 | +87% | stable_sort 额外分配临时 buffer |
+> | 10,000 | ~120,000 | ~210,000 | +75% | 差距缩小——分配开销被 O(N log N) 摊薄 |
+> | 100,000 | ~1,800,000 | ~3,000,000 | +67% | 更接近理论差异 |
+> 
+> **分析**：
+> - `std::sort` 使用 Introsort（快速排序 + 堆排序 fallback），原地排序，无额外内存分配
+> - `std::stable_sort` 尝试分配临时 buffer 做归并排序；如果分配失败则回退到原地归并（更慢）
+> - 差异主要由额外分配 + 更多数据移动造成
+> - O(N log N) 常数：sort ≈ 1.0, stable_sort ≈ 1.6~1.8
+> - **游戏场景结论**：如果不需要保持相等元素的相对顺序，永远用 `std::sort`
+> 
+> **Python 分析脚本**：
+> ```python
+> import json
+> with open("results.json") as f:
+>     data = json.load(f)
+> for bench in data["benchmarks"]:
+>     name = bench["name"]
+>     time_ns = bench["cpu_time"]
+>     items = bench.get("items_per_second", 0)
+>     print(f"{name}: {time_ns:.0f} ns, {items:.0f} items/s")
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **帧时间回归检测 — 完整流水线**
+> 
+> **测试程序**（`perf_test_program.cpp`）：
+> ```cpp
+> // 每帧做固定计算量，输出帧时间 CSV
+> #include <iostream>
+> #include <cmath>
+> #include <chrono>
+> #include <fstream>
+> 
+> int main(int argc, char* argv[]) {
+>     int workPerFrame = 1000;
+>     if (argc > 1) workPerFrame = std::stoi(argv[1]);
+> 
+>     std::ofstream out("frametimes.csv");
+>     out << "frame,dt_ms" << std::endl;
+> 
+>     // Warmup: 60 帧（跳过冷启动数据）
+>     for (int f = 0; f < 60; ++f) {
+>         volatile double s = 0;
+>         for (int i = 0; i < workPerFrame; ++i) s += std::sqrt((double)i);
+>     }
+> 
+>     // 测量: 500 帧
+>     for (int frame = 0; frame < 500; ++frame) {
+>         auto t0 = std::chrono::high_resolution_clock::now();
+>         volatile double s = 0;
+>         for (int i = 0; i < workPerFrame; ++i) s += std::sqrt((double)i);
+>         auto t1 = std::chrono::high_resolution_clock::now();
+>         double dt = std::chrono::duration<double, std::milli>(t1 - t0).count();
+>         out << frame << "," << dt << std::endl;
+>     }
+>     return 0;
+> }
+> ```
+> 
+> **Python 回归检测脚本**（`perf_regression.py`）：
+> ```python
+> #!/usr/bin/env python3
+> import csv
+> import sys
+> import statistics
+> import argparse
+> 
+> def load_frametimes(path, skip_warmup=60):
+>     times = []
+>     with open(path) as f:
+>         reader = csv.DictReader(f)
+>         for row in reader:
+>             times.append(float(row['dt_ms']))
+>     return times[skip_warmup:]  # 跳过 warmup 帧
+> 
+> def compare(baseline, current, threshold_pct=5.0):
+>     b_mean = statistics.mean(baseline)
+>     c_mean = statistics.mean(current)
+>     b_p99 = sorted(baseline)[int(len(baseline) * 0.99)]
+>     c_p99 = sorted(current)[int(len(current) * 0.99)]
+>     b_stdev = statistics.stdev(baseline)
+>     c_stdev = statistics.stdev(current)
+> 
+>     delta_mean = (c_mean - b_mean) / b_mean * 100
+>     delta_p99 = (c_p99 - b_p99) / b_p99 * 100
+> 
+>     print(f"Baseline: mean={b_mean:.3f}ms, P99={b_p99:.3f}ms, stdev={b_stdev:.3f}")
+>     print(f"Current:  mean={c_mean:.3f}ms, P99={c_p99:.3f}ms, stdev={c_stdev:.3f}")
+>     print(f"Delta mean: {delta_mean:+.1f}%, Delta P99: {delta_p99:+.1f}%")
+> 
+>     if delta_mean > threshold_pct:
+>         print(f"REGRESSION DETECTED: mean frame time increased by {delta_mean:.1f}% (threshold: {threshold_pct}%)")
+>         return 1
+>     elif delta_p99 > threshold_pct * 2:  # P99 阈值更宽松（2x 均值阈值）
+>         print(f"REGRESSION DETECTED: P99 frame time increased by {delta_p99:.1f}%")
+>         return 1
+>     else:
+>         print("OK: No significant regression detected.")
+>         return 0
+> 
+> if __name__ == "__main__":
+>     parser = argparse.ArgumentParser()
+>     parser.add_argument("baseline", help="baseline CSV file")
+>     parser.add_argument("current", help="current CSV file")
+>     parser.add_argument("--threshold", type=float, default=5.0,
+>                         help="regression threshold in percent")
+>     args = parser.parse_args()
+>     baseline = load_frametimes(args.baseline)
+>     current = load_frametimes(args.current)
+>     sys.exit(compare(baseline, current, args.threshold))
+> ```
+> 
+> **完整工作流**：
+> ```bash
+> # Step 1: 生成基线
+> ./perf_test_program 1000
+> cp frametimes.csv baseline.csv
+> 
+> # Step 2: 修改代码 → 重新编译
+> # (修改 workPerFrame 从 1000 → 1200)
+> 
+> # Step 3: 测试当前版本
+> ./perf_test_program 1200
+> cp frametimes.csv current.csv
+> 
+> # Step 4: 回归检测
+> python3 perf_regression.py baseline.csv current.csv --threshold 5.0
+> # 输出: REGRESSION DETECTED: mean frame time increased by +18.3%
+> ```
+> 
+> **阈值调优经验**：
+> - `--threshold 1.0`：过于敏感，正常噪声（±2%）也会触发 → 高误报率
+> - `--threshold 5.0`：平衡点，捕捉真正的回归（如 +10% 计算量）
+> - `--threshold 10.0`：仅捕捉严重回归，可能漏掉渐进式退化
+> - **推荐**：结合统计检验（Mann-Whitney U），阈值 = 3×基线标准差/均值 + 固定 margin
+
+> [!tip]- 练习 3 参考答案（可选）
+> **CI 性能门禁方案设计**
+> 
+> **三个关键性能指标**：
+> 
+> 1. **平均帧时间**（主指标）— 反映整体流畅度
+> 2. **P99 帧时间**（稳定性指标）— 检测间歇性卡顿
+> 3. **Draw Call 数量**（渲染负载指标）— 防止渲染复杂度意外增长
+> 
+> **采集方式**：
+> 
+> | 指标 | 采集方式 | 工具 |
+> |------|---------|------|
+> | 平均帧时间 | 引擎内置 FrameTiming 统计 + 导出 CSV | Unity ProfilerRecorder / UE stat unit |
+> | P99 帧时间 | 同上，取 500 帧样本排序后的 99% 分位数 | 同上 |
+> | Draw Call | Frame Debugger / stat scenerendering | Unity FrameDebugger / UE stat scenerendering |
+> 
+> **基线来源**：
+> - 存储在 CI artifact 或专门的性能数据库（如 InfluxDB）中
+> - 基线 = 最近 5 次成功 main 分支构建的中位数（抗单次噪声）
+> - 基线文件命名：`baseline_{platform}_{scene}.json`
+> 
+> **回归阈值**：
+> - 帧时间均值：+5%（绝对阈值）
+> - P99 帧时间：+10%（更宽松，尖峰波动大）
+> - Draw Call：+3%（绝对计数敏感）
+> 
+> **CI 流程图**：
+> ```
+> PR 提交
+>   ↓
+> [GitHub Actions / Jenkins 触发]
+>   ↓
+> ┌─ 并行构建 ─────────────────────────┐
+> │ Windows Build │ Linux Build │ PS5 Build │
+> └────────────────────────────────────┘
+>   ↓
+> ┌─ 并行测试 ───────────────────────────────┐
+> │ Scene_01 (室内) │ Scene_02 (开放世界) │ ... │
+> └──────────────────────────────────────────┘
+>   ↓
+> 收集所有 frametimes.csv → 对比各平台基线
+>   ↓
+> ┌─ 决策 ───────────────────────────────┐
+> │ 任一平台超阈值?                       │
+> │  YES → CI 失败 + Slack/飞书通知提交者  │
+> │  NO  → CI 通过                        │
+> └──────────────────────────────────────┘
+>   ↓
+> 每周自动更新基线（取本周所有通过的构建的中位数）
+> ```
+> 
+> **边界情况处理**：
+> 
+> 1. **CI 机器换了**：
+>    - 触发强制基线重建（运行 10 次取中位数作为新基线）
+>    - 在性能数据库中标记"硬件变更"事件，避免被误认为回归/改善
+>    - CI 配置中锁定 CPU 频率和 affinity，减少不同机器的差异
+> 
+> 2. **有意的大改动导致合理性能下降**：
+>    - 提供"基线重置"机制：提交者在 PR 描述中添加 `[perf-baseline-reset]`，CI 通过后自动用本次结果更新基线
+>    - 要求提交者附上 perf 分析截图，证明下降是预期的
+>    - 设置"冷却期"：同一场景每月最多 1 次基线重置
+> 
+> 3. **多平台并行**：
+>    - 每个平台有自己独立的基线（不同硬件的绝对帧时间无比较意义）
+>    - 平台间比较的是**相对变化率**（如 Windows +5%, PS5 +3% → 关注平台差异）
+>    - 使用 GitHub Actions matrix build 或 Jenkins parallel stages
+>    - 一个平台失败不阻塞其他平台的测试（fail-fast: false）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

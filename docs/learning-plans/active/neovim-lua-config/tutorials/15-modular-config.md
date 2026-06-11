@@ -497,6 +497,152 @@ nvim --startuptime /tmp/startup-modular.log +q
 - 你会按语言拆分（`/lang/rust.lua`, `/lang/python.lua`）吗？
 - 你的 `after/` 目录会放什么？为什么？
 
+
+## 5.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 将 kickstart.nvim 完整 `init.lua`（983 行）拆分为模块化结构。以下是各文件的关键内容提取策略：
+>
+> **`lua/config/options.lua`** — 从 Section 1 中提取所有 `vim.o.*` / `vim.opt.*` 赋值，去除 `do ... end` 包裹：
+> ```lua
+> vim.o.number = true
+> vim.o.mouse = 'a'
+> vim.o.showmode = false
+> vim.schedule(function() vim.o.clipboard = 'unnamedplus' end)
+> vim.o.breakindent = true
+> vim.o.undofile = true
+> vim.o.ignorecase = true
+> vim.o.smartcase = true
+> vim.o.signcolumn = 'yes'
+> vim.o.updatetime = 250
+> vim.o.timeoutlen = 300
+> vim.o.splitright = true
+> vim.o.splitbelow = true
+> vim.o.inccommand = 'split'
+> vim.o.cursorline = true
+> vim.o.scrolloff = 10
+> vim.o.confirm = true
+> vim.o.list = true
+> vim.opt.listchars = { tab = '» ', trail = '·', nbsp = '␣' }
+> ```
+>
+> **`lua/config/keymaps.lua`** — 从 Section 1 提取所有全局 `vim.keymap.set()`（非 buffer-local 的），包括 `<Esc>` 清搜索、窗口导航 `<C-h/j/k/l>`、终端退出 `<Esc><Esc>`：
+> ```lua
+> vim.keymap.set('n', '<Esc>', '<cmd>nohlsearch<CR>')
+> vim.keymap.set('n', '<C-h>', '<C-w><C-h>', { desc = 'Left window' })
+> vim.keymap.set('n', '<C-l>', '<C-w><C-l>', { desc = 'Right window' })
+> vim.keymap.set('n', '<C-j>', '<C-w><C-j>', { desc = 'Lower window' })
+> vim.keymap.set('n', '<C-k>', '<C-w><C-k>', { desc = 'Upper window' })
+> vim.keymap.set('t', '<Esc><Esc>', '<C-\\><C-n>', { desc = 'Exit terminal mode' })
+> ```
+>
+> **`lua/config/autocmds.lua`** — 提取 `TextYankPost` autocmd（yank 高亮）：
+> ```lua
+> vim.api.nvim_create_autocmd('TextYankPost', {
+>   desc = 'Highlight on yank',
+>   group = vim.api.nvim_create_augroup('highlight-yank', { clear = true }),
+>   callback = function() vim.hl.on_yank() end,
+> })
+> ```
+>
+> **`lua/utils/gh.lua`** — 单行模块，返回函数：
+> ```lua
+> return function(repo)
+>   return 'https://github.com/' .. repo
+> end
+> ```
+>
+> **`lua/utils/helpers.lua`** — `run_build` 和 `map` 两个工具函数，以 table 形式导出。关键：`map` 函数的 `mode` 参数默认逻辑（`mode or 'n'`）。
+>
+> **`lua/plugins/init.lua`** — 这是最关键的入口。包含：
+>   1. `local gh = require('utils.gh')` 和 `local helpers = require('utils.helpers')`
+>   2. `PackChanged` autocmd（处理 treesitter 和 telescope-fzf-native 的构建）
+>   3. 顺序 require 所有插件子模块（ui → navigation → lsp → formatting → completion → treesitter → optional）
+>
+> **`lua/plugins/lsp.lua`** — 最复杂的模块（Section 5），注意保持局部 `map` 函数在 `LspAttach` 回调内部，`servers` 表在文件顶层。
+>
+> **迁移时的关键检查点**：每个文件的代码和原来 `do ... end` 块内的代码**完全一致**——不需要添加 `return M` 或 `.setup()` 包装（除非模块需要参数化）。Lua 的 `require()` 执行文件时就产生副作用（`vim.pack.add()`、`vim.keymap.set()` 等），与 `do ... end` 块的行为等价。
+
+> [!tip]- 练习 2 参考答案
+> 对比单文件与模块化版本的启动时间：
+>
+> ```bash
+> # 1. 备份单文件版
+> cp ~/.config/nvim/init.lua ~/.config/nvim/init.lua.single
+>
+> # 2. 用模块化版替换 init.lua
+> # ... 创建 lua/config/、lua/plugins/ 等目录和文件 ...
+>
+> # 3. 测试单文件版启动时间
+> nvim --startuptime /tmp/startup-single.log +q
+>
+> # 4. 测试模块化版启动时间
+> nvim --startuptime /tmp/startup-modular.log +q
+>
+> # 5. 对比总时间（查看日志最后几行）
+> tail -5 /tmp/startup-single.log
+> tail -5 /tmp/startup-modular.log
+> ```
+>
+> **如何阅读 startup 日志**：每行的格式是 `耗时(ms)  累积(ms)  操作描述`。关注：
+> - 第一列：单步耗时
+> - 第二列：从 Neovim 启动到该步的总耗时
+> - `require('xxx')` 行：模块加载耗时
+> - `sourcing xxx.lua` 行：文件加载耗时
+>
+> **预期结果**：
+> - 模块化版本的 `require()` 调用数量增加了（多文件分散），但每个文件更小
+> - Lua 的模块缓存机制（`package.loaded`）意味着同一个文件不会被重复加载
+> - 总启动时间差异通常在 ±5ms 以内——**模块化不会引入可感知的启动开销**
+> - 如果出现了显著的额外耗时（>20ms），检查是否有文件被意外 require 了两次（循环依赖导致）
+
+> [!tip]- 练习 3 参考答案
+> 自定义目录结构设计——两种合理的替代方案：
+>
+> **方案 A: 按语言拆分（适合多语言用户）**
+> ```
+> lua/
+> ├── config/
+> │   ├── options.lua
+> │   ├── keymaps.lua
+> │   └── autocmds.lua
+> ├── lang/                        ← LSP 配置按语言拆分
+> │   ├── init.lua                  ← 聚合 require，统一调 mason
+> │   ├── lua.lua                   ← lua_ls 专属配置
+> │   ├── python.lua                ← pyright 专属配置
+> │   ├── rust.lua                  ← rust_analyzer 专属配置
+> │   └── typescript.lua            ← tsserver 专属配置
+> ├── plugins/
+> │   ├── init.lua
+> │   ├── ui.lua
+> │   ├── search.lua
+> │   ├── completion.lua
+> │   └── treesitter.lua
+> └── utils/
+> ```
+> **优点**：添加新语言时只改一个文件，不用翻找 LSP section。**缺点**：`lang/init.lua` 要负责 mason 安装和 `vim.lsp.config/enable` 循环，语言文件之间需要约定好数据格式（如返回 server config table）。
+>
+> **方案 B: 保持标准方案，在 `after/` 做覆盖**
+> ```
+> lua/
+> ├── config/    (同上)
+> ├── plugins/   (同上)
+> └── utils/     (同上)
+> after/
+> └── plugin/
+>     ├── mini-statusline.lua   ← 覆盖 statusline 组件
+>     ├── lsp-config.lua        ← 覆盖 LSP 服务器配置
+>     └── custom-keymaps.lua    ← 覆盖/追加 keymaps
+> ```
+> **优点**：核心配置保持"干净"——和 kickstart 主仓库差异最小，方便同步上游。个性修改全部在 `after/` 中，不会和上游冲突。**缺点**：调试时需要记住还有 `after/` 中的覆盖，故障排查链路变长。
+>
+> **方案选择建议**：
+> - 如果你频繁切换和配置多种语言的 LSP → 方案 A
+> - 如果你 fork 了 kickstart 并想定期同步上游更新 → 方案 B
+> - 如果是新手或个人配置，标准方案（教程中的）最合适——简单、可预测、社区讨论时容易沟通
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 6. 扩展阅读

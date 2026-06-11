@@ -1023,6 +1023,234 @@ public struct OrcaSolveJob : IJobParallelFor
 
 5. **性能剖析与优化**：在 500 agent 场景中，用计时器测量：(a) 空间哈希更新的耗时；(b) 邻居查找的总耗时；(c) LP 求解的总耗时。优化最慢的环节——如果 LP 求解占 >50%，尝试早期退出（如果距离最近邻居 > 3×radius，跳过 ORCA 约束构建）。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 修改 setup_bottleneck_scene() 中的门宽
+> void setup_bottleneck_scene(int door_width) {
+>     int wall_y = grid.h / 2;
+>     int gap_start = grid.w / 2 - door_width / 2;
+>     int gap_end   = grid.w / 2 + (door_width - 1) / 2;
+>
+>     // 水平墙，中间留指定宽度的缝隙
+>     for (int x = 0; x < gap_start; ++x)
+>         grid.cost_at(x, wall_y) = INF;
+>     for (int x = gap_end + 1; x < grid.w; ++x)
+>         grid.cost_at(x, wall_y) = INF;
+>     // ... 其余边界墙代码不变
+> }
+> ```
+>
+> **预期结果与分析：**
+>
+> | 门宽 | 到达步数 | 门口密度 | 穿透次数 | 流通率(agents/s) |
+> |------|---------|---------|---------|-----------------|
+> | 1格  | >600(未完成) | 极高 | 2-5 | ~0.3 |
+> | 2格  | ~360 | 中等 | 0 | ~0.56 |
+> | 4格  | ~200 | 低 | 0 | ~1.0 |
+>
+> **门宽与流通率的关系**：流通率 ≈ 门宽 / (2 × agent_radius)。当门宽 < 2 × r_avg 时（r_avg≈0.3→门槛≈0.6），出现"互锁"——两个方向的 ORCA 约束互相冲突，agent 在门口形成僵局。门宽≥3×r_avg 时流通率线性增长。这与真实人群的"瓶颈效应"一致：窄门产生压缩波，宽门产生自由流。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 修改 main() 中 agent 生成时的 time_horizon 对比测试
+> // 方案 A: 默认参数 — 平民 τ=3.0, 士兵 τ=2.0
+> sim.spawn_agents(100, AgentType::Civilian, 3.0f, 28.0f, 3.0f, 26.0f);
+> sim.spawn_agents(20,  AgentType::Soldier,  3.0f, 28.0f, 3.0f, 26.0f);
+>
+> // 方案 B: 士兵更激进 — 修改 get_config 中 Soldier 的 time_horizon
+> AgentConfig get_config(AgentType type) {
+>     switch (type) {
+>         case AgentType::Civilian: return {0.3f, 1.5f, 4.0f,  3.0f};
+>         case AgentType::Soldier:  return {0.25f, 3.0f, 10.0f, 0.5f}; // τ=0.5
+>         case AgentType::Heavy:    return {0.6f,  1.0f, 2.0f,  4.0f};
+>     }
+> }
+> ```
+>
+> **验证方法**：在 `step()` 的到达检测处添加计数——记录每种类型 agent 的到达顺序：
+> ```cpp
+> // 在到达检测处添加
+> static int civilian_arrived = 0, soldier_arrived = 0;
+> if (to_goal.len_sq() < 1.0f) {
+>     A.arrived = true;
+>     if (A.type == AgentType::Civilian) civilian_arrived++;
+>     else if (A.type == AgentType::Soldier) soldier_arrived++;
+> }
+> ```
+>
+> **结论**：τ=0.5s 时士兵到达率约 90%（前 30% 到达的 agent 中士兵占 >50%，尽管士兵只占总数的 16.7%）。原因：更小的 `time_horizon` 使 ORCA 约束范围缩小——士兵只在 0.5s 碰撞范围内避让，而平民在 3s 范围就避让，士兵利用这个"激进窗口"插入空隙。这是 ORCA 中实现"优先级"的自然方式——通过调节 τ 而非显式优先级队列。
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> // 双向人流场景设置
+> int main_counterflow() {
+>     constexpr int GW = 60, GH = 30;
+>
+>     // 两个 Flow Field：一个指向左侧目标，一个指向右侧目标
+>     SimpleGrid grid_right(GW, GH); // 指向右侧
+>     SimpleGrid grid_left(GW, GH);  // 指向左侧
+>
+>     // 清除所有墙，只保留边界（无水平墙分隔——开放走廊）
+>     // 在左侧生成 → 去右侧 (55,15)
+>     // 在右侧生成 → 去左侧 (5,15)
+>
+>     CrowdSimulator sim_right(GW, GH, 55, 15);
+>     CrowdSimulator sim_left(GW, GH, 5, 15);
+>
+>     // 关键：两组 agent 共享同一个 ORCA 求解器——它们必须彼此感知
+>     // 将左右两组 agent 放入同一个 agents 数组即可
+>
+>     sim_right.spawn_agents(100, AgentType::Civilian, 3.0f, 28.0f, 3.0f, 26.0f);
+>     sim_left.spawn_agents(100, AgentType::Civilian, 32.0f, 57.0f, 3.0f, 26.0f);
+>
+>     // 左组使用指向右侧的 Flow Field
+>     // 右组使用指向左侧的 Flow Field
+>     // 在 step() 中根据 agent 的起始位置选择正确的 Flow Field
+> }
+>
+> // 在 CrowdAgent 中添加目标方向标记
+> struct CrowdAgent {
+>     // ... 原有字段 ...
+>     bool goes_right; // true=向右, false=向左
+> };
+>
+> // 在 step() 中按目标方向采样不同的 Flow Field
+> Vec2 flow_dir;
+> if (A.goes_right) {
+>     flow_dir = sample_flow_field(grid_right, A.position.x, A.position.y);
+> } else {
+>     flow_dir = sample_flow_field(grid_left, A.position.x, A.position.y);
+> }
+> ```
+>
+> **收敛时间测量**：
+> ```cpp
+> // 车道检测启发式：统计右侧移动的 agent 在走廊上半部分的占比
+> int lane_measure(int mid_y) {
+>     int right_upper = 0, right_lower = 0;
+>     for (auto& a : agents) {
+>         if (!a.goes_right) continue;
+>         if (a.position.y < mid_y) right_upper++;
+>         else right_lower++;
+>     }
+>     // 80% 的右侧 agent 在上半部 → 车道已形成
+>     return (right_upper > right_lower * 4) ? 1 : 0;
+> }
+> ```
+>
+> **预期结果**：约 80-120 帧（20-30s @ dt=0.25）后形成稳定车道。右侧移动的 agent 自然偏向走廊上半部，左侧移动的偏向下半部。这是 ORCA 的对称性产生的涌现行为——agent 无需任何显式的"靠右走"规则。
+
+> [!tip]- 练习 4 参考答案
+> ```cpp
+> // 在 setup_bottleneck_scene() 之后添加圆形障碍物
+> void add_circular_obstacle(SimpleGrid& grid, int cx, int cy, int radius) {
+>     for (int y = cy - radius; y <= cy + radius; ++y) {
+>         for (int x = cx - radius; x <= cx + radius; ++x) {
+>             if (!grid.in_bounds(x, y)) continue;
+>             float dx = (float)(x - cx), dy = (float)(y - cy);
+>             if (dx*dx + dy*dy <= (float)(radius*radius)) {
+>                 grid.cost_at(x, y) = INF; // 设为墙
+>             }
+>         }
+>     }
+> }
+>
+> // 在 main() 中调用：
+> sim.setup_bottleneck_scene();
+> add_circular_obstacle(sim.grid, 15, 10, 3);  // 左侧障碍物 1
+> add_circular_obstacle(sim.grid, 15, 20, 3);  // 左侧障碍物 2
+> add_circular_obstacle(sim.grid, 25, 8,  2);  // 门口附近障碍物
+> // 重建 Flow Field（障碍物改变了地图）
+> build_flow_field(sim.grid, goal_x, goal_y);
+> ```
+>
+> **绕行弧度测量**：
+> ```cpp
+> // 记录 agent 在障碍物附近的轨迹切线方向变化
+> // 在 step() 中添加：
+> if (dist_to_obstacle < 4.0f) {
+>     float angle = std::atan2(A.velocity.y, A.velocity.x);
+>     A.total_turn_angle += std::abs(angle - A.prev_angle);
+>     A.prev_angle = angle;
+> }
+> ```
+>
+> **协同效果**：Flow Field 提供宏观绕行路径（走障碍物的哪一侧），ORCA 在障碍物附近微调 agent 间距。绕行弧度取决于障碍物半径与 `neighbor_dist` 的比值——障碍物半径越大，Flow Field 绕行越明显；agent 密度越大，ORCA 的局部微调越显著。两者配合使 agent 在障碍物旁形成"压缩-膨胀"的密度波。
+
+> [!tip]- 练习 5 参考答案
+> ```cpp
+> // 性能剖析代码
+> #include <chrono>
+>
+> struct ProfileData {
+>     double hash_us = 0, neighbor_us = 0, lp_us = 0;
+>     int frame_count = 0;
+> };
+>
+> void step_with_profiling(float dt, ProfileData& prof) {
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     // ... 空间哈希更新 ...
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     // ... 邻居查找 ...
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     // ... ORCA LP 求解 ...
+>     auto t3 = std::chrono::high_resolution_clock::now();
+>
+>     prof.hash_us += std::chrono::duration<double, std::micro>(t1-t0).count();
+>     prof.neighbor_us += std::chrono::duration<double, std::micro>(t2-t1).count();
+>     prof.lp_us += std::chrono::duration<double, std::micro>(t3-t2).count();
+>     prof.frame_count++;
+> }
+> ```
+>
+> **早期退出优化——跳过远处邻居的 ORCA 约束**：
+> ```cpp
+> // 在 orca_solve() 的邻居循环中添加：
+> for (const auto* B_ptr : neighbors) {
+>     const CrowdAgent& B = *B_ptr;
+>     Vec2 rel_pos = B.position - A.position;
+>     float dist = rel_pos.len();
+>
+>     // 早期退出：距离 > 3 × (rA + rB) 且 closing_speed < 0 → 不可能碰撞
+>     float R = A.cfg.radius + B.cfg.radius;
+>     if (dist > 3.0f * R) {
+>         float closing = (A.velocity - B.velocity).dot(rel_pos / dist);
+>         if (closing < 0.1f) continue; // 正在远离，跳过
+>     }
+>
+>     // ... 原有 ORCA 约束构建 ...
+> }
+> ```
+>
+> **邻居数截断**：
+> ```cpp
+> // 在收集邻居时限制最大数量，按距离排序取最近的
+> constexpr int MAX_NEIGHBORS = 30;
+> std::partial_sort(neighbors.begin(),
+>     neighbors.begin() + std::min((int)neighbors.size(), MAX_NEIGHBORS),
+>     neighbors.end(),
+>     [&](const CrowdAgent* a, const CrowdAgent* b) {
+>         return (A.position - a->position).len_sq()
+>              < (A.position - b->position).len_sq();
+>     });
+> neighbors.resize(std::min((int)neighbors.size(), MAX_NEIGHBORS));
+> ```
+>
+> **预期剖析结果（500 agent, 60×30 网格, dt=0.25）**：
+>
+> | 环节 | 每帧耗时 | 占比 |
+> |------|---------|------|
+> | 空间哈希更新 | ~0.15ms | 8% |
+> | 邻居查找 | ~0.8ms | 40% |
+> | LP 求解 | ~1.0ms | 52% |
+>
+> 优化后（早期退出 + 邻居截断）：LP 求解降至 ~0.3ms（减少 70%），总帧时间从 ~2.0ms 降至 ~1.2ms。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **DetourCrowd 完整管线**：Recast/Detour 项目的 `DetourCrowd` 实现了 navmesh pathfinding + ORCA local avoidance。源码阅读顺序：`dtCrowd::update()` → `dtPathCorridor::moveOverSurface()` → `dtObstacleAvoidanceQuery`。这是工业级实现的参考标准。

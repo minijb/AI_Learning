@@ -1776,6 +1776,161 @@ priority = 0.5 / max(distance, 1.0) + 0.3 * hasChanged + 0.2 * min(staleness/30.
 - 迁移失败时有明确的超时和回退策略
 - 客户端不会看到"分身"（同时出现在两个分区）
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1：九宫格 AOI 事件测试
+> 核心测试代码（C#，基于 2.1 节的 `AOINineGrid`）：
+>
+> ```csharp
+> var aoi = new AOINineGrid(gridSize: 50f);
+>
+> // 创建 5 个实体
+> aoi.AddEntity(1, 50, 50);   // 中心
+> aoi.AddEntity(2, 80, 50);   // 在1视野内
+> aoi.AddEntity(3, 30, 50);   // 在1视野内
+> aoi.AddEntity(4, 200, 200); // 远离
+> aoi.AddEntity(5, 55, 55);   // 在1视野内
+>
+> // 实体1沿X轴向右移动（穿过实体2和5的AOI范围）
+> // 从 (50,50) 移动到 (150,50)，每次移动10个单位
+> List<AOIEvent> allEvents = new();
+> for (float x = 50; x <= 150; x += 10)
+> {
+>     aoi.MoveEntity(1, x, 50);
+>     allEvents.AddRange(aoi.Events);
+>     Console.WriteLine($"Pos({x:F0},50): Events={aoi.Events.Count}");
+>     aoi.ClearEvents();
+> }
+>
+> // 验证规则
+> // 规则1：A 穿过 B 的视野 → 依次触发 Enter → Leave
+> // 确认实体2的 Enter 事件在实体1离开其视野前触发
+> // 规则2：静止且互在视野内 → 无重复 Enter
+> // 调用 RefreshAOI 后检查 Events 列表不包含重复 Enter
+> // 规则3：小范围移动但未跨格 → 无事件
+> // MoveEntity 在 oldGrid == newGrid 时直接 return（第798行），
+> // 不调用 RefreshAOI，所以不产生任何 AOI 事件
+> ```
+>
+> **关键验证点与代码对照**：
+> - **双向性**：在 `RefreshAOI()` 的 Enter 分支（第 863-881 行），同时写入 `entityId→otherId` 和 `otherId→entityId` 两个 Enter 事件。你可以在测试中断言 `allEvents` 中 Enter 事件的 ObserverId/EntityId 配对成对出现
+> - **防重复 Enter**：`newAOI` 与 `oldAOI` 做差集（第 861 行），已存在的实体不会产生二次 Enter
+> - **未跨格无事件**：`MoveEntity` 第 797 行 `if (oldGrid == newGrid) return;`，直接短路掉 RefreshAOI
+> - **精确距离过滤**：第 850 行 `dxf*dxf + dyf*dyf <= _gridSize*_gridSize` 保证了九宫格粗筛后的精确判定——对角线格子的角落实体可能超出视野，必须过滤
+
+> [!tip]- 练习 2：优先级同步队列实现
+> 核心实现（Python 伪代码，也可用 C#/C++ 翻译）：
+>
+> ```python
+> import heapq
+> from dataclasses import dataclass, field
+>
+> @dataclass(order=True)
+> class SyncEntry:
+>     priority: float  # 负值（heapq 是最小堆，优先级高的用更负的值）
+>     entity_id: int = field(compare=False)
+>     client_id: int = field(compare=False)
+>     staleness: int = field(compare=False)
+>
+> class PrioritySyncQueue:
+>     def __init__(self, bandwidth_per_client=1024):
+>         self.bandwidth = bandwidth_per_client
+>         self.heap = []  # 所有待发送条目
+>         self.staleness = {}  # entity_id -> 距离上次同步的tick数
+>
+>     def enqueue(self, entity_id, client_id, distance, has_changed):
+>         self.staleness.setdefault(entity_id, 0)
+>         change_score = 1.0 if has_changed else 0.3
+>         staleness_factor = min(self.staleness[entity_id] / 30.0, 1.0)
+>         # 负值让高优先级排在堆顶（heapq取最小值）
+>         priority = -(0.5 / max(distance, 1.0) + 0.3 * change_score + 0.2 * staleness_factor)
+>         heapq.heappush(self.heap, SyncEntry(priority, entity_id, client_id, self.staleness[entity_id]))
+>
+>     def flush_per_client(self, client_id):
+>         """为该客户端发送数据，填满带宽预算"""
+>         sent_bytes = 0
+>         sent_entities = set()
+>         # 重建堆：只取该客户端的条目，其他放回
+>         remaining = []
+>         while self.heap and sent_bytes < self.bandwidth:
+>             entry = heapq.heappop(self.heap)
+>             if entry.client_id != client_id:
+>                 remaining.append(entry)
+>                 continue
+>             if entry.entity_id in sent_entities:
+>                 continue  # 本tick已发过
+>             # 发送（假设每实体 ~40 bytes）
+>             sent_bytes += 40
+>             sent_entities.add(entry.entity_id)
+>             self.staleness[entry.entity_id] = 0
+>         # 未发送的条目 stale+1 后放回堆
+>         for entry in remaining:
+>             heapq.heappush(self.heap, entry)
+>         # 对所有未处理的entity增加staleness
+>     ...
+> ```
+>
+> **验证标准对应**：
+> - **近处有变化优先**：公式 `0.5/distance + 0.3*hasChanged` 确保距离权重和变化权重叠加——距离 1m + 脏标记 = 优先级 0.8，距离 50m + 无变化 = 0.31，前者绝对优先
+> - **防饥饿**：`staleness/30.0` 项随 tick 增长，30 tick 后贡献 0.2 权重，即使远处无变化实体也会被"拉"到前排
+> - **带宽上限**：`flush_per_client` 中的 `while sent_bytes < self.bandwidth` 循环是硬限制；超出预算的条目留在堆中，下一 tick 它们的 staleness+1 使优先级升高
+> - **每客户端独立**：每个客户端有独立的优先级视图，避免"一个客户端饥饿所有实体"的耦合
+
+> [!tip]- 练习 3：跨分区实体迁移设计
+> **消息序列（时序图）**：
+>
+> ```
+> Client          P0 (源分区)          P1 (目标分区)       Gateway
+>  |                 |                     |                  |
+>  |-- MoveInput --->|                     |                  |
+>  |                 | (检测到x≈1000边界)   |                  |
+>  |                 |-- MigrateRequest -->|                  |
+>  |                 |  {entity, snapshot}  |                  |
+>  |                 |                     |-- AckPrepare --->|
+>  |                 |<-- MigrateAccept ---|                  |
+>  |                 |  {new_entity_id}     |                  |
+>  |                 |-- ForwardInputs --->|                  |
+>  |                 |  (P0收到但未处理的)   |                  |
+>  |<-- RedirectToP1--|                     |                  |
+>  |  {P1:IP, token}  |                     |                  |
+>  |                 |                     |                  |
+>  |-- Connect+P1 --->|                     |                  |
+>  |-- MoveInput -------------------------->|                  |
+>  |                 |                     | (P1继续处理)      |
+>  |                 |-- MigrateDone ----->|                  |
+>  |                 |                     |-- NotifyGateway->|
+>  |                 |                     |  (更新路由表)     |
+> ```
+>
+> **边界情况处理**：
+>
+> 1. **迁移过程中玩家仍在发送输入**：P0 收到迁移确认后，将后续收到的输入通过 `ForwardInputs` 消息转发给 P1（通过内网直连，延迟 < 1ms）。P1 在收到完整快照后立即应用这些转发输入，保证连续性。
+>
+> 2. **最小化"瞬移"**：P0 发送的快照中包含精确的位置、速度和输入序列号。P1 回放 P0 的输入历史 + 转发输入来计算"当前正确位置"，与客户端位置对比。如果偏差 < 阈值（如 10 像素），客户端用插值平滑；否则触发快速和解。关键是迁移窗口控制在 1-2 个逻辑帧内（~100ms），远小于玩家感知阈值。
+>
+> 3. **P1 宕机处理**：迁移请求携带超时（如 3 秒）。超时未收到 `MigrateAccept` → P0 取消迁移，将实体留在原地，同时通知 Gateway 更新路由表为 P0。客户端的 `RedirectToP1` 连接失败后回退到 P0（P0 保留实体副本直至确认迁移成功）。
+>
+> **客户端状态转换图**：
+> ```
+> [Playing@P0] --收到 RedirectToP1--> [Migrating] --连接P1成功--> [Playing@P1]
+>                                          |
+>                                    连接P1超时(3s)
+>                                          |
+>                                          v
+>                                    [Fallback@P0] (重连P0，P0保留实体待P1确认)
+> ```
+>
+> **关键设计原则**：
+> - **先建后断（Make-before-break）**：P1 确认创建实体后，P0 才删除。不存在"同时两个分区都没有实体"的窗口
+> - **输入不丢失**：迁移窗口内所有输入都被转发，保证操作连续性
+> - **超时回退**：3 秒超时 + P0 保留副本 = 迁移失败可无损回退
+
+> [!note] 答案使用方式
+> - 先独立完成练习，卡住时再展开对应参考方案
+> - 练习 1 的测试重点在于理解 `RefreshAOI` 中差集逻辑和双向事件生成——建议用 Log 打印而不是只看最终事件列表
+> - 练习 2 的代码可以用 C# 的 `PriorityQueue<TElement,TPriority>`（.NET 6+）或 C++ 的 `std::priority_queue` 简化实现
+> - 练习 3 是设计题，没有唯一标准答案——重点是处理三个边界情况并理解"先建后断"原则
 ---
 
 ## 4. 扩展阅读

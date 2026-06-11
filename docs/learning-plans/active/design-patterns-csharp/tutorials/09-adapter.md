@@ -66,12 +66,12 @@ classDiagram
     note for Adapter "Request() 内部调用<br/>_adaptee.SpecificRequest()"
 ```
 
-| 角色 | 职责 | 谁定义 |
-|------|------|--------|
-| **Client** | 调用 `ITarget` 接口，不关心背后是谁 | 你的业务代码 |
-| **ITarget** | 客户端期望的接口 | **你**（或你的项目规范） |
-| **Adapter** | 实现 `ITarget`，内部转发到 `Adaptee` | **你** |
-| **Adaptee** | 已有的、不能改的类（第三方库、遗留代码） | 第三方 / 遗留系统 |
+| 角色          | 职责                           | 谁定义            |
+| ----------- | ---------------------------- | -------------- |
+| **Client**  | 调用 `ITarget` 接口，不关心背后是谁      | 你的业务代码         |
+| **ITarget** | 客户端期望的接口                     | **你**（或你的项目规范） |
+| **Adapter** | 实现 `ITarget`，内部转发到 `Adaptee` | **你**          |
+| **Adaptee** | 已有的、不能改的类（第三方库、遗留代码）         | 第三方 / 遗留系统     |
 
 **核心原则**：Client 依赖的是 `ITarget`，Adapter 是 `ITarget` 的一个实现；Client 从不知道 `Adaptee` 的存在。
 
@@ -106,13 +106,13 @@ sequenceDiagram
 
 ### 两种变体：类适配器 vs 对象适配器
 
-| | 类适配器 (Class Adapter) | 对象适配器 (Object Adapter) |
-|------|------|------|
-| **实现方式** | 继承 Adaptee，同时实现 ITarget | 组合 Adaptee，实现 ITarget |
-| **C# 可行性** | ⚠️ 几乎不可用 — C# 不允许多重继承类 | ✅ 标准做法 |
-| **能覆写 Adaptee 行为** | ✅ 可以 override | ❌ 不能（但可以包装） |
-| **能适配 Adaptee 子类** | ❌ 只能适配具体的 Adaptee 类 | ✅ Adaptee 可以是接口，支持所有实现 |
-| **耦合度** | 高（继承 = 白盒复用） | 低（组合 = 黑盒复用） |
+|                    | 类适配器 (Class Adapter)    | 对象适配器 (Object Adapter) |
+| ------------------ | ----------------------- | ---------------------- |
+| **实现方式**           | 继承 Adaptee，同时实现 ITarget | 组合 Adaptee，实现 ITarget  |
+| **C# 可行性**         | ⚠️ 几乎不可用 — C# 不允许多重继承类  | ✅ 标准做法                 |
+| **能覆写 Adaptee 行为** | ✅ 可以 override           | ❌ 不能（但可以包装）            |
+| **能适配 Adaptee 子类** | ❌ 只能适配具体的 Adaptee 类     | ✅ Adaptee 可以是接口，支持所有实现 |
+| **耦合度**            | 高（继承 = 白盒复用）            | 低（组合 = 黑盒复用）           |
 
 > [!warning] C# 中类适配器几乎不可用
 > 因为 C# 不允许多重继承类。如果你的 Client 已经期望一个**抽象类**而非**接口**，且 Adapter 又需要继承 Adaptee，就会冲突。**永远默认用对象适配器（组合）。**
@@ -633,40 +633,6 @@ public class LegacyPaymentAdapter : IPaymentService
 }
 ```
 
-<details>
-<summary>参考答案（点击展开）</summary>
-
-```csharp
-public class LegacyPaymentAdapter : IPaymentService
-{
-    private readonly LegacyPaymentGateway _gateway;
-
-    public LegacyPaymentAdapter(LegacyPaymentGateway gateway)
-    {
-        _gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
-    }
-
-    public PaymentResult Pay(PaymentRequest request)
-    {
-        // 参数映射
-        var response = _gateway.ProcessPayment(
-            request.CardNumber,
-            request.Amount,
-            "CNY");  // 硬编码 — 适配器的职责：隐藏差异
-
-        // 结果转换
-        if (response.StartsWith("SUCCESS:"))
-        {
-            var txnId = response["SUCCESS:".Length..];
-            return new PaymentResult(true, txnId, null);
-        }
-
-        var errorMsg = response["FAILED:".Length..];
-        return new PaymentResult(false, string.Empty, errorMsg);
-    }
-}
-```
-</details>
 
 ### 练习 2（进阶）：用扩展方法适配 `List<T>` 到分页结果
 
@@ -708,44 +674,6 @@ public static class PagingExtensions
 }
 ```
 
-<details>
-<summary>参考答案（点击展开）</summary>
-
-```csharp
-public static class PagingExtensions
-{
-    public static PagedResult<T> ToPagedResult<T>(
-        this IReadOnlyList<T> source, int page, int pageSize)
-    {
-        if (page < 1) throw new ArgumentOutOfRangeException(nameof(page),
-            "Page must be >= 1");
-        if (pageSize < 1) throw new ArgumentOutOfRangeException(nameof(pageSize),
-            "PageSize must be >= 1");
-
-        var items = source
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToList();
-
-        return new PagedResult<T>(items, source.Count, page, pageSize);
-    }
-
-    public static PagedResult<T> ToPagedResult<T>(
-        this IQueryable<T> query, int page, int pageSize)
-    {
-        // IQueryable 版本：先获取总数，再做分页查询
-        // 注意：这会产生两次数据库查询
-        var totalCount = query.Count();
-        var items = query
-            .Skip((page - 1) * pageSize)
-            .Take(pageSize)
-            .ToList();
-
-        return new PagedResult<T>(items, totalCount, page, pageSize);
-    }
-}
-```
-</details>
 
 ### 练习 3（挑战）：双向适配器
 
@@ -791,59 +719,248 @@ public class MetricsAdapter : IMetricCollector
 }
 ```
 
-<details>
-<summary>参考答案（点击展开）</summary>
-
-```csharp
-public class MetricsAdapter : IMetricCollector
-{
-    private readonly PrometheusClient _prometheus;
-    private readonly StatsDClient _statsd;
-
-    public MetricsAdapter(PrometheusClient prometheus, StatsDClient statsd)
-    {
-        _prometheus = prometheus;
-        _statsd = statsd;
-    }
-
-    public void IncrementCounter(string name, double value = 1)
-    {
-        _prometheus.CounterInc(name, value, new Dictionary<string, string>());
-        _statsd.Send(name, value, "c"); // StatsD counter type
-    }
-
-    public void RecordGauge(string name, double value)
-    {
-        _prometheus.CounterInc(name + "_gauge", value,
-            new Dictionary<string, string>());
-        _statsd.Send(name, value, "g"); // StatsD gauge type
-    }
-
-    public void RecordTiming(string name, TimeSpan duration)
-    {
-        // Prometheus: 用 histogram 记录
-        _prometheus.ObserveHistogram(name + "_seconds", duration.TotalSeconds);
-
-        // StatsD: 用毫秒发送 timing
-        _statsd.Send(name, duration.TotalMilliseconds, "ms");
-    }
-}
-
-// === 使用 ===
-IMetricCollector metrics = new MetricsAdapter(
-    new PrometheusClient(), new StatsDClient());
-
-metrics.IncrementCounter("http_requests_total");
-metrics.RecordTiming("db_query_duration", TimeSpan.FromMilliseconds(42));
-// 输出:
-// [Prometheus] counter http_requests_total += 1
-// [StatsD] http_requests_total:1|c
-// [Prometheus] histogram db_query_duration_seconds = 0.042
-// [StatsD] db_query_duration:42|ms
-```
-</details>
-
 ---
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using System;
+>
+> // ============================================
+> // 遗留支付网关适配器
+> // ============================================
+> public class LegacyPaymentAdapter : IPaymentService
+> {
+>     private readonly LegacyPaymentGateway _gateway;
+>
+>     public LegacyPaymentAdapter(LegacyPaymentGateway gateway)
+>     {
+>         _gateway = gateway ?? throw new ArgumentNullException(nameof(gateway));
+>     }
+>
+>     public PaymentResult Pay(PaymentRequest request)
+>     {
+>         // 参数映射：PaymentRequest → 遗留 API 的 (cardNumber, amount, currency)
+>         var response = _gateway.ProcessPayment(
+>             request.CardNumber,
+>             request.Amount,
+>             "CNY");  // 硬编码 — 适配器的职责：隐藏差异
+>
+>         // 结果转换：遗留字符串 → PaymentResult
+>         if (response.StartsWith("SUCCESS:"))
+>         {
+>             var txnId = response["SUCCESS:".Length..];
+>             return new PaymentResult(true, txnId, null);
+>         }
+>
+>         var errorMsg = response["FAILED:".Length..];
+>         return new PaymentResult(false, string.Empty, errorMsg);
+>     }
+> }
+>
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static void TestPaymentAdapter()
+> {
+>     var gateway = new LegacyPaymentGateway();
+>     IPaymentService payment = new LegacyPaymentAdapter(gateway);
+>
+>     // 成功支付
+>     var result1 = payment.Pay(new PaymentRequest("1234567890123456", 100m));
+>     Console.WriteLine($"成功: {result1.Success}, TxnId: {result1.TransactionId}");
+>
+>     // 无效卡号
+>     var result2 = payment.Pay(new PaymentRequest("1234", 100m));
+>     Console.WriteLine($"成功: {result2.Success}, Error: {result2.ErrorMessage}");
+>
+>     // 无效金额
+>     var result3 = payment.Pay(new PaymentRequest("1234567890123456", -50m));
+>     Console.WriteLine($"成功: {result3.Success}, Error: {result3.ErrorMessage}");
+> }
+> ```
+> **设计要点：**
+> - `LegacyPaymentGateway` 通过构造函数注入，便于单元测试时 mock 或替换
+> - `currency` 硬编码为 `"CNY"`：这是适配器的核心职责——**隐藏 Adaptee 的差异细节**
+> - 结果转换将字符串协议解析为强类型 `PaymentResult`，让调用方不需要关心遗留 API 的字符串格式
+> - 如果未来换成另一个支付网关，只需写一个新 Adapter 实现 `IPaymentService`，客户端代码零改动
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> public static class PagingExtensions
+> {
+>     /// <summary>内存集合分页适配（IReadOnlyList&lt;T&gt;）</summary>
+>     public static PagedResult<T> ToPagedResult<T>(
+>         this IReadOnlyList<T> source, int page, int pageSize)
+>     {
+>         if (page < 1)
+>             throw new ArgumentOutOfRangeException(nameof(page),
+>                 $"页码必须 >= 1，当前值: {page}");
+>         if (pageSize < 1)
+>             throw new ArgumentOutOfRangeException(nameof(pageSize),
+>                 $"每页大小必须 >= 1，当前值: {pageSize}");
+>
+>         var items = source
+>             .Skip((page - 1) * pageSize)
+>             .Take(pageSize)
+>             .ToList();
+>
+>         return new PagedResult<T>(items, source.Count, page, pageSize);
+>     }
+>
+>     /// <summary>IQueryable 分页适配（EF Core / 数据库场景）</summary>
+>     public static PagedResult<T> ToPagedResult<T>(
+>         this IQueryable<T> query, int page, int pageSize)
+>     {
+>         if (page < 1)
+>             throw new ArgumentOutOfRangeException(nameof(page),
+>                 $"页码必须 >= 1，当前值: {page}");
+>         if (pageSize < 1)
+>             throw new ArgumentOutOfRangeException(nameof(pageSize),
+>                 $"每页大小必须 >= 1，当前值: {pageSize}");
+>
+>         // 注意：这会产生两次数据库查询（Count + ToList）
+>         // 生产环境中可考虑一次查询同时获取 total 和 items
+>         var totalCount = query.Count();
+>         var items = query
+>             .Skip((page - 1) * pageSize)
+>             .Take(pageSize)
+>             .ToList();
+>
+>         return new PagedResult<T>(items, totalCount, page, pageSize);
+>     }
+> }
+>
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static void TestPaging()
+> {
+>     var data = Enumerable.Range(1, 100)
+>         .Select(i => $"Item-{i}")
+>         .ToList();
+>
+>     // 内存分页
+>     var page1 = data.ToPagedResult(page: 1, pageSize: 10);
+>     Console.WriteLine($"第 {page1.Page}/{page1.TotalPages} 页，" +
+>         $"共 {page1.TotalCount} 条，当前 {page1.Items.Count} 条");
+>     Console.WriteLine($"  Items: [{string.Join(", ", page1.Items)}]");
+>     Console.WriteLine($"  HasNext: {page1.HasNext}, HasPrevious: {page1.HasPrevious}");
+>
+>     // 边界测试：最后一页不足 pageSize
+>     var lastPage = data.ToPagedResult(page: 10, pageSize: 10);
+>     Console.WriteLine($"\n第 {lastPage.Page}/{lastPage.TotalPages} 页，" +
+>         $"共 {lastPage.TotalCount} 条，当前 {lastPage.Items.Count} 条");
+>     Console.WriteLine($"  HasNext: {lastPage.HasNext}, HasPrevious: {lastPage.HasPrevious}");
+> }
+> ```
+> **设计要点：**
+> - 扩展方法是对"适配器模式"的轻量级 C# 实现——不需要单独的 Adapter 类，直接用静态方法把 `IReadOnlyList<T>` / `IQueryable<T>` "适配"成 `PagedResult<T>`
+> - 参数校验（`page >= 1`）放在方法入口，遵循 fail-fast 原则
+> - `IQueryable<T>` 重载适用于 EF Core：`Skip/Take` 会被翻译成 SQL `OFFSET/FETCH`，只从数据库取需要的行
+> - `PagedResult<T>` 的 `TotalPages`、`HasPrevious`、`HasNext` 是计算属性，零额外存储
+
+> [!tip]- 练习 3 参考答案（挑战）
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+>
+> // ============================================
+> // 双向适配器：同时对接 Prometheus + StatsD
+> // ============================================
+> public class MetricsAdapter : IMetricCollector
+> {
+>     private readonly PrometheusClient _prometheus;
+>     private readonly StatsDClient _statsd;
+>
+>     public MetricsAdapter(PrometheusClient prometheus, StatsDClient statsd)
+>     {
+>         _prometheus = prometheus ?? throw new ArgumentNullException(nameof(prometheus));
+>         _statsd = statsd ?? throw new ArgumentNullException(nameof(statsd));
+>     }
+>
+>     public void IncrementCounter(string name, double value = 1)
+>     {
+>         // Prometheus: counter 指标 — 只增不减
+>         _prometheus.CounterInc(name, value,
+>             new Dictionary<string, string>());
+>
+>         // StatsD: counter 类型用 "c" 后缀
+>         _statsd.Send(name, value, "c");
+>     }
+>
+>     public void RecordGauge(string name, double value)
+>     {
+>         // Prometheus 没有原生 gauge 方法，用 counter inc 模拟
+>         // （实际项目中 Prometheus 有专门的 Gauge API）
+>         _prometheus.CounterInc(name + "_gauge", value,
+>             new Dictionary<string, string>());
+>
+>         // StatsD: gauge 类型用 "g" 后缀
+>         _statsd.Send(name, value, "g");
+>     }
+>
+>     public void RecordTiming(string name, TimeSpan duration)
+>     {
+>         // Prometheus: 用 histogram 记录，单位统一为秒
+>         _prometheus.ObserveHistogram(
+>             name + "_seconds",
+>             duration.TotalSeconds);
+>
+>         // StatsD: timing 类型用 "ms" 后缀，单位为毫秒
+>         _statsd.Send(name, duration.TotalMilliseconds, "ms");
+>     }
+> }
+>
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static void TestMetricsAdapter()
+> {
+>     IMetricCollector metrics = new MetricsAdapter(
+>         new PrometheusClient(), new StatsDClient());
+>
+>     Console.WriteLine("=== 计数器 ===");
+>     metrics.IncrementCounter("http_requests_total");
+>     metrics.IncrementCounter("http_errors_total", value: 3);
+>
+>     Console.WriteLine("\n=== 仪表盘 ===");
+>     metrics.RecordGauge("active_connections", value: 42);
+>
+>     Console.WriteLine("\n=== 计时器 ===");
+>     metrics.RecordTiming("db_query_duration", TimeSpan.FromMilliseconds(42));
+>     metrics.RecordTiming("api_latency", TimeSpan.FromSeconds(1.5));
+> }
+>
+> // 预期输出:
+> // [Prometheus] counter http_requests_total += 1
+> // [StatsD] http_requests_total:1|c
+> // [Prometheus] counter http_errors_total += 3
+> // [StatsD] http_errors_total:3|c
+> // [Prometheus] counter active_connections_gauge += 42
+> // [StatsD] active_connections:42|g
+> // [Prometheus] histogram db_query_duration_seconds = 0.042
+> // [StatsD] db_query_duration:42|ms
+> // [Prometheus] histogram api_latency_seconds = 1.5
+> // [StatsD] api_latency:1500|ms
+> ```
+> **设计要点：**
+> - 这是一个"一对多"适配器：一个统一的 `IMetricCollector` 接口，同时桥接到两个不同的监控后端
+> - 参数映射是核心：Prometheus 用秒、StatsD 用毫秒；Prometheus 用 histogram 记录 timing、StatsD 用 `|ms` 类型
+> - 每个方法同时调用两个后端，确保**两个系统都能收到相同指标数据**
+> - 这不是"双向"（bidirectional）而是"多路复用"（multiplexing）——但练习的意图是理解"一个适配器同时对接多个 Adaptee"的场景
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 
 ## 4. 扩展阅读
 

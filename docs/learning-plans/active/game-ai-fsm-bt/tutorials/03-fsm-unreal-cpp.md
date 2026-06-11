@@ -1324,6 +1324,314 @@ float UDataDrivenFSMComponent::GetPlayerDistance() const
    - 场景 B: 批量小兵 AI（200 个实体，5 个状态，行为固定不变）
    - 场景 C: 过场动画序列管理器（时间线驱动，无复杂条件）
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **UTurretFSMComponent 完整实现：**
+>
+> ```cpp
+> // TurretFSMComponent.h
+> #pragma once
+> #include "CoreMinimal.h"
+> #include "Components/ActorComponent.h"
+> #include "TurretFSMComponent.generated.h"
+>
+> UENUM(BlueprintType)
+> enum class ETurretState : uint8
+> {
+>     Idle        UMETA(DisplayName = "待机"),
+>     Searching   UMETA(DisplayName = "搜索"),
+>     LockedOn    UMETA(DisplayName = "锁定"),
+>     Firing      UMETA(DisplayName = "射击"),
+>     Overheated  UMETA(DisplayName = "过热"),
+>     Dead        UMETA(DisplayName = "已摧毁")
+> };
+>
+> UCLASS(ClassGroup=(Custom), meta=(BlueprintSpawnableComponent))
+> class MYPROJECT_API UTurretFSMComponent : public UActorComponent
+> {
+>     GENERATED_BODY()
+> public:
+>     UTurretFSMComponent();
+>     virtual void TickComponent(float DeltaTime, ELevelTick TickType,
+>         FActorComponentTickFunction* ThisTickFunction) override;
+>
+> protected:
+>     virtual void BeginPlay() override;
+>
+>     // FSM Core
+>     void EvaluateTransitions();
+>     void ExecuteState(float DeltaTime);
+>     void SetState(ETurretState NewState);
+>
+>     // State Behaviors
+>     void EnterState(ETurretState State);
+>     void ExitState(ETurretState State);
+>     void TickIdle(float DeltaTime);
+>     void TickSearching(float DeltaTime);
+>     void TickLockedOn(float DeltaTime);
+>     void TickFiring(float DeltaTime);
+>     void TickOverheated(float DeltaTime);
+>
+>     // Combat
+>     void FireShot();
+>
+>     // State
+>     UPROPERTY(VisibleAnywhere, Category = "FSM")
+>     ETurretState CurrentState = ETurretState::Idle;
+>
+>     // Config
+>     UPROPERTY(EditAnywhere, Category = "FSM|Perception")
+>     float DetectionRadius = 2000.0f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Perception")
+>     float LockRadius = 1000.0f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Combat")
+>     float FireRange = 800.0f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Combat")
+>     float FireRate = 0.3f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Combat")
+>     float DamagePerShot = 10.0f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Heat")
+>     float MaxHeat = 100.0f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Heat")
+>     float HeatPerShot = 8.0f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Heat")
+>     float CooldownDuration = 3.0f;
+>     UPROPERTY(EditAnywhere, Category = "FSM|Search")
+>     float SearchTimeout = 4.0f;
+>
+>     // Runtime
+>     float CurrentHeat = 0.0f;
+>     float CooldownTimer = 0.0f;
+>     float SearchTimer = 0.0f;
+>     FTimerHandle FireTimerHandle;
+>     FRotator IdleTargetRotation;
+> };
+> ```
+>
+> ```cpp
+> // TurretFSMComponent.cpp (key methods)
+> void UTurretFSMComponent::BeginPlay()
+> {
+>     Super::BeginPlay();
+>     IdleTargetRotation = GetOwner()->GetActorRotation();
+>     SetState(ETurretState::Idle);
+> }
+>
+> void UTurretFSMComponent::TickComponent(float DeltaTime, ELevelTick, FActorComponentTickFunction*)
+> {
+>     EvaluateTransitions();
+>     ExecuteState(DeltaTime);
+> }
+>
+> void UTurretFSMComponent::SetState(ETurretState NewState)
+> {
+>     if (NewState == CurrentState) return;
+>     ExitState(CurrentState);
+>     CurrentState = NewState;
+>     EnterState(CurrentState);
+> }
+>
+> void UTurretFSMComponent::EnterState(ETurretState State)
+> {
+>     switch (State)
+>     {
+>     case ETurretState::Idle:
+>         UE_LOG(LogTemp, Log, TEXT("[Turret] Entering Idle — scanning rotation"));
+>         break;
+>     case ETurretState::Searching:
+>         UE_LOG(LogTemp, Log, TEXT("[Turret] Entering Searching — acquired suspicious contact"));
+>         SearchTimer = 0.0f;
+>         break;
+>     case ETurretState::LockedOn:
+>         UE_LOG(LogTemp, Log, TEXT("[Turret] Entering LockedOn — target acquired!"));
+>         break;
+>     case ETurretState::Firing:
+>         GetWorld()->GetTimerManager().SetTimer(FireTimerHandle, this,
+>             &UTurretFSMComponent::FireShot, FireRate, true);
+>         break;
+>     case ETurretState::Overheated:
+>         UE_LOG(LogTemp, Warning, TEXT("[Turret] Overheated! Cooling down..."));
+>         CooldownTimer = 0.0f;
+>         GetWorld()->GetTimerManager().ClearTimer(FireTimerHandle);
+>         break;
+>     case ETurretState::Dead:
+>         SetActive(false); // Disable component
+>         break;
+>     }
+> }
+>
+> void UTurretFSMComponent::TickIdle(float DeltaTime)
+> {
+>     // Smooth 360-degree scanning rotation
+>     IdleTargetRotation.Yaw += 30.0f * DeltaTime;
+>     FRotator Current = GetOwner()->GetActorRotation();
+>     FRotator Target = IdleTargetRotation;
+>     GetOwner()->SetActorRotation(FMath::RInterpTo(Current, Target, DeltaTime, 2.0f));
+> }
+>
+> void UTurretFSMComponent::TickSearching(float DeltaTime)
+> {
+>     // Rapid turn towards last known direction
+>     SearchTimer += DeltaTime;
+>     if (SearchTimer >= SearchTimeout)
+>     {
+>         SetState(ETurretState::Idle);
+>         return;
+>     }
+>     // Rotate toward last known target location...
+> }
+>
+> void UTurretFSMComponent::TickLockedOn(float DeltaTime)
+> {
+>     AActor* Target = GetTarget();
+>     if (!Target) return;
+>     FRotator LookAt = UKismetMathLibrary::FindLookAtRotation(
+>         GetOwner()->GetActorLocation(), Target->GetActorLocation());
+>     GetOwner()->SetActorRotation(FMath::RInterpTo(
+>         GetOwner()->GetActorRotation(), LookAt, DeltaTime, 8.0f));
+> }
+>
+> void UTurretFSMComponent::TickFiring(float DeltaTime)
+> {
+>     TickLockedOn(DeltaTime); // Keep tracking while firing
+> }
+>
+> void UTurretFSMComponent::TickOverheated(float DeltaTime)
+> {
+>     CooldownTimer += DeltaTime;
+>     CurrentHeat = FMath::FInterpTo(CurrentHeat, 0.0f, DeltaTime, 1.0f);
+>     if (CooldownTimer >= CooldownDuration)
+>     {
+>         CurrentHeat = 0.0f;
+>         SetState(ETurretState::Idle);
+>     }
+> }
+>
+> void UTurretFSMComponent::FireShot()
+> {
+>     FVector Start = GetOwner()->GetActorLocation();
+>     FVector End = Start + GetOwner()->GetActorForwardVector() * FireRange;
+>     FHitResult Hit;
+>     FCollisionQueryParams Params;
+>     Params.AddIgnoredActor(GetOwner());
+>
+>     if (GetWorld()->LineTraceSingleByChannel(Hit, Start, End, ECC_Visibility, Params))
+>     {
+>         if (AActor* HitActor = Hit.GetActor())
+>         {
+>             UGameplayStatics::ApplyDamage(HitActor, DamagePerShot,
+>                 GetOwner()->GetInstigatorController(), GetOwner(), UDamageType::StaticClass());
+>         }
+>     }
+>
+>     CurrentHeat += HeatPerShot;
+>     if (CurrentHeat >= MaxHeat)
+>     {
+>         SetState(ETurretState::Overheated);
+>     }
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **FTurretTransitionRow 结构体：**
+>
+> ```cpp
+> USTRUCT(BlueprintType)
+> struct FTurretTransitionRow : public FTableRowBase
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY(EditAnywhere, BlueprintReadWrite)
+>     FName FromState;
+>     UPROPERTY(EditAnywhere, BlueprintReadWrite)
+>     FName TriggerEvent;
+>     UPROPERTY(EditAnywhere, BlueprintReadWrite)
+>     FName ToState;
+>     UPROPERTY(EditAnywhere, BlueprintReadWrite)
+>     int32 Priority = 0;
+> };
+> ```
+>
+> **UTurretTransitionTable 查询类：**
+>
+> ```cpp
+> UCLASS()
+> class UTurretTransitionTable : public UObject
+> {
+>     GENERATED_BODY()
+>     TMap<FName, TArray<FTurretTransitionRow>> Index;
+> public:
+>     void BuildFromDataTable(UDataTable* DataTable)
+>     {
+>         Index.Empty();
+>         static const FString ContextStr(TEXT("TurretFSM"));
+>         TArray<FTurretTransitionRow*> Rows;
+>         DataTable->GetAllRows(ContextStr, Rows);
+>         for (auto* Row : Rows)
+>         {
+>             Index.FindOrAdd(Row->FromState).Add(*Row);
+>         }
+>     }
+>     const FTurretTransitionRow* Query(FName FromState, FName Event) const
+>     {
+>         const TArray<FTurretTransitionRow>* Candidates = Index.Find(FromState);
+>         if (!Candidates) return nullptr;
+>         for (const auto& Row : *Candidates)
+>         {
+>             if (Row.TriggerEvent == Event) return &Row;
+>         }
+>         return nullptr;
+>     }
+> };
+> ```
+>
+> **CSV 内容（9 条转移规则）：**
+>
+> ```csv
+> FromState,TriggerEvent,ToState,Priority
+> Idle,TargetInRange,Searching,0
+> Searching,TargetLost,Idle,0
+> Searching,TargetLocked,LockedOn,0
+> LockedOn,TargetLost,Searching,0
+> LockedOn,TargetInFiringRange,Firing,0
+> Firing,TargetOutOfRange,LockedOn,0
+> Firing,OverheatTriggered,Overheated,0
+> Overheated,CooldownComplete,Idle,0
+> Searching,HealthZero,Dead,10
+> Idle,HealthZero,Dead,10
+> LockedOn,HealthZero,Dead,10
+> Firing,HealthZero,Dead,10
+> ```
+>
+> **switch vs DataTable 差异分析：**
+>
+> | 维度 | switch 版本 | DataTable 版本 |
+> |------|------------|----------------|
+> | 新增"维修中"状态改动流程 | 修改 5 个 switch case + 新增 Enter/Exit/Tick 函数 + 在 EvaluateTransitions 的各 case 中添加新条件的处理 = 改动分散在 4-5 处 | 在 CSV 中新增 "Repairing" 状态的行（定义哪些事件进入/离开该状态）+ 在组件中添加 Enter/Exit/Tick 函数 = 逻辑与转移分离 |
+> | 设计师独立调试 | 需要程序员介入，通过断点或 UE_LOG 查看分支 | 可在 DataTable 编辑器中直接查看/修改转移规则，无需重新编译 |
+> | 性能（100 炮塔） | 最优：switch 是编译期跳转表，O(1) | 每次查询 TMap O(1)，但多了哈希查找开销；100 个炮塔共享同一份 DataTable 时只需一次建索引 |
+
+> [!tip]- 练习 3 参考答案（可选）
+> **StateTree 与手动 FSM 的对应关系：**
+>
+> | StateTree 概念 | 手动 FSM 对应 | 说明 |
+> |:---|:---|:---|
+> | State | EEnemyState 枚举值 + Enter/Exit/Tick | StateTree 的状态是树节点，可以有子状态 |
+> | Evaluator | 嵌入在 Tick 中的条件检查（轮询） | Evaluator 持续运行，返回布尔值驱动转移 |
+> | Condition（在 Transition 上） | EvaluateTransitions() 中的 if 判断 | 决定是否触发转移 |
+> | Task | 状态 Update 中的具体行为函数 | Action 节点，可跨多帧执行（返回 Running） |
+> | Instance Data | 状态对象的私有成员变量（如 CurrentHeat） | 绑定到状态实例，每个 agent 独立 |
+>
+> **场景选型决策：**
+>
+> - **场景 A (Boss AI, 20+ 状态)**：选择 **StateTree**。状态数量多 + 需要设计师频繁迭代 + 有层次结构需求（阶段 → 子行为）。StateTree 的资产化编辑和数据绑定让设计师可以独立调优 Boss 行为，无需每次修改等程序员改 C++。
+> - **场景 B (批量小兵 AI, 200 实体, 5 状态)**：选择 **手动 FSM (UEnum + switch / UObject 状态模式)**。状态少且固定，性能敏感（200 个实体），不需要可视化编辑。StateTree 的每帧 Evaluator 评估在 200 个实体上开销不可忽略，而手写 switch 是编译期优化的跳转表。
+> - **场景 C (过场动画序列管理器)**：选择 **手动 FSM 或 Level Sequence**。过场动画是时间线驱动的线性序列，没有复杂条件分支，FSM 的 switch 或 UE 原生的 Level Sequence Director 更合适。StateTree 的条件驱动在这里是杀鸡用牛刀——大多数"转移"只是"当前动画播放完毕"，不需要动态条件评估。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

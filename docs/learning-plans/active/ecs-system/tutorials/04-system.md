@@ -442,6 +442,236 @@ g++ -std=c++17 -O2 example.cpp -o example && ./example
 3. 检测冲突：两个 System 同时写同一个组件 → 标记为 "必须串行"；两个 System 一个读一个写 → "写者优先"
 4. 输出一个建议的执行顺序
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // ---- 新增组件 ----
+> struct GravityTag {};  // 标签组件：实体受重力影响
+>
+> // ---- GravitySystem ----
+> // 读: Velocity（写），GravityTag（过滤）
+> // 写: Velocity
+> struct GravitySystem {
+>     float gravity = 9.8f;  // ✓ 配置参数
+>     void operator()(World& world, float dt) {
+>         auto& velocities = world.view<Velocity>();
+>         for (auto& [entity, vel] : velocities) {
+>             if (world.get<GravityTag>(entity)) {
+>                 vel.dy -= gravity * dt;  // 向下加速
+>             }
+>         }
+>     }
+> };
+>
+> // ---- HealSystem ----
+> // 读: Health（写）
+> // 写: Health
+> // 注意：用累积时间控制回血速率，而非每帧无条件回血
+> struct HealSystem {
+>     float healPerSecond = 1.0f;   // ✓ 配置参数
+>     float accumulated = 0;        // ✓ 度量状态（非持久游戏状态）
+>     void operator()(World& world, float dt) {
+>         accumulated += dt;
+>         if (accumulated < 1.0f) return;  // 每秒只回一次
+>         accumulated -= 1.0f;
+>
+>         auto& healths = world.view<Health>();
+>         for (auto& [entity, hp] : healths) {
+>             if (hp.current < hp.max) {
+>                 hp.current = std::min(hp.current + 1, hp.max);
+>             }
+>         }
+>     }
+> };
+>
+> // ---- DespawnSystem ----
+> // 读: Position
+> // 写: (无——调用 world.destroy)
+> struct DespawnSystem {
+>     float despawnY = -100.0f;     // ✓ 配置参数
+>     void operator()(World& world, float /*dt*/) {
+>         auto& positions = world.view<Position>();
+>         for (auto it = positions.begin(); it != positions.end(); ) {
+>             if (it->second.y < despawnY) {
+>                 auto* name = world.get<Name>(it->first);
+>                 std::cout << "  [出界] "
+>                           << (name ? name->value : "无名实体")
+>                           << " 掉出世界边界！\n";
+>                 world.destroy(it->first);
+>                 it = positions.erase(it);  // 安全删除
+>             } else {
+>                 ++it;
+>             }
+>         }
+>     }
+> };
+>
+> // ---- 调度器注册（建议顺序） ----
+> // scheduler.add_system("Gravity",  GravitySystem{});
+> // scheduler.add_system("Movement", MovementSystem{});
+> // scheduler.add_system("Heal",     HealSystem{});
+> // scheduler.add_system("Damage",   DamageSystem{});
+> // scheduler.add_system("Lifetime", LifetimeSystem{});
+> // scheduler.add_system("Despawn",  DespawnSystem{});
+> // scheduler.add_system("Report",   ReportSystem{});
+> ```
+>
+> **设计说明**：
+> - `HealSystem` 用累积时间避免每帧回血——若 60fps 每帧回 1 点就太快了。`accumulated` 是"上次回血后过了多久"，属于度量状态而非游戏状态
+> - `DespawnSystem` 放在 `LifetimeSystem` 之后执行——先处理自然过期，再处理出界，避免重复销毁
+> - `GravitySystem` 先于 `MovementSystem`——先更新速度（受重力影响），再用新速度更新位置
+
+> [!tip]- 练习 2 参考答案
+> **交换执行顺序的影响分析**：
+>
+> | 顺序 | 行为 | 影响 |
+> |------|------|------|
+> | Movement → Damage | 实体移动到新位置后扣血 | 如果 Damage 触发 AI 逃跑决策，AI 基于"移动后"的位置判断——更准确 |
+> | Damage → Movement | 先扣血（可能死亡），再移动（死实体不应移动） | 已死实体仍会执行移动——浪费计算 |
+>
+> **具体场景：AI 决策时效性**：
+>
+> ```
+> System A (DamageSystem): 扣血至 0 → 实体死亡
+> System B (AISystem): 检测血量，决定是否逃跑/切换目标
+>
+> 顺序 A→B: AI 看到 hp=0 → 切换目标 ← 正确！
+> 顺序 B→A: AI 看到 hp=100 → 继续攻击 → 下一帧实体才死 ← 延迟一帧
+> ```
+>
+> **执行顺序重要的场景**：
+> 1. **Input → Movement**：必须先处理玩家输入，再移动
+> 2. **Movement → Collision**：必须先移动到位，再检测碰撞
+> 3. **Collision → Damage**：必须先确定碰撞，再结算伤害
+> 4. **Animation → Render**：必须先更新骨骼，再渲染
+> 5. **CommandBuffer flush**：所有 System 执行完毕后统一执行（避免迭代器失效）
+>
+> **核心原则**：修改数据的 System 应排在读取该数据的 System 之前。这就是 ECS 调度器 DAG 的拓扑排序依据。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> #include <string>
+> #include <set>
+> #include <map>
+> #include <vector>
+> #include <algorithm>
+>
+> // ---- 依赖声明 ----
+> struct SystemDecl {
+>     std::string name;
+>     std::set<std::string> reads;   // 只读的组件/资源名
+>     std::set<std::string> writes;  // 会写的组件/资源名
+> };
+>
+> // ---- 冲突检测 ----
+> struct ConflictReport {
+>     std::string sysA, sysB;
+>     std::string resource;          // 冲突的资源名
+>     std::string type;              // "Write-Write" 或 "Read-Write"
+> };
+>
+> std::vector<ConflictReport> detect_conflicts(
+>     const std::vector<SystemDecl>& systems)
+> {
+>     std::vector<ConflictReport> conflicts;
+>     for (size_t i = 0; i < systems.size(); i++) {
+>         for (size_t j = i + 1; j < systems.size(); j++) {
+>             const auto& a = systems[i];
+>             const auto& b = systems[j];
+>
+>             // 检查写-写冲突：两个 System 都写同一个资源
+>             std::set<std::string> write_intersection;
+>             std::set_intersection(
+>                 a.writes.begin(), a.writes.end(),
+>                 b.writes.begin(), b.writes.end(),
+>                 std::inserter(write_intersection, write_intersection.begin()));
+>             for (const auto& res : write_intersection) {
+>                 conflicts.push_back({a.name, b.name, res, "Write-Write: 必须串行"});
+>             }
+>
+>             // 检查读-写冲突：A 读 B 写，或 B 读 A 写
+>             // A 读 + B 写
+>             for (const auto& res : a.reads) {
+>                 if (b.writes.count(res)) {
+>                     conflicts.push_back({b.name, a.name, res, "Read-Write: " + b.name + " 应先执行"});
+>                 }
+>             }
+>             // B 读 + A 写
+>             for (const auto& res : b.reads) {
+>                 if (a.writes.count(res)) {
+>                     conflicts.push_back({a.name, b.name, res, "Read-Write: " + a.name + " 应先执行"});
+>                 }
+>             }
+>         }
+>     }
+>     return conflicts;
+> }
+>
+> // ---- 生成建议执行顺序（简易拓扑排序） ----
+> std::vector<std::string> suggest_order(
+>     const std::vector<SystemDecl>& systems,
+>     const std::vector<ConflictReport>& conflicts)
+> {
+>     // 从冲突中提取依赖边：如果 A 写 X、B 读 X → A 必须在 B 之前
+>     // 构建 DAG 图 + 入度表，执行 Kahn 拓扑排序
+>     std::map<std::string, int> in_degree;
+>     std::map<std::string, std::vector<std::string>> edges;
+>
+>     for (const auto& sys : systems) {
+>         in_degree[sys.name] = 0;  // 初始化
+>     }
+>     for (const auto& c : conflicts) {
+>         if (c.type.find("应先执行") != std::string::npos) {
+>             // 从 c.type 中提取"先执行"的 System 名
+>             // 简化：从冲突中推断方向
+>             auto colon_pos = c.type.find(": ");
+>             if (colon_pos != std::string::npos) {
+>                 std::string first = c.type.substr(colon_pos + 2);
+>                 auto space = first.find(" ");
+>                 if (space != std::string::npos) first = first.substr(0, space);
+>                 // first → 另一个
+>                 std::string second = (first == c.sysA) ? c.sysB : c.sysA;
+>                 edges[first].push_back(second);
+>                 in_degree[second]++;
+>             }
+>         }
+>     }
+>
+>     // Kahn 算法
+>     std::vector<std::string> order;
+>     std::vector<std::string> queue;
+>     for (auto& [name, deg] : in_degree) {
+>         if (deg == 0) queue.push_back(name);
+>     }
+>     while (!queue.empty()) {
+>         std::string node = queue.back();
+>         queue.pop_back();
+>         order.push_back(node);
+>         for (const auto& next : edges[node]) {
+>             if (--in_degree[next] == 0) queue.push_back(next);
+>         }
+>     }
+>     return order;  // 如果 order.size() < systems.size() → 存在循环依赖
+> }
+>
+> // ---- 使用示例 ----
+> // SystemDecl movement{"Movement", {"Velocity"}, {"Position"}};
+> // SystemDecl collision{"Collision", {"Position", "Collider"}, {"Velocity", "Position"}};
+> // SystemDecl render   {"Render",    {"Position", "Sprite"}, {}};
+> // auto conflicts = detect_conflicts({movement, collision, render});
+> // → Collision 写 Position，Movement 也写 Position → 冲突
+> // → Movement 读 Velocity，Collision 写 Velocity → Collision 应先执行
+> // auto order = suggest_order({movement, collision, render}, conflicts);
+> // → [Collision, Movement, Render]
+> ```
+>
+> **局限与改进方向**：
+> - 当前实现只看读写，未考虑 `optional`（可选的读/写）和 `exclude`
+> - 真实调度器需要区分"已声明读但实际可能不读"（如 early-out 优化）
+> - 两个只读同一资源的 System 可以完全并行——当前算法保守地串行化了它们
+> - 生产级实现（如 `entt::organizer`）在编译期从模板推导依赖，运行期生成并行执行图
+
 ---
 
 ## 4. 扩展阅读

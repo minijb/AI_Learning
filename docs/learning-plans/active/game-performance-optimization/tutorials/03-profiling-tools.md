@@ -417,6 +417,176 @@ Frame 540 / 600
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // tracy_exercise.cpp — 3 层嵌套 Zone + ZoneValue 的 Tracy 插桩练习
+> // 编译: 见教程主体中的编译指令（集成 tracy/public 目录）
+> #define TRACY_ENABLE
+> #include "tracy/Tracy.hpp"
+> #include <iostream>
+> #include <chrono>
+> #include <thread>
+>
+> // 第三层：最内层函数 — 模拟具体计算
+> void ProcessVertex(int vertexIndex) {
+>     ZoneScoped;                          // 自动以函数名 ProcessVertex 命名 Zone
+>     ZoneValue(vertexIndex);              // 在 Tracy GUI 中可看到当前处理的是哪个顶点
+>     // 模拟顶点处理: 0.1-0.3ms
+>     std::this_thread::sleep_for(std::chrono::microseconds(200));
+> }
+>
+> // 第二层：处理一批顶点
+> void ProcessMesh(const char* meshName, int vertexCount) {
+>     ZoneScoped;                          // Tracy Zone: "ProcessMesh"
+>     ZoneText(meshName, strlen(meshName)); // 在 Tracy GUI 中显示 mesh 名称
+>     for (int i = 0; i < vertexCount; i++) {
+>         ProcessVertex(i);                // 内层 Zone 自动嵌套
+>     }
+> }
+>
+> // 第一层：处理整个场景
+> void RenderFrame(int frameIndex) {
+>     ZoneScopedN("RenderFrame");          // 自定义名称覆盖函数名
+>     ZoneValue(frameIndex);               // 记录当前帧号
+>
+>     // 模拟渲染多个 Mesh
+>     ProcessMesh("PlayerModel", 50);
+>     ProcessMesh("TerrainChunk", 200);
+>     ProcessMesh("Skybox", 36);
+> }
+>
+> int main() {
+>     std::cout << "Tracy Exercise: 3 层嵌套 Zone 演示\n"
+>               << "启动 Tracy GUI 并连接到本程序查看时间线\n";
+>
+>     for (int frame = 0; frame < 300; frame++) {
+>         FrameMark;                       // 标记帧边界
+>         RenderFrame(frame);
+>     }
+>
+>     std::cout << "完成 300 帧\n"
+>               << "在 Tracy GUI 中你应该看到:\n"
+>               << "  1. Frame > RenderFrame > ProcessMesh > ProcessVertex 的 4 层嵌套\n"
+>               << "  2. 每个 ProcessMesh Zone 旁显示 mesh 名称 (ZoneText)\n"
+>               << "  3. 每个 RenderFrame Zone 显示帧号 (ZoneValue)\n";
+>     return 0;
+> }
+> ```
+>
+> **验收要点：**
+> - `FrameMark` 在帧循环最外层，Tracy 据此分帧
+> - `ZoneScoped` 自动以函数名命名 Zone，`ZoneScopedN("name")` 可自定义名称
+> - `ZoneText` 在 Zone 旁显示字符串（如 mesh 名），`ZoneValue` 显示数值（如帧号/顶点索引）
+> - 三层嵌套自动形成调用层级，在 Tracy 时间线中可逐层展开
+
+> [!tip]- 练习 2 参考答案
+> **操作步骤（文字描述）：**
+>
+> 1. **下载安装**：从 https://renderdoc.org/ 下载，Windows 下直接安装 .msi
+> 2. **启动目标程序**：
+>    - 打开 RenderDoc → File → "Launch Application"
+>    - 在 Executable Path 中填入你的游戏/3D 程序的 .exe 路径
+>    - 也可以直接启动 Unity/UE 编辑器：将 Unity.exe 或 UnrealEditor.exe 作为目标
+>    - 点击 Launch，RenderDoc 会注入其捕获层
+> 3. **捕获一帧**：
+>    - 程序启动后，按 **F12** 或 **PrintScreen** 键（RenderDoc 默认快捷键）
+>    - 也可以在 RenderDoc 窗口中点击 "Capture Frame(s)" 按钮
+>    - 捕获成功后，帧会出现在 RenderDoc 的 "Captures" 列表中
+> 4. **浏览 Texture**：
+>    - 双击捕获的帧 → 打开 Frame Analysis 窗口
+>    - 左侧 "Texture Viewer" 面板列出所有 Render Target、深度缓冲、Shadow Map 等
+>    - 点击任意纹理可放大查看其中间状态（如 G-Buffer 各通道、Shadow Map 的深度值）
+>    - 右键纹理可导出为 PNG 用于报告
+> 5. **定位高开销 Draw Call**：
+>    - 切换到 "Event Browser" 面板
+>    - 事件按 GPU 执行顺序排列，每个事件旁有 GPU 耗时柱状图
+>    - 找到耗时最长的事件（柱状图最宽），点击查看详细信息：
+>      - Pipeline State → 查看 Vertex/Pixel Shader 的 HLSL/GLSL 源码
+>      - Mesh Viewer → 查看该 Draw Call 的输入几何体
+>      - 右侧可查看该 Draw Call 的输出 Render Target 结果
+>
+> **验收标准**：能说出"第 N 号 Draw Call 耗时 Xms，Shader 复杂度 Y 条指令，输出到 Z Render Target"
+
+> [!tip]- 练习 3 参考答案（可选）
+> **实验设计与预期结果：**
+>
+> ```cpp
+> // tracy_vs_chrono_overhead.cpp — 测量插桩开销对比
+> #define TRACY_ENABLE
+> #include "tracy/Tracy.hpp"
+> #include <chrono>
+> #include <iostream>
+> #include <iomanip>
+>
+> // 被测量的目标：一个极短的空函数
+> __attribute__((noinline)) void EmptyFunc() {
+>     asm volatile(""); // 防止编译器完全优化掉
+> }
+>
+> int main() {
+>     using Clock = std::chrono::high_resolution_clock;
+>     const int ITERATIONS = 100000;
+>
+>     // 基线：裸调用（无测量）
+>     auto t0 = Clock::now();
+>     for (int i = 0; i < ITERATIONS; i++) {
+>         EmptyFunc();
+>     }
+>     auto t1 = Clock::now();
+>     double baseline_ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+>
+>     // 方案 A: ZoneScoped (Tracy)
+>     auto t2 = Clock::now();
+>     for (int i = 0; i < ITERATIONS; i++) {
+>         ZoneScoped;      // Tracy 插桩 — 约 2-5ns 开销
+>         EmptyFunc();
+>     }
+>     auto t3 = Clock::now();
+>     double tracy_ms = std::chrono::duration<double, std::milli>(t3 - t2).count();
+>
+>     // 方案 B: std::chrono 手动插桩
+>     auto t4 = Clock::now();
+>     for (int i = 0; i < ITERATIONS; i++) {
+>         auto s = Clock::now();  // ~20-100ns 开销
+>         EmptyFunc();
+>         auto e = Clock::now();
+>         volatile auto elapsed = e - s; // 防止优化
+>     }
+>     auto t5 = Clock::now();
+>     double chrono_ms = std::chrono::duration<double, std::milli>(t5 - t4).count();
+>
+>     // 计算每次调用的额外开销
+>     double tracy_overhead_ns = (tracy_ms - baseline_ms) / ITERATIONS * 1e6;
+>     double chrono_overhead_ns = (chrono_ms - baseline_ms) / ITERATIONS * 1e6;
+>
+>     std::cout << "========== 插桩开销对比 (100,000 次调用) ==========\n"
+>               << std::fixed << std::setprecision(2)
+>               << "基线 (裸调用):      " << baseline_ms << " ms\n"
+>               << "Tracy ZoneScoped:  " << tracy_ms << " ms"
+>               << "  (每次 " << tracy_overhead_ns << " ns)\n"
+>               << "std::chrono 手动:  " << chrono_ms << " ms"
+>               << "  (每次 " << chrono_overhead_ns << " ns)\n\n"
+>               << "Tracy 开销比 chrono 低约 "
+>               << (chrono_overhead_ns / tracy_overhead_ns) << "x\n";
+>
+>     // 预期结果（典型值）:
+>     // Tracy ZoneScoped: ~2-5 ns/call  (lock-free ring buffer)
+>     // std::chrono:      ~20-100 ns/call (系统调用开销)
+>     return 0;
+> }
+> ```
+>
+> **预期结论：**
+> - Tracy `ZoneScoped` 单次开销约 **2-5 纳秒**（在连接 Tracy GUI 时的完整路径，未连接时宏展开为空）
+> - `std::chrono::high_resolution_clock::now()` 单次开销约 **20-100 纳秒**（取决于 OS 和硬件）
+> - Tracy 的低开销来自其 lock-free ring buffer 设计，chrono 需要系统调用或 rdtsc 指令序列
+> - **这就是为什么 Tracy 可以做到"几乎无感"的插桩** — 即使每秒插桩数百万次也几乎不可测量
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - [Tracy Profiler — 官方手册](https://github.com/wolfpld/tracy/releases/latest/download/tracy.pdf) — 完整的 PDF 手册，涵盖所有宏和配置

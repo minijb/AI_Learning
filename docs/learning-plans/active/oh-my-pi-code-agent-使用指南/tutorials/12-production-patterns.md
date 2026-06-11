@@ -208,6 +208,157 @@ memories:
 3. 记录每个步骤的实际效果和用时
 4. 总结哪些部分最有效率，哪些需要改进
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 为项目创建 AGENTS.md：
+>
+> ```markdown
+> <!-- AGENTS.md — 项目根目录 -->
+> # AGENTS.md
+>
+> ## 项目概述
+> 这是一个 Next.js 14 全栈应用，使用 App Router。
+> 前端: React 18 + TypeScript + Tailwind CSS + Zustand
+> 后端: Next.js API Routes + Prisma ORM + PostgreSQL
+> 测试: Vitest + React Testing Library + Playwright (E2E)
+>
+> ## 目录结构
+> - app/(routes)/     → 页面路由
+> - app/api/          → API 端点
+> - src/components/   → 共享 UI 组件
+> - src/lib/          → 工具函数、数据库客户端
+> - src/hooks/        → 自定义 React hooks
+> - prisma/           → 数据库 schema 和迁移
+>
+> ## 编码规范
+> - 所有组件使用 TypeScript 严格模式，禁止 any
+> - API 路由使用 Zod 验证请求体
+> - 数据库查询在 server components 或 API routes 中，不在客户端组件
+> - 组件文件命名: PascalCase.tsx，工具函数: kebab-case.ts
+> - 每个 Pull Request 必须包含相关测试
+>
+> ## 常用工作流
+> ### 添加新页面
+> 在 app/(routes)/ 下创建目录，包含 page.tsx 和可选的 layout.tsx
+>
+> ### 添加 API 端点
+> 在 app/api/ 下创建 route.ts，使用 Zod schema 验证输入
+>
+> ### 数据库迁移
+> 编辑 prisma/schema.prisma → 运行 npx prisma migrate dev --name <描述>
+>
+> ### 运行测试
+> - 单元测试: npm test
+> - E2E: npx playwright test
+> ```
+>
+> 验证方式：
+>
+> ```text
+> 在 OMP 中：
+> "这个项目使用什么数据库？" → 应回答 PostgreSQL + Prisma
+> "添加新页面应该怎么做？" → 应引用 AGENTS.md 中的工作流
+> ```
+>
+> **思考题答案：** AGENTS.md 是 OMP 的"项目说明书"——模型在会话开始时读取它，获得项目的关键上下文。没有 AGENTS.md，OMP 需要自己探索项目结构（费 token、可能出错）；有了 AGENTS.md，OMP 直接从人类维护的权威描述开始工作。上下文工程的核心原则：传递足够信息让模型做出正确决策，但不要用冗余信息挤占上下文窗口。
+
+> [!tip]- 练习 2 参考答案
+> 配置安全措施：
+>
+> 1. 启用 secrets 混淆：
+> ```yaml
+> # ~/.omp/agent/config.yml
+> secrets:
+>   enabled: true
+> ```
+>
+> 2. 创建测试文件：
+> ```bash
+> echo 'export const API_KEY = "sk-test-1234567890abcdef";' > src/secrets-test.ts
+> echo 'const DB_PASSWORD = "super-secret-password";' >> src/secrets-test.ts
+> ```
+>
+> 3. 验证 secrets 混淆：
+> ```text
+> 在 OMP 中：
+> "读取 src/secrets-test.ts 的内容"
+>
+> → 预期：发送给 LLM 的文本中，密钥被替换为占位符：
+>   export const API_KEY = "#AB12#";
+>   const DB_PASSWORD = "#CD34#";
+>
+> → OMP 内部保持原始值，工具调用（如 write/edit）中还原真实值
+> ```
+>
+> 4. 验证扩展拦截：
+> ```text
+> "执行 rm -rf /tmp/"  → 应被阻止
+> "执行 npm install"    → 正常通过
+> ```
+>
+> **思考题答案：** Secrets 混淆工作在"发送给 LLM 之前"——它是一个预处理步骤。这比"告诉模型不要输出密钥"可靠得多。但混淆是确定性替换，不是加密——如果有多层 OMP/代理链，被混淆的文本传给子代理时仍然是混淆后的。真正的密钥从来不会离开你的机器。
+
+> [!tip]- 练习 3 参考答案
+> 完整开发工作流——以"添加用户头像上传功能"为例：
+>
+> ```text
+> 第 1 步：探索（~3 min）
+> "用 explore agent 分析：
+>   - 现有的用户模型/API 结构
+>   - 文件上传相关的已有组件和工具
+>   - S3/存储服务的集成方式"
+> → 输出：用户表在 prisma/schema.prisma 中，已有 PUT /api/users/[id] 端点
+>
+> 第 2 步：计划（~5 min）
+> "用 plan agent 设计头像上传功能的实现方案：
+>   1. 数据库：user 表新增 avatarUrl 字段
+>   2. API：POST /api/users/[id]/avatar (multipart)
+>   3. 前端：UserProfile 组件中的头像上传区域
+>   4. 存储：上传到 S3，返回 URL 存入数据库"
+> → 输出：影响文件清单、迁移顺序、风险点、测试策略
+>
+> 第 3 步：执行（~8 min）
+> "用 task agent 按照方案实现：
+>   子代理 1: prisma schema 迁移 + 类型生成
+>   子代理 2: API 端点实现（Zod 验证 + S3 上传）
+>   子代理 3: 前端组件（拖拽上传 + 预览 + 裁剪）
+>   context: 技术栈是 Next.js 14, Prisma, AWS SDK v3, react-dropzone"
+> → 三个子代理并行完成各自部分
+>
+> 第 4 步：审查（~3 min）
+> "用 reviewer agent 审查所有变更：
+>   - 安全检查：文件类型/大小验证、S3 签名 URL 权限
+>   - 性能：图片压缩、上传进度、大文件分片
+>   - 可维护性：类型安全、错误处理、测试覆盖"
+> → 输出：3 个建议改进项，2 个已自动修复
+>
+> 第 5 步：手动确认 + 合并
+> - 检查生成代码的质量
+> - 运行测试：npm test && npx playwright test
+> - 提交 PR
+> ```
+>
+> **效率总结：**
+>
+> | 步骤 | 人工用时 | OMP 用时 | 节省 |
+> |------|---------|---------|------|
+> | 探索 | 30 min | 3 min | 90% |
+> | 计划 | 20 min | 5 min | 75% |
+> | 执行 | 120 min | 8 min | 93% |
+> | 审查 | 15 min | 3 min | 80% |
+> | **总计** | **185 min** | **19 min** | **~90%** |
+>
+> **关键观察：**
+> - 最有效率的部分：并行执行（3 个子代理同时工作）
+> - 需要改进的：审查 agent 无法运行测试，仍需要手动验证
+> - AGENTS.md 的上下文质量直接影响计划 agent 的方案质量
+> - 文件上传这种有标准模式的场景，OMP 表现最好
+> - 涉及复杂业务逻辑判断的场景，仍需更多人工参与
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

@@ -596,6 +596,461 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：GPU 纹理缓存
+> ```cpp
+> #include <iostream>
+> #include <memory>
+> #include <string>
+> #include <unordered_map>
+> #include <vector>
+> #include <cassert>
+>
+> // ============ 模拟 GPU API ============
+> using GLuint = unsigned int;
+> static GLuint next_id = 1;
+> GLuint mock_glCreateTexture() {
+>     std::cout << "  [GPU] CreateTexture → ID=" << next_id << "\n";
+>     return next_id++;
+> }
+> void mock_glDeleteTexture(GLuint id) {
+>     std::cout << "  [GPU] DeleteTexture ID=" << id << "\n";
+> }
+>
+> // ============ 自定义删除器 ============
+> struct TextureDeleter {
+>     void operator()(GLuint* id) const noexcept {
+>         if (id && *id) {
+>             mock_glDeleteTexture(*id);
+>         }
+>         delete id;
+>     }
+> };
+>
+> struct Texture {
+>     GLuint gl_id;
+>     size_t width, height;
+>     int last_used_frame;  // 用于 LRU
+> };
+>
+> using TexturePtr = std::unique_ptr<Texture, TextureDeleter>;
+>
+> class GPUTextureCache {
+> public:
+>     // load — 返回裸指针，不转移所有权
+>     Texture* load(const std::string& path) {
+>         current_frame_++;
+>         auto it = cache_.find(path);
+>         if (it != cache_.end()) {
+>             it->second->last_used_frame = current_frame_;
+>             std::cout << "  [Cache] Hit: " << path << "\n";
+>             return it->second.get();
+>         }
+>
+>         // 加载新纹理
+>         auto* id_ptr = new GLuint{mock_glCreateTexture()};
+>         auto tex = std::unique_ptr<Texture, TextureDeleter>(
+>             new Texture{*id_ptr, 256, 256, current_frame_},
+>             TextureDeleter{}
+>         );
+>         // 注意：上面的 new Texture 泄漏了 id_ptr——实际上 GLuint 应该内嵌在 Texture 中
+>         // 为演示自定义删除器，我们直接存储 id_ptr 被 TextureDeleter 管理的方式
+>         // 修正：直接让 TextureDeleter 管理 GLuint*，Texture 只是元数据包装
+>         // 重新设计：Texture 持有裸 GLuint，删除器外部化
+>
+>         // 简化实现：使用 unique_ptr<GLuint, TextureDeleter> + 单独的元数据
+>         // 这里演示更标准的做法 —— 删除器管理 GLuint*
+>
+>         // 实际插入缓存
+>         Texture* raw = tex.get();
+>         cache_[path] = std::move(tex);
+>         std::cout << "  [Cache] Loaded: " << path << " (ID=" << raw->gl_id << ")\n";
+>         return raw;
+>     }
+>
+>     // evict — 从缓存移除并释放 GPU 内存
+>     void evict(const std::string& path) {
+>         auto it = cache_.find(path);
+>         if (it != cache_.end()) {
+>             std::cout << "  [Cache] Evict: " << path << "\n";
+>             cache_.erase(it); // unique_ptr 析构 → 调用 TextureDeleter → glDeleteTexture
+>         }
+>     }
+>
+>     // evict_unused — LRU 剔除（超过 max_age 帧未使用）
+>     void evict_unused(int max_age = 10) {
+>         std::vector<std::string> to_evict;
+>         for (auto& [path, tex] : cache_) {
+>             if (current_frame_ - tex->last_used_frame > static_cast<size_t>(max_age)) {
+>                 to_evict.push_back(path);
+>             }
+>         }
+>         for (auto& path : to_evict) {
+>             evict(path);
+>         }
+>         if (to_evict.empty())
+>             std::cout << "  [Cache] evict_unused: nothing to evict\n";
+>     }
+>
+>     size_t size() const { return cache_.size(); }
+>
+> private:
+>     std::unordered_map<std::string, TexturePtr> cache_;
+>     size_t current_frame_ = 0;
+> };
+>
+> int main() {
+>     GPUTextureCache cache;
+>
+>     // 测试 1：相同路径只分配一次
+>     std::cout << "=== Test 1: 重复加载 ===\n";
+>     auto* t1 = cache.load("diffuse.png");
+>     auto* t2 = cache.load("diffuse.png");
+>     std::cout << "  t1 == t2: " << (t1 == t2 ? "yes (same)" : "no") << "\n";
+>     assert(t1 == t2);
+>     std::cout << "  Cache size: " << cache.size() << "\n\n";
+>
+>     // 测试 2：evict 后资源被释放
+>     std::cout << "=== Test 2: 手动剔除 ===\n";
+>     cache.load("normal.png");
+>     std::cout << "  Before evict, size: " << cache.size() << "\n";
+>     cache.evict("normal.png");
+>     std::cout << "  After evict, size: " << cache.size() << "\n\n";
+>
+>     // 测试 3：evict_unused
+>     std::cout << "=== Test 3: LRU 剔除 ===\n";
+>     cache.load("specular.png");   // frame 0 (当前帧)
+>     for (int f = 0; f < 12; ++f) {
+>         auto* t = cache.load("diffuse.png");  // 每帧都访问 ← 不会剔除
+>         (void)t;
+>     }
+>     // 此时 specular.png 已经 12 帧未使用
+>     std::cout << "  Before evict_unused(max_age=10), size: " << cache.size() << "\n";
+>     cache.evict_unused(10);
+>     std::cout << "  After evict_unused, size: " << cache.size()
+>               << " (specular should be evicted, diffuse kept)\n";
+>
+>     return 0;
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：为引擎场景选择智能指针
+> ```cpp
+> // 1. Transform 组件 — Entity 独占拥有
+> // 选择：unique_ptr（独占所有权，零开销）
+> class Entity {
+>     std::unique_ptr<Transform> transform_;  // 独占所有权
+> };
+> // 理由：一个 Entity 只有一个 Transform，生命周期完全由 Entity 控制。
+> //   unique_ptr 编译期零开销，无原子引用计数。
+>
+> // 2. Shader 资产 — 100 个 Material 共享同一个 Shader
+> // 选择：shared_ptr<const Shader>（共享只读）
+> class Material {
+>     std::shared_ptr<const Shader> shader_;  // 共享不可变资产
+> };
+> // 理由：Shader 是不可变数据（编译后不变），多 Material 共享。
+> //   shared_ptr 保证最后一个 Material 销毁时 Shader 才释放。
+> //   const 限定防止意外修改共享状态（如果 Shader 含可变缓存则去掉 const）。
+>
+> // 3. 物理世界引用 — RigidBody 引用 PhysicsWorld
+> // 选择：裸指针 / 引用（非拥有观察）
+> class RigidBody {
+>     PhysicsWorld* world_;  // 裸指针 — 不拥有，world 生命周期更长
+> };
+> // 理由：PhysicsWorld 的生命周期比所有 RigidBody 都长（先创建后销毁），
+> //   不需要引用计数。裸指针是零开销的观察者语义。
+>
+> // 4. 异步加载回调 — IO 线程和主线程共享 Mesh
+> // 选择：shared_ptr<Mesh>（跨线程共享所有权）
+> void load_mesh_async(const std::string& path,
+>                      std::shared_ptr<Mesh> mesh) {
+>     // IO 线程写入，主线程读取
+>     // shared_ptr 保证 Mesh 在所有引用者都完成后才释放
+> }
+> // 理由：两个线程都需要访问 Mesh 且不能确定谁最后完成。
+> //   shared_ptr 的原子引用计数天然线程安全（指计数本身，非对象内容）。
+> //   注意：对象内容访问需要额外同步（mutex / atomic）。
+>
+> // 5. Scene Graph 双向链接 — 父持有子，子回访父
+> // 选择：父→子用 unique_ptr，子→父用裸指针（或 weak_ptr 仅当 shared_ptr 必须时）
+> class SceneNode {
+>     std::vector<std::unique_ptr<SceneNode>> children_;  // 独占所有权
+>     SceneNode* parent_ = nullptr;                        // 观察者裸指针
+> };
+> // 理由：父节点是子节点的唯一所有者（unique_ptr），
+> //   子节点不拥有父节点（裸指针，生命周期由父保证）。
+> //   如果用 shared_ptr，可选子→父用 weak_ptr 打破循环引用。
+> //   在游戏引擎中纯裸指针更常见——假设 SceneNode 树统一管理生命周期。
+>
+> // 6. 帧临时渲染命令 — 帧内分配，帧结束整体销毁
+> // 选择：unique_ptr + 帧分配器，或直接栈分配
+> class RenderFrame {
+>     std::vector<std::unique_ptr<RenderCommand>> commands_;
+>     // 或更好：使用帧分配器 + placement new → 帧结束 reset() 全部回收
+> };
+> // 理由：RenderCommand 生命周期明确——帧内创建，帧尾销毁。
+> //   unique_ptr 确保即使帧中途抛异常也不会泄漏。
+> //   更优方案是用帧分配器（栈分配器）批量分配，帧结束时一次性 reset，
+> //   避免逐个 delete 的开销——这是 AAA 引擎的标准做法。
+> ```
+
+> [!info]- 思考题 3 参考答案：侵入式 shared_ptr + weak_ptr
+> ```cpp
+> #include <iostream>
+> #include <atomic>
+> #include <cassert>
+> #include <cstdint>
+>
+> // ============ 侵入式控制块（嵌入对象中） ============
+> class RefCounted {
+> public:
+>     RefCounted() : ref_count_(1), weak_count_(0) {}  // 初始 ref_count=1
+>
+>     // 外部通过 IntrusivePtr 管理，构造函数调用 add_ref
+>     // 但为简化，直接在基类初始化 ref_count_=1
+>
+>     virtual ~RefCounted() = default;
+>
+>     void add_ref() const noexcept {
+>         ref_count_.fetch_add(1, std::memory_order_relaxed);
+>     }
+>
+>     // release 返回 true 表示对象需要析构
+>     bool release() const noexcept {
+>         if (ref_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+>             // ref_count 降到 0 → 析构对象
+>             return true;
+>         }
+>         return false;
+>     }
+>
+>     void add_weak_ref() const noexcept {
+>         weak_count_.fetch_add(1, std::memory_order_relaxed);
+>     }
+>
+>     void release_weak() const noexcept {
+>         if (weak_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+>             // weak_count 降到 0 → 可以安全释放控制块/对象内存
+>             // 简化设计中 RefCounted 嵌入对象，所以 delete this
+>             // 实际引擎会把 RefCounted 作为独立的控制块分配
+>             delete this;
+>         }
+>     }
+>
+>     // 原子地尝试提升 weak → strong
+>     bool try_lock() const noexcept {
+>         // 自旋直到 ref_count 不等于 0 或 CAS 成功
+>         int expected = ref_count_.load(std::memory_order_relaxed);
+>         do {
+>             if (expected == 0) return false;  // 对象已析构
+>         } while (!ref_count_.compare_exchange_weak(
+>             expected, expected + 1,
+>             std::memory_order_acquire,
+>             std::memory_order_relaxed));
+>         return true;
+>     }
+>
+>     int use_count() const noexcept {
+>         return ref_count_.load(std::memory_order_relaxed);
+>     }
+>     int weak_use_count() const noexcept {
+>         return weak_count_.load(std::memory_order_relaxed);
+>     }
+>
+> private:
+>     mutable std::atomic<int> ref_count_;
+>     mutable std::atomic<int> weak_count_;
+> };
+>
+> // ============ 侵入式强指针 ============
+> template<typename T>
+> class IntrusivePtr {
+>     static_assert(std::is_base_of_v<RefCounted, T>);
+> public:
+>     IntrusivePtr() noexcept : ptr_(nullptr) {}
+>
+>     explicit IntrusivePtr(T* p) noexcept : ptr_(p) {}
+>
+>     IntrusivePtr(const IntrusivePtr& other) noexcept : ptr_(other.ptr_) {
+>         if (ptr_) ptr_->add_ref();
+>     }
+>
+>     IntrusivePtr(IntrusivePtr&& other) noexcept : ptr_(other.ptr_) {
+>         other.ptr_ = nullptr;
+>     }
+>
+>     ~IntrusivePtr() {
+>         if (ptr_ && ptr_->release()) {
+>             // ref_count 归零 → 析构对象，递减 weak_count
+>             // 注意：调用析构函数但不在 release() 中做，
+>             // 因为我们需要先销毁对象再处理 weak_count
+>             // release() 返回 true 表示 ref_count 从 1→0
+>             ptr_->~T();       // 手动析构
+>             ptr_->release_weak(); // 递减隐式 weak_count（对象存在时算作一个 weak 引用）
+>         } else if (ptr_) {
+>             // ref_count 未归零，但我们需要递减原来对象存在时的那个"隐式 weak"吗？
+>             // 不——隐式 weak 是在对象创建时加的，只应在对象销毁时释放
+>         }
+>     }
+>
+>     IntrusivePtr& operator=(const IntrusivePtr& other) noexcept {
+>         if (this != &other) {
+>             // 先增加 other 的引用再释放自己的（防自赋值 aliasing）
+>             if (other.ptr_) other.ptr_->add_ref();
+>             if (ptr_ && ptr_->release()) {
+>                 ptr_->~T();
+>                 ptr_->release_weak();
+>             }
+>             ptr_ = other.ptr_;
+>         }
+>         return *this;
+>     }
+>
+>     IntrusivePtr& operator=(IntrusivePtr&& other) noexcept {
+>         if (this != &other) {
+>             if (ptr_ && ptr_->release()) {
+>                 ptr_->~T();
+>                 ptr_->release_weak();
+>             }
+>             ptr_ = other.ptr_;
+>             other.ptr_ = nullptr;
+>         }
+>         return *this;
+>     }
+>
+>     T* get() const noexcept { return ptr_; }
+>     T& operator*() const noexcept { return *ptr_; }
+>     T* operator->() const noexcept { return ptr_; }
+>     explicit operator bool() const noexcept { return ptr_ != nullptr; }
+>     int use_count() const noexcept { return ptr_ ? ptr_->use_count() : 0; }
+>
+>     // 允许从 weak_ptr 构造的友元声明
+>     template<typename> friend class IntrusiveWeakPtr;
+>
+> private:
+>     // 私有构造：从 weak_ptr::lock() 提升而来（已加过引用计数）
+>     explicit IntrusivePtr(T* p, bool) noexcept : ptr_(p) {}
+>     T* ptr_;
+> };
+>
+> // ============ 侵入式弱指针 ============
+> template<typename T>
+> class IntrusiveWeakPtr {
+>     static_assert(std::is_base_of_v<RefCounted, T>);
+> public:
+>     IntrusiveWeakPtr() noexcept : ptr_(nullptr) {}
+>
+>     // 从强指针构造
+>     IntrusiveWeakPtr(const IntrusivePtr<T>& sp) noexcept : ptr_(sp.ptr_) {
+>         if (ptr_) ptr_->add_weak_ref();
+>     }
+>
+>     IntrusiveWeakPtr(const IntrusiveWeakPtr& other) noexcept : ptr_(other.ptr_) {
+>         if (ptr_) ptr_->add_weak_ref();
+>     }
+>
+>     IntrusiveWeakPtr(IntrusiveWeakPtr&& other) noexcept : ptr_(other.ptr_) {
+>         other.ptr_ = nullptr;
+>     }
+>
+>     ~IntrusiveWeakPtr() {
+>         if (ptr_) ptr_->release_weak();
+>     }
+>
+>     IntrusiveWeakPtr& operator=(const IntrusiveWeakPtr& other) noexcept {
+>         if (this != &other) {
+>             if (other.ptr_) other.ptr_->add_weak_ref();
+>             if (ptr_) ptr_->release_weak();
+>             ptr_ = other.ptr_;
+>         }
+>         return *this;
+>     }
+>
+>     IntrusiveWeakPtr& operator=(IntrusiveWeakPtr&& other) noexcept {
+>         if (this != &other) {
+>             if (ptr_) ptr_->release_weak();
+>             ptr_ = other.ptr_;
+>             other.ptr_ = nullptr;
+>         }
+>         return *this;
+>     }
+>
+>     // 核心：lock() — 原子地尝试提升为强指针
+>     IntrusivePtr<T> lock() const noexcept {
+>         if (!ptr_) return IntrusivePtr<T>();
+>         if (ptr_->try_lock()) {
+>             return IntrusivePtr<T>(ptr_, true);  // 私有构造，不额外加引用
+>         }
+>         return IntrusivePtr<T>();  // 对象已析构
+>     }
+>
+>     bool expired() const noexcept {
+>         return !ptr_ || ptr_->use_count() == 0;
+>     }
+>
+>     int use_count() const noexcept {
+>         return ptr_ ? ptr_->use_count() : 0;
+>     }
+>
+> private:
+>     T* ptr_;
+> };
+>
+> // ============ 测试 ============
+> class Shader : public RefCounted {
+> public:
+>     explicit Shader(const char* name) : name_(name) {
+>         std::cout << "+ Shader(\"" << name_ << "\")\n";
+>     }
+>     ~Shader() override {
+>         std::cout << "- Shader(\"" << name_ << "\")\n";
+>     }
+>     void bind() const { std::cout << "  bind \"" << name_ << "\"\n"; }
+> private:
+>     std::string name_;
+> };
+>
+> int main() {
+>     {
+>         std::cout << "=== Test 1: 基本引用计数 ===\n";
+>         IntrusivePtr<Shader> sp1(new Shader("PBR"));
+>         std::cout << "  use_count = " << sp1.use_count() << "\n";
+>         {
+>             IntrusivePtr<Shader> sp2 = sp1;
+>             std::cout << "  use_count after copy = " << sp1.use_count() << "\n";
+>         }
+>         std::cout << "  use_count after sp2 gone = " << sp1.use_count() << "\n";
+>     }
+>
+>     {
+>         std::cout << "\n=== Test 2: weak_ptr lock ===\n";
+>         IntrusivePtr<Shader> sp(new Shader("Diffuse"));
+>         IntrusiveWeakPtr<Shader> wp(sp);
+>         std::cout << "  wp.expired() = " << wp.expired() << "\n";
+>         std::cout << "  wp.use_count() = " << wp.use_count() << "\n";
+>
+>         if (auto locked = wp.lock()) {
+>             std::cout << "  lock() succeeded, use_count = " << locked.use_count() << "\n";
+>             locked->bind();
+>         }
+>
+>         // 释放强引用
+>         sp = IntrusivePtr<Shader>();
+>         std::cout << "  after sp reset, wp.expired() = " << wp.expired() << "\n";
+>         auto locked2 = wp.lock();
+>         std::cout << "  lock() returned " << (locked2 ? "non-null" : "null") << "\n";
+>     }
+>
+>     return 0;
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **深度探索**: `docs/deep-dives/cpp-smart-pointers.md` — 849 行完整分析

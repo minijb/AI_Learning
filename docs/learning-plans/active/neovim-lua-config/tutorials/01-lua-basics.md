@@ -193,6 +193,55 @@ Hello, Neovim User! You have 3 messages.
 ### 练习 3: 循环计算（可选）
 用 for 循环计算 1 到 100 的累加和，打印结果。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```lua
+> -- exercise1_score.lua
+> local score = 85  -- 可修改此值测试不同分支
+>
+> if score >= 90 then
+>     print("优秀")
+> elseif score >= 60 then
+>     print("及格")
+> else
+>     print("不及格")
+> end
+> ```
+>
+> **关键点：** Lua 中 `elseif` 是一个单词（不是 `else if`），每个条件分支都需要 `then`。
+
+> [!tip]- 练习 2 参考答案
+> ```lua
+> -- exercise2_name.lua
+> local first = "张"
+> local middle = "伟"
+> local last = "明"
+>
+> -- 拼接：用 .. 运算符，中间加空格
+> local full_name = first .. " " .. middle .. " " .. last
+> print("完整姓名: " .. full_name)
+> print("长度: " .. #full_name)
+> -- #full_name 计算的是字节数，中文字符在 UTF-8 下每个占 3 字节
+> ```
+>
+> **注意：** `#` 运算符对 UTF-8 中文字符串返回的是**字节数**而非字符数，这是 Lua 字符串的已知限制。如需正确计算 Unicode 字符数，在 Neovim 中可使用 `vim.fn.strchars()`。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```lua
+> -- exercise3_sum.lua
+> local sum = 0
+> for i = 1, 100 do
+>     sum = sum + i
+> end
+> print("1 到 100 的累加和: " .. sum)  -- 输出 5050
+> ```
+>
+> **验证：** 等差数列求和公式 (1+100)×100/2 = 5050，与循环结果一致。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

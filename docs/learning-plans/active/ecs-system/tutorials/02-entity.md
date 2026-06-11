@@ -303,6 +303,140 @@ Entity 只是 {index, generation} 对——总共 8 字节
 
 用组件来表达这些关系。当被瞄准的目标实体被销毁时，持有 `Target` 引用的实体应该怎么处理？（提示：generation 检查。）
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // FIFO 回收策略：使用 std::queue 代替 std::vector（栈/LIFO）
+> #include <queue>
+>
+> class EntityManagerFIFO {
+> public:
+>     Entity create() {
+>         if (!free_slots.empty()) {
+>             uint32_t idx = free_slots.front();  // 取最早的
+>             free_slots.pop();
+>             generations[idx]++;
+>             alive[idx] = true;
+>             return Entity{idx, generations[idx]};
+>         }
+>         uint32_t idx = static_cast<uint32_t>(generations.size());
+>         generations.push_back(0);
+>         alive.push_back(true);
+>         return Entity{idx, 0};
+>     }
+>
+>     void destroy(Entity e) {
+>         assert(is_alive(e));
+>         alive[e.index] = false;
+>         free_slots.push(e.index);  // 入队（尾部）
+>     }
+>     // ... 其余同 LIFO 版
+> private:
+>     std::vector<uint32_t> generations;
+>     std::vector<bool> alive;
+>     std::queue<uint32_t> free_slots;  // FIFO 队列
+> };
+> ```
+>
+> **Generation 溢出风险比较**：
+> - **LIFO（栈）**：刚释放的槽位立刻被复用 → "热点槽位"被反复回收，generation 快速递增。例如槽位 0 被创建/销毁 1000 次→generation 到 1000
+> - **FIFO（队列）**：释放的槽位排队等待，最新的释放排在队尾 → generation 递增**更均匀分散**到所有槽位
+> - **结论**：LIFO 策略下热点槽位的 generation 更容易接近 `UINT32_MAX`（约 42 亿次复用），但即使是 LIFO，要达到溢出也需要同一个槽位被创建/销毁 42 亿次——在实际游戏中几乎不可能
+>
+> **溢出防护**：
+> - 溢出时 `generations[idx]++` 会回绕到 0，此时 `is_alive()` 可能对已销毁的实体返回 true（generation 恰好匹配）
+> - **防护方案**：在 `create()` 中检查 `generations[idx]` 是否到上限，若达到则跳过该槽位不回收；或使用 `uint64_t` 作为 generation（宇宙热寂前不会溢出）
+> - **更好的方案**：将 index 和 generation 编码到 `uint64_t` 中（如 EnTT: 32 位 entity + 32 位 version），即使 32 位 version 也是百万年安全边际
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <chrono>
+> #include <iostream>
+>
+> int main() {
+>     EntityManager mgr;
+>     constexpr size_t N = 1'000'000;
+>     std::vector<Entity> entities;
+>     entities.reserve(N);
+>
+>     // 阶段 1: 创建 100 万个实体
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     for (size_t i = 0; i < N; i++) {
+>         entities.push_back(mgr.create());
+>     }
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     auto create_time = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+>     std::cout << "创建 " << N << " 个实体: " << create_time << " ms\n";
+>
+>     // 阶段 2: 销毁前 50 万个
+>     auto t3 = std::chrono::high_resolution_clock::now();
+>     for (size_t i = 0; i < N / 2; i++) {
+>         mgr.destroy(entities[i]);
+>     }
+>     auto t4 = std::chrono::high_resolution_clock::now();
+>     auto destroy_time = std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3).count();
+>     std::cout << "销毁 50 万个实体: " << destroy_time << " ms\n";
+>
+>     // 阶段 3: 再创建 50 万个
+>     auto t5 = std::chrono::high_resolution_clock::now();
+>     for (size_t i = 0; i < N / 2; i++) {
+>         entities[i] = mgr.create();  // 复用刚释放的槽位
+>     }
+>     auto t6 = std::chrono::high_resolution_clock::now();
+>     auto recreate_time = std::chrono::duration_cast<std::chrono::milliseconds>(t6 - t5).count();
+>     std::cout << "再创建 50 万个实体: " << recreate_time << " ms\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **预估对比分析**：
+> | 操作 | ECS Entity（实测 ≈） | OOP GameObject（估算） | 原因 |
+> |------|---------------------|----------------------|------|
+> | 创建 100 万 | ~50-100 ms | ~500-2000 ms | ECS: 整数递增+vector push。OOP: `new` + 构造函数 + 虚表 + 堆分配 |
+> | 销毁 50 万 | ~10-30 ms | ~200-1000 ms | ECS: 标记 alive=false + push 到 free_slots。OOP: `delete` + 析构函数 + 虚表清理 + 释放内存 |
+> | 再创建 50 万 | ~30-60 ms | ~300-1000 ms | ECS: 复用已有槽位（无堆分配）。OOP: 再次 new + 构造 |
+>
+> **差距根源**：OOP 的每个 `GameObject` 是独立堆分配 → 系统调用 + 内存碎片化。ECS 的创建只是操作已有数组——**零堆分配**（amortized）。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // ---- Owner/Owned：单向拥有关系 ----
+> struct Owner {
+>     std::vector<Entity> owned;  // 拥有哪些实体
+> };
+> struct OwnedBy {
+>     Entity owner = {UINT32_MAX, 0};        // 被谁拥有
+>     int slot_index = -1;                    // 在 owner.owned 中的索引（O(1) 移除）
+> };
+> // 角色拾起武器：player 有 Owner{weapon}，weapon 有 OwnedBy{player}
+> // 武器跟随玩家：FollowSystem 查询 (Position, OwnedBy) → 同步位置到 owner 的 Position
+>
+> // ---- Target：单向瞄准/攻击关系 ----
+> struct Target {
+>     Entity target = {UINT32_MAX, 0};
+>     float aggro_range = 10.0f;
+> };
+> struct TargetedBy {
+>     std::vector<Entity> attackers;  // 反向索引，便于 O(1) 查找谁在瞄准我
+> };
+> // A 攻击 B：A 有 Target{B}，B 有 TargetedBy{[A, C, D]}
+>
+> // ---- Team：多对多阵营关系 ----
+> struct Team {
+>     int team_id = 0;  // 0=中立, 1=红队, 2=蓝队
+> };
+> // 查询：同一 team_id 的实体是友方，不同 team_id 是敌方
+> // 相比在每个实体存储 std::vector<Entity> allies，Team 组件更简洁且无冗余
+> ```
+>
+> **悬空 Target 的处理**：当 B 被销毁时，A 持有的 `Target{target=B}` 变成悬空引用。解法：
+> - **generation 检查**：A 的 System 在访问 `Target::target` 前调用 `is_alive(target)` 验证。B 被销毁后 generation 不匹配 → 返回 false → A 清除 Target
+> - **自动清理 System**：`TargetCleanupSystem` 每帧遍历所有 Target 组件，清除无效引用
+> - **关系组件是单向引用，不存在循环引用问题**——B 不拥有对 A 的反向指针（`TargetedBy` 是查询优化，不是生命周期依赖）
+> - 这正是 generation 机制的核心价值：**以 O(1) 整数比较代替引用计数和 shared_ptr 的开销**
+
 ---
 
 ## 4. 扩展阅读

@@ -513,6 +513,311 @@ es.emit<CollisionEvent>(entity1, entity2, 50.0f);
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <functional>
+> > #include <unordered_map>
+> > #include <vector>
+> > #include <memory>
+> > #include <utility>
+> > #include <cassert>
+> >
+> > // ============ Token 管理 ============
+> > using Token = uint64_t;
+> > inline Token next_token() { static Token t = 1; return t++; }
+> >
+> > // ============ 事件基类（类型擦除） ============
+> > struct EventBase {
+> >     virtual ~EventBase() = default;
+> > };
+> >
+> > // ============ 带参数的事件模板 ============
+> > template<typename... Args>
+> > struct Event : EventBase {
+> >     using Callback = std::function<void(Args...)>;
+> >     using FnPtr    = void(*)(Args...);
+> >
+> >     struct Listener {
+> >         Token token;
+> >         Callback cb;
+> >     };
+> >
+> >     std::vector<Listener> listeners;
+> >
+> >     // 订阅 — 返回 token 用于取消
+> >     template<typename F>
+> >     Token subscribe(F&& f) {
+> >         Token t = next_token();
+> >         listeners.push_back({t, std::forward<F>(f)});
+> >         return t;
+> >     }
+> >
+> >     // 函数指针优化路径
+> >     Token subscribe(FnPtr fp) {
+> >         Token t = next_token();
+> >         listeners.push_back({t, Callback(fp)});
+> >         return t;
+> >     }
+> >
+> >     // 取消订阅
+> >     bool unsubscribe(Token token) {
+> >         auto it = std::find_if(listeners.begin(), listeners.end(),
+> >             [token](const Listener& l) { return l.token == token; });
+> >         if (it == listeners.end()) return false;
+> >         // swap-remove 避免大量移动
+> >         *it = std::move(listeners.back());
+> >         listeners.pop_back();
+> >         return true;
+> >     }
+> >
+> >     // 广播 — variadic 完美转发
+> >     void broadcast(Args... args) const {
+> >         for (const auto& l : listeners)
+> >             l.cb(args...);
+> >     }
+> > };
+> >
+> > // ============ 事件系统 ============
+> > class TypedEventSystem {
+> >     // 用 type_index 索引不同类型的事件
+> >     std::unordered_map<std::type_index, std::unique_ptr<EventBase>> events_;
+> >
+> >     template<typename E>
+> >     Event<typename E::Args...>& get_event() {
+> >         auto key = std::type_index(typeid(E));
+> >         auto it  = events_.find(key);
+> >         if (it == events_.end()) {
+> >             auto ev = std::make_unique<typename E::event_type>();
+> >             auto& ref = *ev;
+> >             events_[key] = std::move(ev);
+> >             return ref;
+> >         }
+> >         return static_cast<typename E::event_type&>(*it->second);
+> >     }
+> >
+> > public:
+> >     // 事件标签类型（用户定义事件的便捷方式）
+> >     template<typename... Args>
+> >     struct event_tag {
+> >         using Args = void;  // 会被特化覆盖
+> >         using event_type = Event<Args...>;
+> >     };
+> >
+> >     // 便捷：直接用参数类型订阅/发射
+> >     template<typename Tag>
+> >     Token subscribe(std::function<void(typename Tag::Args...)> cb) {
+> >         // 简化版：实际可按参数类型推导
+> >         return get_event<Tag>().subscribe(std::move(cb));
+> >     }
+> >
+> >     template<typename... Args>
+> >     Token subscribe_to(Event<Args...>& /*dummy*/,
+> >                        std::function<void(Args...)> cb) {
+> >         // 简化接口
+> >         return {}; // 省略登记逻辑（见上）
+> >     }
+> >
+> >     template<typename... Args>
+> >     void emit(Event<Args...>& ev, Args... args) const {
+> >         ev.broadcast(std::forward<Args>(args)...);
+> >     }
+> > };
+> >
+> > // ============ 使用示例 ============
+> > struct Entity { int id; };
+> >
+> > int main() {
+> >     Event<Entity, Entity, float> collision;
+> >
+> >     // 订阅
+> >     auto t1 = collision.subscribe([](Entity a, Entity b, float force) {
+> >         std::cout << "Collision: " << a.id << " vs " << b.id
+> >                   << " force=" << force << '\n';
+> >     });
+> >
+> >     // 函数指针优化路径
+> >     auto t2 = collision.subscribe(+[](Entity a, Entity b, float force) {
+> >         std::cout << "  [fp] damage applied\n";
+> >     });
+> >
+> >     // 广播
+> >     collision.broadcast(Entity{1}, Entity{2}, 50.0f);
+> >
+> >     // 取消订阅
+> >     collision.unsubscribe(t2);
+> >     collision.broadcast(Entity{3}, Entity{4}, 10.0f);
+> >     // 只剩 t1 收到
+> >
+> >     std::cout << "OK\n";
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <memory>
+> > #include <concepts>
+> > #include <type_traits>
+> >
+> > // ============ 1. 手写 make_unique ============
+> > template<typename T, typename... Args>
+> > std::unique_ptr<T> make_unique(Args&&... args) {
+> >     return std::unique_ptr<T>(
+> >         new T(std::forward<Args>(args)...)
+> >     );
+> > }
+> >
+> > // ============ 2. 折叠表达式求平均帧率 ============
+> > // requires 约束：所有参数必须是 float（C++20）
+> > template<typename... Ts>
+> >     requires (std::same_as<Ts, float> && ...)
+> > float frame_rate_average(Ts... frame_times) {
+> >     // fps = 1.0f / frame_time 对每个帧时间计算
+> >     // 使用二元左折叠：从 init 0.0f 开始累加每个帧率
+> >     float sum = (0.0f + ... + (1.0f / frame_times));
+> >     return sum / static_cast<float>(sizeof...(frame_times));
+> > }
+> >
+> > // 无参数的默认
+> > constexpr float frame_rate_average() { return 0.0f; }
+> >
+> > int main() {
+> >     // 测试 make_unique
+> >     auto p = make_unique<std::string>("Hello, variadic!");
+> >     std::cout << *p << '\n';
+> >
+> >     struct Vec { float x, y; Vec(float a, float b) : x(a), y(b) {} };
+> >     auto v = make_unique<Vec>(1.0f, 2.0f);
+> >     std::cout << v->x << ", " << v->y << '\n';
+> >
+> >     // 测试帧率均值
+> >     float avg = frame_rate_average(0.016f, 0.032f, 0.008f);
+> >     // 帧率分别为 62.5, 31.25, 125.0 → 平均 ~72.92
+> >     std::cout << "Avg FPS: " << avg << '\n';
+> >
+> >     // 编译期检查：requires 约束
+> >     // frame_rate_average(1.0f, 2.0);  // ❌ 编译错误，2.0 是 double 不是 float
+> >
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <tuple>
+> > #include <cstring>
+> > #include <vector>
+> > #include <string>
+> >
+> > // ============ 重载检测：通过 SFINAE 或 concepts 区分两种调用模式 ============
+> > // C++20 concept 版本：检测 func 能否以 (elem) 单参数调用
+> > template<typename F, typename T>
+> > concept CallableWithOne = requires(F f, T t) { f(t); };
+> >
+> > template<typename F, typename T>
+> > concept CallableWithIndex = requires(F f, size_t i, T t) { f(i, t); };
+> >
+> > // ============ 核心实现 ============
+> > namespace detail {
+> >     // 模式 A：func(element) — 只有 1 个参数
+> >     template<typename Tuple, typename Func, size_t... I>
+> >     void tuple_for_each_impl(Tuple&& tup, Func&& func, std::index_sequence<I...>) {
+> >         (func(std::get<I>(std::forward<Tuple>(tup))), ...);
+> >     }
+> >
+> >     // 模式 B：func(index, element) — 重载选择
+> >     template<typename Tuple, typename Func, size_t... I>
+> >     void tuple_for_each_indexed_impl(Tuple&& tup, Func&& func, std::index_sequence<I...>) {
+> >         (func(I, std::get<I>(std::forward<Tuple>(tup))), ...);
+> >     }
+> > }
+> >
+> > // 公开接口：自动检测调用模式
+> > // 版本 A：func(element)
+> > template<typename Tuple, CallableWithOne<std::tuple_element_t<0, std::decay_t<Tuple>>> Func>
+> > void tuple_for_each(Tuple&& tup, Func&& func) {
+> >     using T = std::decay_t<Tuple>;
+> >     detail::tuple_for_each_impl(std::forward<Tuple>(tup), std::forward<Func>(func),
+> >         std::make_index_sequence<std::tuple_size_v<T>>{});
+> > }
+> >
+> > // 版本 B：func(index, element) — 通过 lambda 签名区分
+> > // 简单策略：如果 func 接受 2 个参数则是索引模式
+> > template<typename Tuple, typename Func>
+> >     requires (!CallableWithOne<Func, std::tuple_element_t<0, std::decay_t<Tuple>>>)
+> > void tuple_for_each(Tuple&& tup, Func&& func) {
+> >     using T = std::decay_t<Tuple>;
+> >     detail::tuple_for_each_indexed_impl(std::forward<Tuple>(tup), std::forward<Func>(func),
+> >         std::make_index_sequence<std::tuple_size_v<T>>{});
+> > }
+> >
+> > // ============ 序列化工具 ============
+> > class ByteStream {
+> >     std::vector<uint8_t> data_;
+> > public:
+> >     void write(const void* src, size_t size) {
+> >         const auto* p = static_cast<const uint8_t*>(src);
+> >         data_.insert(data_.end(), p, p + size);
+> >     }
+> >     const std::vector<uint8_t>& data() const { return data_; }
+> >     size_t size() const { return data_.size(); }
+> > };
+> >
+> > // 序列化单个字段
+> > template<typename T>
+> > void serialize_field(ByteStream& stream, const T& value) {
+> >     if constexpr (std::is_same_v<T, std::string>) {
+> >         uint32_t len = static_cast<uint32_t>(value.size());
+> >         stream.write(&len, sizeof(len));
+> >         stream.write(value.data(), len);
+> >     } else if constexpr (std::is_arithmetic_v<T>) {
+> >         stream.write(&value, sizeof(value));
+> >     }
+> > }
+> >
+> > // 序列化整个 tuple
+> > template<typename... Ts>
+> > void serialize_tuple(ByteStream& stream, const std::tuple<Ts...>& tup) {
+> >     tuple_for_each(tup, [&stream](const auto& elem) {
+> >         serialize_field(stream, elem);
+> >     });
+> > }
+> >
+> > int main() {
+> >     // 测试 tuple_for_each — 模式 A：func(element)
+> >     auto tup = std::make_tuple(42, 3.14f, std::string("hello"));
+> >     std::cout << "Elements: ";
+> >     tuple_for_each(tup, [](const auto& e) {
+> >         std::cout << e << ' ';
+> >     });
+> >     std::cout << '\n';
+> >
+> >     // 测试 tuple_for_each — 模式 B：func(index, element)
+> >     std::cout << "Indexed: ";
+> >     tuple_for_each(tup, [](size_t i, const auto& e) {
+> >         std::cout << '[' << i << "]=" << e << ' ';
+> >     });
+> >     std::cout << '\n';
+> >
+> >     // 测试序列化
+> >     ByteStream stream;
+> >     serialize_tuple(stream, tup);
+> >     std::cout << "Serialized size: " << stream.size() << " bytes\n";
+> >     // int(4) + float(4) + string len(4) + "hello"(5) = 17
+> >
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **C++ Templates: The Complete Guide (2nd ed.)** 第 4、12 章 — Variadic Templates 权威参考

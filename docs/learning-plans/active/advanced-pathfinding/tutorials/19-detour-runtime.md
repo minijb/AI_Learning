@@ -874,6 +874,312 @@ Done.
 
 **目标**: 深刻理解漏斗算法的几何直觉 —— 这本质上是 2D 凸包切割问题。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在 `findPath` 后输出多边形质心路径，并与漏斗路径对比长度：
+>
+> ```cpp
+> // 在 main() 的 Test 1 中，findStraightPath 之后添加：
+>
+> // 提取多边形质心路径（粗略路径）
+> std::vector<float> centroidPath;
+> for (int i = 0; i < pathCount; ++i) {
+>     const dtMeshTile* tile = nullptr;
+>     const dtPoly* poly = nullptr;
+>     navMesh->getTileAndPolyByRef(path[i], &tile, &poly);
+>     if (!tile || !poly) continue;
+>
+>     // 计算质心：顶点平均
+>     float cx = 0, cy = 0, cz = 0;
+>     for (int v = 0; v < poly->vertCount; ++v) {
+>         const float* vert = &tile->verts[poly->verts[v] * 3];
+>         cx += vert[0]; cy += vert[1]; cz += vert[2];
+>     }
+>     cx /= poly->vertCount; cy /= poly->vertCount; cz /= poly->vertCount;
+>     centroidPath.push_back(cx);
+>     centroidPath.push_back(cy);
+>     centroidPath.push_back(cz);
+> }
+>
+> // 插入起点和终点到质心路径的首尾
+> centroidPath.insert(centroidPath.begin(),
+>                     {nearestStart[0], nearestStart[1], nearestStart[2]});
+> centroidPath.insert(centroidPath.end(),
+>                     {nearestEnd[0], nearestEnd[1], nearestEnd[2]});
+>
+> // 计算质心路径长度
+> float centroidLen = 0.0f;
+> for (size_t i = 1; i < centroidPath.size() / 3; ++i)
+>     centroidLen += vDist(&centroidPath[(i-1)*3], &centroidPath[i*3]);
+>
+> float funnelLen = 0.0f;
+> for (int i = 1; i < straightPathCount; ++i)
+>     funnelLen += vDist(&straightPath[(i-1)*3], &straightPath[i*3]);
+>
+> // 输出对比
+> printf("\n=== Path Comparison ===\n");
+> printf("Centroid path: %zu verts, length=%.2f m\n",
+>        centroidPath.size() / 3, centroidLen);
+> printf("Funnel  path:  %d verts, length=%.2f m\n",
+>        straightPathCount, funnelLen);
+> printf("Length reduction: %.1f%%\n", (1.0f - funnelLen/centroidLen) * 100);
+> printf("Vertex reduction: %zu → %d\n",
+>        centroidPath.size() / 3, straightPathCount);
+> ```
+>
+> **预期结果**：质心路径（多边形节点到节点）通常比漏斗路径长 10-30%，因为多边形质心连线不是最短路径——它走的是"多边形中心→过边→下一个多边形中心"，而漏斗算法直接走通道内的直线段。拐点数也多很多（每个多边形一个拐点 vs 漏斗只产生真正的几何拐点）。
+>
+> **关键洞察**：A* 在多边形图上的节点是"拓扑"单位（多大的开放区域就一个节点），而漏斗算法在"几何空间"操作，拉出的是真正的几何最短路径。两者的分工是 Detour 设计的精髓。
+
+> [!tip]- 练习 2 参考答案
+> 实现自定义 `MudFilter`，对泥地区域（area type=1）设置 5 倍代价：
+>
+> ```cpp
+> // 继承 dtQueryFilter，重写 getCost
+> class MudFilter : public dtQueryFilter {
+> public:
+>     MudFilter() {
+>         // 基础设置
+>         setIncludeFlags(0x01);  // SAMPLE_POLYFLAGS_WALK
+>         setExcludeFlags(0);
+>
+>         // 默认区域代价 = 1.0
+>         for (int i = 0; i < DT_MAX_AREAS; ++i)
+>             setAreaCost(i, 1.0f);
+>
+>         // 泥地区域（area type = 1）代价 = 5.0（5 倍）
+>         setAreaCost(1, 5.0f);
+>     }
+>
+>     // 重写 getCost：返回边的代价（基于区域类型）
+>     // 注意：dtQueryFilter::getCost 的签名是固定的
+>     // 实际上 area cost 已经通过 setAreaCost 设置了，
+>     // Detour 内部在展开节点时会调用 getCost，默认实现查询 m_areaCost[areaType]
+>     // 所以重写 setAreaCost 就足够了
+> };
+>
+> // ---- 在 NavMesh 中标记泥地区域 ----
+> // 修改 DemoNavMeshBuilder::buildTileData 中的 areas 数组：
+> // 将某些多边形标记为 area type = 1（泥地）
+> // 例如：将 Poly 6 和 Poly 7 标记为泥地
+> // areas[6] = 1;  // 泥地
+> // areas[7] = 1;  // 泥地
+>
+> // ---- 对比测试 ----
+> // 在 main() 中，先测试普通 filter，再测试 MudFilter：
+> printf("\n=== Test: Area Cost Filter ===\n");
+>
+> dtQueryFilter normalFilter;
+> normalFilter.setIncludeFlags(0x01);
+> for (int i = 0; i < DT_MAX_AREAS; ++i)
+>     normalFilter.setAreaCost(i, 1.0f);
+>
+> MudFilter mudFilter;
+>
+> float testStart[3] = { 1.0f, 0.0f, 1.0f };
+> float testEnd[3]   = { 18.0f, 0.0f, 18.0f };
+> float ext[3] = { 2.0f, 4.0f, 2.0f };
+>
+> // Normal filter
+> dtPolyRef sRef=0, eRef=0; float ns[3], ne[3];
+> query->findNearestPoly(testStart, ext, &normalFilter, &sRef, ns);
+> query->findNearestPoly(testEnd, ext, &normalFilter, &eRef, ne);
+>
+> dtPolyRef normalPath[256]; int normalCount = 0;
+> query->findPath(sRef, eRef, ns, ne, &normalFilter,
+>                 normalPath, &normalCount, 256);
+> printf("Normal filter: %d polys, path cost from A*\n", normalCount);
+>
+> // Mud filter
+> dtPolyRef mudPath[256]; int mudCount = 0;
+> query->findPath(sRef, eRef, ns, ne, &mudFilter,
+>                 mudPath, &mudCount, 256);
+> printf("Mud filter:    %d polys, path cost from A*\n", mudCount);
+>
+> // 对比多边形序列
+> printf("Normal poly refs: ");
+> for (int i = 0; i < normalCount; ++i)
+>     printf("%llu ", (unsigned long long)normalPath[i]);
+> printf("\nMud poly refs:   ");
+> for (int i = 0; i < mudCount; ++i)
+>     printf("%llu ", (unsigned long long)mudPath[i]);
+> printf("\n");
+>
+> // 计算两条路径的 world path 长度对比
+> float normalSP[256*3]; int normalSPCount = 0;
+> query->findStraightPath(ns, ne, normalPath, normalCount,
+>     normalSP, nullptr, nullptr, &normalSPCount, 256);
+> float normalLen = 0;
+> for (int i = 1; i < normalSPCount; ++i)
+>     normalLen += vDist(&normalSP[(i-1)*3], &normalSP[i*3]);
+>
+> float mudSP[256*3]; int mudSPCount = 0;
+> query->findStraightPath(ns, ne, mudPath, mudCount,
+>     mudSP, nullptr, nullptr, &mudSPCount, 256);
+> float mudLen = 0;
+> for (int i = 1; i < mudSPCount; ++i)
+>     mudLen += vDist(&mudSP[(i-1)*3], &mudSP[i*3]);
+>
+> printf("Normal path length: %.2f m\n", normalLen);
+> printf("Mud path length:    %.2f m\n", mudLen);
+> printf("Detour cost:        %.2f m\n", mudLen - normalLen);
+> ```
+>
+> **关键点**：`setAreaCost` 影响的是 A* 的边代价计算。当泥地区域的代价是 5 倍时，A* 会将穿过泥地的路径代价视为 5 倍于同等距离的普通地面。结果：如果绕路距离 < 泥地直穿距离 × 5，A* 会选择绕路。这就是"地形感知寻路"——agent 偏好高速公路绕开沼泽，即使高速公路更长。
+>
+> **如果没有真正的 Detour 库**：将 `MudFilter` 的逻辑替换到简化的 `NavMesh::findPath`（教程 17 的代码）中，在多边形代价计算时查询多边形的 area 类型并乘以代价因子。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 手写漏斗算法，不使用 `findStraightPath`：
+>
+> ```cpp
+> // ============================================================
+> // 手动漏斗算法实现（2D XZ 平面）
+> // 逻辑与 Detour 的 findStraightPath 内部一致
+> // ============================================================
+> void manualFunnel(const float* startPos, const float* endPos,
+>                   dtPolyRef* path, int pathCount,
+>                   dtNavMeshQuery* query, dtNavMesh* navMesh,
+>                   std::vector<float>& result) {
+>     result.clear();
+>     if (pathCount < 1) return;
+>
+>     result.push_back(startPos[0]);
+>     result.push_back(startPos[1]);
+>     result.push_back(startPos[2]);
+>
+>     // 索引: 0 = 左边界, 1 = 右边界
+>     float portalLeft[3], portalRight[3];
+>     int apexIdx = 0;  // 当前漏斗顶点在 result 中的 index
+>     int leftIdx = 0, rightIdx = 0;
+>
+>     // 遍历多边形序列，提取共享边作为 portal
+>     for (int i = 0; i < pathCount; ++i) {
+>         const dtMeshTile* tile = nullptr;
+>         const dtPoly* poly = nullptr;
+>         navMesh->getTileAndPolyByRef(path[i], &tile, &poly);
+>         if (!tile || !poly) continue;
+>
+>         // 查找连接到下一个多边形的边
+>         if (i == pathCount - 1) {
+>             // 最后一个多边形：portal 就是终点
+>             portalLeft[0] = portalRight[0] = endPos[0];
+>             portalLeft[1] = portalRight[1] = endPos[1];
+>             portalLeft[2] = portalRight[2] = endPos[2];
+>         } else {
+>             // 找到连接 path[i] 和 path[i+1] 的共享边
+>             bool found = false;
+>             for (int j = 0; j < poly->vertCount; ++j) {
+>                 // 检查邻居
+>                 // 简化：遍历 link
+>                 const dtLink& link = poly->neis[j];
+>                 if (link.ref == path[i+1]) {
+>                     // 这条边是共享边，取其两端点作为 portal
+>                     const float* v0 = &tile->verts[poly->verts[j] * 3];
+>                     const float* v1 = &tile->verts[poly->verts[(j+1)%poly->vertCount] * 3];
+>                     // 确保 left/right 方向：从顶点看向终点，left 在左侧
+>                     float cross = dtVcross2D(
+>                         dtVsub(v1, v0),
+>                         dtVsub(endPos, startPos));
+>                     if (cross > 0) {
+>                         dtVcopy(portalLeft, v0);
+>                         dtVcopy(portalRight, v1);
+>                     } else {
+>                         dtVcopy(portalLeft, v1);
+>                         dtVcopy(portalRight, v0);
+>                     }
+>                     found = true;
+>                     break;
+>                 }
+>             }
+>             if (!found) continue; // 没有找到共享边（可能是 off-mesh link）
+>         }
+>
+>         // 漏斗收紧逻辑
+>         const float* apex = &result[apexIdx * 3];
+>
+>         // 更新右边界：新 right 在当前右边界左侧 → 收紧
+>         if (dtTriArea2D(apex, &result[rightIdx*3], portalRight) <= 0.0f) {
+>             if (dtVequal(apex, &result[rightIdx*3]) ||
+>                 dtTriArea2D(apex, &result[leftIdx*3], portalRight) > 0.0f) {
+>                 // 正常收紧右边界
+>                 dtVcopy(&result[rightIdx*3], portalRight);
+>             } else {
+>                 // 漏斗倒置：输出左边界作为拐点
+>                 result.push_back(result[leftIdx*3+0]);
+>                 result.push_back(result[leftIdx*3+1]);
+>                 result.push_back(result[leftIdx*3+2]);
+>                 apexIdx = (int)(result.size() / 3) - 1;
+>                 // 重置左右边界为 apex
+>                 leftIdx = rightIdx = apexIdx;
+>                 // 重新处理当前 portal
+>                 i--;
+>                 continue;
+>             }
+>         }
+>
+>         // 更新左边界：新 left 在当前左边界右侧 → 收紧
+>         if (dtTriArea2D(apex, &result[leftIdx*3], portalLeft) >= 0.0f) {
+>             if (dtVequal(apex, &result[leftIdx*3]) ||
+>                 dtTriArea2D(apex, &result[rightIdx*3], portalLeft) < 0.0f) {
+>                 // 正常收紧左边界
+>                 dtVcopy(&result[leftIdx*3], portalLeft);
+>             } else {
+>                 // 漏斗倒置：输出右边界作为拐点
+>                 result.push_back(result[rightIdx*3+0]);
+>                 result.push_back(result[rightIdx*3+1]);
+>                 result.push_back(result[rightIdx*3+2]);
+>                 apexIdx = (int)(result.size() / 3) - 1;
+>                 leftIdx = rightIdx = apexIdx;
+>                 i--;
+>                 continue;
+>             }
+>         }
+>     }
+>
+>     // 添加终点
+>     result.push_back(endPos[0]);
+>     result.push_back(endPos[1]);
+>     result.push_back(endPos[2]);
+> }
+>
+> // ============================================================
+> // 对比测试（在 main() 的 Test 1 末尾添加）
+> // ============================================================
+> std::vector<float> manualResult;
+> manualFunnel(nearestStart, nearestEnd, path, pathCount,
+>              query, navMesh, manualResult);
+>
+> printf("\n=== Manual Funnel vs Detour findStraightPath ===\n");
+> printf("Detour: %d points\n", straightPathCount);
+> for (int i = 0; i < straightPathCount; ++i)
+>     printf("  [%d] (%.2f, %.2f, %.2f)\n", i,
+>            straightPath[i*3], straightPath[i*3+1], straightPath[i*3+2]);
+>
+> printf("Manual: %zu points\n", manualResult.size() / 3);
+> for (size_t i = 0; i < manualResult.size() / 3; ++i)
+>     printf("  [%zu] (%.2f, %.2f, %.2f)\n", i,
+>            manualResult[i*3], manualResult[i*3+1], manualResult[i*3+2]);
+>
+> // 逐点比对（容差 0.01）
+> bool match = (straightPathCount == (int)(manualResult.size() / 3));
+> if (match) {
+>     for (int i = 0; i < straightPathCount; ++i) {
+>         if (vDist(&straightPath[i*3], &manualResult[i*3]) > 0.01f) {
+>             match = false; break;
+>         }
+>     }
+> }
+> printf("Match: %s\n", match ? "YES (identical)" : "NO (diverged)");
+> ```
+>
+> **关键点**：漏斗算法的几何直觉就是"在多边形走廊中拉一根绳子"。不变量是：从漏斗顶点（apex）出发，所有到目标的可能路径都必须穿过由 left 和 right 边界形成的锥形区域。当新的 portal 顶点使锥形"翻转"（左边界跑到了右边界右侧），意味着此处的边界顶点是必经之地——输出它作为拐点并重置漏斗。算法复杂度 O(N)（N = 多边形序列长度），因为每个 portal 最多处理两次（一次穿过，一次重置）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。漏斗算法的手动实现需要正确获取多边形的邻接边信息（`dtPoly::neis` + `dtPoly::verts`），不同 Detour 版本的数据结构可能有细微差异，请以你使用的具体版本头文件为准。
+
 ## 4. 扩展阅读
 
 - **Detour 官方文档**: `Detour/Include/DetourNavMeshQuery.h` 中每个 API 的详细注释

@@ -235,6 +235,105 @@ class Bottom : public Left, public Right { int w; };
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在单继承 Itanium ABI 下，虚表的内容如下（slot 编号从 0 开始）：
+>
+> **A 的虚表（2 个虚函数）：**
+> ```
+> slot 0: typeinfo (for A)      ← RTTI 指针
+> slot 1: A::~A()               ← 虚析构函数（由编译器生成，即使未显式声明 virtual ~A()，但有虚函数就需要）
+> slot 2: A::f()                ← 第一个虚函数
+> slot 3: A::g()                ← 第二个虚函数
+> ```
+> 实际有效 slot 数 = 2（虚函数数）+ 额外 RTTI/析构 slot（2 个，含 typeinfo）。虚表大小 = 4 个指针（共 32 字节）。
+>
+> **B 的虚表（继承 A，新增 h）：**
+> ```
+> slot 0: typeinfo (for B)
+> slot 1: B::~B()
+> slot 2: A::f()                ← 未覆盖，沿用 A 的实现
+> slot 3: A::g()                ← 未覆盖，沿用 A 的实现
+> slot 4: B::h()                ← B 新增的虚函数，追加到虚表末尾
+> ```
+> 虚表大小 = 5 个指针（40 字节）。B 的 vptr 指向 B 的虚表——这是虚函数 dispatch 的基础。
+>
+> **C 的虚表（继承 B，覆盖 f）：**
+> ```
+> slot 0: typeinfo (for C)
+> slot 1: C::~C()
+> slot 2: C::f()                ← **覆盖了**原来的 A::f()
+> slot 3: A::g()                ← 未覆盖，沿用 A 的实现
+> slot 4: B::h()                ← 未覆盖，沿用 B 的实现
+> ```
+> 虚表大小 = 5 个指针（40 字节，与 B 相同——新增的 slot 仍是 5）。
+>
+> **核心观察：**
+> - 派生类的虚表**前半部分和基类虚表结构相同**（类型 ABI），覆盖只替换指针值
+> - 新增虚函数**追加到虚表末尾**，不会改变已有 slot 的索引
+> - 这就是为什么 `p->f()` 的多态调用只需 `vptr[2]()` ——无论 `p` 指向 `A`/`B`/`C`，`f` 的虚表索引始终是 2
+> - C 的虚表 slot 2 被 `C::f()` 覆盖——这是一个编译时确定的替换
+
+> [!tip]- 练习 2 参考答案
+> **`static_cast<Derived*>(base2_ptr)` 为什么不安全：**
+>
+> `static_cast` 在编译期根据已知的静态类型关系计算偏移量。如果 `Base2* p` 确实指向 `Derived` 对象，编译器知道 `&(p->Base2_subobject)` 和 `&(p->Derived_object)` 之间的固定偏移（`static_cast` 会做 this 指针调整）。但问题在于：
+>
+> - `static_cast` **不检查** `p` 的动态类型是否真的是 `Derived`
+> - 如果 `p` 实际指向一个 `Base2` 直接对象（非 `Derived`），`static_cast<Derived*>(p)` 不会报错——它盲目地减去编译期偏移，得到一块根本不是 `Derived` 对象的内存地址，然后解引用 → **UB**
+>
+> **`dynamic_cast` 如何找到正确偏移量：**
+>
+> `dynamic_cast<Derived*>(base2_ptr)` 的流程：
+> 1. 通过 `Base2` 的 vptr 找到虚表
+> 2. 虚表中存储了 RTTI 信息（`typeinfo`）
+> 3. `typeinfo` 指向一个数据结构，其中包含 `Derived` 和 `Base2` 之间的**运行时偏移量**（或继承关系的偏移量表）
+> 4. 运行时检查 `base2_ptr` 指向的对象的实际类型是否是 `Derived`（或其派生类）
+> 5. 如果是，使用编译期记录的偏移量调整 `this` 指针；如果不是 → 返回 `nullptr`（对指针）或抛出 `std::bad_cast`（对引用）
+>
+> 这个偏移量表是由**编译器在编译期生成并嵌入到虚表/typeinfo 中的**。Itanium ABI 中，虚表条目通常有 `offset-to-top` 和 `typeinfo` 指针，支持 `dynamic_cast` 的快速导航。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 在 x86-64 Itanium ABI 下（典型 GCC/Clang 结果）：
+>
+> | 类 | sizeof | 分析 |
+> |---|---|---|
+> | `Left`（无 virtual） | 8 | `Top::x(4) + Left::y(4)` = 8 |
+> | `Left`（virtual） | 16 | vptr(8) + Left::y(4) + pad(4) = 16，Top::x 在虚基类区域 |
+> | `Bottom`（无 virtual） | 24 | Left 子对象(8) + Right 子对象(8) + Bottom::w(4) + pad(4) = 24，Top::x **重复**出现在 Left 和 Right 中各一份 |
+> | `Bottom`（virtual） | 40 | Left vptr(8) + Left::y(4) + pad(4) + Right vptr(8) + Right::z(4) + pad(4) + Bottom::w(4) + pad(4) + Top::x(4) + pad(4) = 48 ≈ 取决于编译器布局 |
+>
+> **虚继承的额外空间开销来源：**
+> 1. **vbptr（虚基类指针）**：每个从虚基类直接或间接派生的类中，编译器插入一个 vbptr，指向虚基类偏移量表。对于 `Left`：vbptr 至少 8 字节（x86-64 指针大小）
+> 2. **虚基类子对象统一存储**：虚基类 `Top` 的实例被移到派生类对象的最末尾，所有通过 virtual 继承的路径共享同一份 `Top`
+>
+> **为什么虚继承避免 `Top` 重复：**
+> ```
+> 无 virtual 继承的 Bottom：
+> ┌──────────┬──────────┬──────────┬──────────┬──────────┐
+> │ Left     │          │ Right    │          │ Bottom   │
+> │ ┌──┬──┐  │          │ ┌──┬──┐  │          │ ┌──┐     │
+> │ │x │y │  │ padding  │ │x │z │  │ padding  │ │w │ pad │
+> │ └──┴──┘  │          │ └──┴──┘  │          │ └──┘     │
+> └──────────┴──────────┴──────────┴──────────┴──────────┘
+>                 x 出现了两次！
+>
+> 有 virtual 继承的 Bottom：
+> ┌──────────┬──────────┬──────────┬──────────┬──────────┬──────────┬──────────┐
+> │ Left     │          │ Right    │          │ Bottom   │          │ Top (共享)│
+> │ ┌──┬──┐  │ padding  │ ┌──┬──┐  │ padding  │ ┌──┐     │ padding  │ ┌──┐     │
+> │ │vb│y │  │          │ │vb│z │  │          │ │w │     │          │ │x │ pad │
+> │ └──┴──┘  │          │ └──┴──┘  │          │ └──┘     │          │ └──┘     │
+> └──────────┴──────────┴──────────┴──────────┴──────────┴──────────┴──────────┘
+>                    Left::vbptr 和 Right::vbptr 都指向 Top 的偏移
+> ```
+>
+> vbptr 使得访问 `x` 时需要额外一次间接寻址：`this->vbptr[x_offset] + this`。这就是虚继承的性能代价——每次访问虚基类成员都要走 vbptr→偏移表→地址的间接路径。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [cppreference — Virtual functions](https://en.cppreference.com/w/cpp/language/virtual)

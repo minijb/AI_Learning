@@ -437,6 +437,338 @@ void renderScene() {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：Rule of Zero / Three / Five
+> ```cpp
+> // rule_classes.cpp — 三种法则的类设计
+> // 编译: g++ -std=c++20 -O2 rule_classes.cpp -o rule_classes && ./rule_classes
+>
+> #include <iostream>
+> #include <type_traits>
+> #include <utility>    // std::exchange
+> #include <cstddef>
+> #include <algorithm>  // std::copy
+>
+> // ===== 类 A：Rule of Zero — Transform 组件 =====
+> struct Vec3 { float x = 0, y = 0, z = 0; };
+>
+> struct Transform {
+>     Vec3 position;
+>     Vec3 rotation;
+>     Vec3 scale{1.0f, 1.0f, 1.0f};
+>     // 不声明任何特殊成员 → 编译器全部正确生成
+> };
+>
+> // 验证 Rule of Zero 的属性
+> static_assert(std::is_default_constructible_v<Transform>);
+> static_assert(std::is_copy_constructible_v<Transform>);
+> static_assert(std::is_copy_assignable_v<Transform>);
+> static_assert(std::is_move_constructible_v<Transform>);
+> static_assert(std::is_move_assignable_v<Transform>);
+> static_assert(std::is_nothrow_move_constructible_v<Transform>);
+> static_assert(std::is_trivially_copyable_v<Transform>);  // 全是 float → trivial
+>
+> // ===== 类 B：Rule of Five — DynamicArray<T> =====
+> template<typename T>
+> class DynamicArray {
+> public:
+>     DynamicArray() = default;
+>
+>     explicit DynamicArray(size_t n) : data_(new T[n]), size_(n) {}
+>
+>     ~DynamicArray() noexcept { delete[] data_; }
+>
+>     // 拷贝构造
+>     DynamicArray(const DynamicArray& other)
+>         : data_(new T[other.size_]), size_(other.size_) {
+>         std::copy(other.data_, other.data_ + size_, data_);
+>     }
+>
+>     // 拷贝赋值
+>     DynamicArray& operator=(const DynamicArray& other) {
+>         if (this != &other) {
+>             delete[] data_;
+>             size_ = other.size_;
+>             data_ = new T[size_];
+>             std::copy(other.data_, other.data_ + size_, data_);
+>         }
+>         return *this;
+>     }
+>
+>     // 移动构造（noexcept — 必须）
+>     DynamicArray(DynamicArray&& other) noexcept
+>         : data_(std::exchange(other.data_, nullptr))
+>         , size_(std::exchange(other.size_, 0)) {}
+>
+>     // 移动赋值（noexcept — 必须）
+>     DynamicArray& operator=(DynamicArray&& other) noexcept {
+>         if (this != &other) {
+>             delete[] data_;
+>             data_ = std::exchange(other.data_, nullptr);
+>             size_ = std::exchange(other.size_, 0);
+>         }
+>         return *this;
+>     }
+>
+>     // 访问器
+>     T& operator[](size_t i) { return data_[i]; }
+>     const T& operator[](size_t i) const { return data_[i]; }
+>     size_t size() const { return size_; }
+>
+> private:
+>     T* data_ = nullptr;
+>     size_t size_ = 0;
+> };
+>
+> // 验证 DynamicArray<int> 的属性
+> static_assert(std::is_copy_constructible_v<DynamicArray<int>>);
+> static_assert(std::is_nothrow_move_constructible_v<DynamicArray<int>>);
+> static_assert(std::is_nothrow_move_assignable_v<DynamicArray<int>>);
+> static_assert(!std::is_trivially_copyable_v<DynamicArray<int>>);
+>
+> // ===== 类 C：Custom Rule — GPUShader =====
+> // 模拟 OpenGL 函数
+> namespace GL {
+>     inline unsigned genShader()   { static unsigned id = 100; return id++; }
+>     inline void delShader(unsigned id) {
+>         std::cout << "  GL: delShader(" << id << ")\n";
+>     }
+> }
+>
+> class GPUShader {
+> public:
+>     GPUShader() : id_(GL::genShader()) {
+>         std::cout << "  GPUShader: created #" << id_ << '\n';
+>     }
+>
+>     ~GPUShader() noexcept {
+>         if (id_ != 0) GL::delShader(id_);
+>     }
+>
+>     // 拷贝=delete
+>     GPUShader(const GPUShader&) = delete;
+>     GPUShader& operator=(const GPUShader&) = delete;
+>
+>     // 移动=noexcept 手动
+>     GPUShader(GPUShader&& other) noexcept
+>         : id_(std::exchange(other.id_, 0)) {
+>         std::cout << "  GPUShader: moved #" << id_ << '\n';
+>     }
+>
+>     GPUShader& operator=(GPUShader&& other) noexcept {
+>         if (this != &other) {
+>             if (id_ != 0) GL::delShader(id_);
+>             id_ = std::exchange(other.id_, 0);
+>         }
+>         return *this;
+>     }
+>
+>     unsigned id() const { return id_; }
+>     bool valid() const { return id_ != 0; }
+>
+> private:
+>     unsigned id_ = 0;
+> };
+>
+> // 验证 GPUShader 的属性
+> static_assert(!std::is_copy_constructible_v<GPUShader>);
+> static_assert(!std::is_copy_assignable_v<GPUShader>);
+> static_assert(std::is_nothrow_move_constructible_v<GPUShader>);
+> static_assert(std::is_nothrow_move_assignable_v<GPUShader>);
+>
+> // ===== 演示 =====
+> int main() {
+>     std::cout << "=== Rule of Zero / Five / Custom ===\n\n";
+>
+>     std::cout << "--- Rule of Zero: Transform ---\n";
+>     Transform t1;
+>     t1.position.x = 10.0f;
+>     Transform t2 = t1;                   // 拷贝
+>     Transform t3 = std::move(t1);        // 移动（平凡类型 = 拷贝）
+>     std::cout << "  t2.position.x = " << t2.position.x << '\n';
+>
+>     std::cout << "\n--- Rule of Five: DynamicArray ---\n";
+>     DynamicArray<int> arr1(5);
+>     arr1[0] = 42;
+>     DynamicArray<int> arr2 = std::move(arr1);  // 移动
+>     std::cout << "  arr1.size() = " << arr1.size()         // 0
+>               << ", arr2.size() = " << arr2.size()         // 5
+>               << ", arr2[0] = " << arr2[0] << '\n';        // 42
+>
+>     std::cout << "\n--- Custom Rule: GPUShader ---\n";
+>     GPUShader s1;
+>     GPUShader s2 = std::move(s1);
+>     std::cout << "  s1.valid() = " << s1.valid()
+>               << ", s2.id() = " << s2.id() << '\n';
+>
+>     std::cout << "\n=== All static_asserts passed ===\n";
+>     return 0;
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：追踪编译器行为
+> ```cpp
+> // holder_trace.cpp — 编译器特殊成员生成追踪
+> // 编译: g++ -std=c++20 -O0 holder_trace.cpp -o holder_trace && ./holder_trace
+>
+> #include <iostream>
+> #include <memory>
+> #include <type_traits>
+>
+> // 问题 1 & 2：包含 unique_ptr 的类
+> class Holder {
+>     std::unique_ptr<int> ptr_;
+> public:
+>     // 不声明任何特殊成员函数
+>     Holder() = default;
+>     explicit Holder(int v) : ptr_(std::make_unique<int>(v)) {}
+>     int get() const { return ptr_ ? *ptr_ : -1; }
+> };
+>
+> // 答 1: Holder 不可拷贝，因为 std::unique_ptr 的拷贝构造=delete
+> //       编译器检测到成员不可拷贝 → 隐式删除 Holder 的拷贝构造/赋值
+> static_assert(!std::is_copy_constructible_v<Holder>);
+> static_assert(!std::is_copy_assignable_v<Holder>);
+>
+> // 答 2: Holder 可移动，因为 std::unique_ptr 有 noexcept 移动
+> //       编译器逐成员移动 → Holder 的移动也是 noexcept
+> static_assert(std::is_move_constructible_v<Holder>);
+> static_assert(std::is_nothrow_move_constructible_v<Holder>);
+> static_assert(std::is_move_assignable_v<Holder>);
+> static_assert(std::is_nothrow_move_assignable_v<Holder>);
+>
+> // ===== 问题 3：包含 const int 成员的类 =====
+> class ConstMember {
+> public:
+>     const int value;
+>     explicit ConstMember(int v) : value(v) {}
+> };
+>
+> // 答 3: const 成员不能被赋值 → 移动赋值被隐式删除
+> //       但移动构造仍然生成（可以初始化 const 成员，只需构造）
+> static_assert(std::is_copy_constructible_v<ConstMember>);
+> static_assert(std::is_move_constructible_v<ConstMember>);
+> static_assert(!std::is_copy_assignable_v<ConstMember>);   // const 不能改
+> static_assert(!std::is_move_assignable_v<ConstMember>);   // 同上
+>
+> // ===== 问题 4：声明析构后，移动的状态 =====
+> class WithDtor {
+> public:
+>     WithDtor() = default;
+>     ~WithDtor() {}  // 用户声明析构
+> };
+>
+> // 答 4: 声明析构 → 移动构造/赋值不再自动生成（C++11 规则）
+> //       但拷贝仍然自动生成（C++11/14/17，C++20 标记 deprecated）
+> static_assert(std::is_copy_constructible_v<WithDtor>);
+> static_assert(std::is_copy_assignable_v<WithDtor>);
+> // 移动被隐式生成了吗？
+> // static_assert(!std::is_move_constructible_v<WithDtor>);  // C++11-17
+> // C++11-17: 移动"不生成"但可以被拷贝替代（回退到拷贝）
+> // 实际上 is_move_constructible 为 true，因为拷贝构造可以接受 T&&
+> // 真正的区别: is_nothrow_move_constructible 和实际调用
+> static_assert(std::is_move_constructible_v<WithDtor>);
+> // 注意：非 noexcept，且内部是拷贝
+>
+> // ===== 问题 5：=default vs =delete 验证 =====
+> class ExplicitMove {
+>     int* p_ = nullptr;
+> public:
+>     ExplicitMove() = default;
+>     ExplicitMove(const ExplicitMove&) = delete;
+>     ExplicitMove& operator=(const ExplicitMove&) = delete;
+>     ExplicitMove(ExplicitMove&&) noexcept = default;
+>     ExplicitMove& operator=(ExplicitMove&&) noexcept = default;
+>     ~ExplicitMove() = default;
+> };
+>
+> static_assert(!std::is_copy_constructible_v<ExplicitMove>);
+> static_assert(std::is_nothrow_move_constructible_v<ExplicitMove>);
+> static_assert(std::is_nothrow_move_assignable_v<ExplicitMove>);
+>
+> int main() {
+>     std::cout << "=== Holder Compiler Behavior Trace ===\n\n";
+>
+>     Holder h1(42);
+>     // Holder h2 = h1;  // 编译错误: use of deleted function
+>
+>     Holder h2 = std::move(h1);  // OK: noexcept 移动
+>     std::cout << "h1.get() = " << h1.get()    // 0 (nullptr)
+>               << ", h2.get() = " << h2.get()  // 42
+>               << '\n';
+>
+>     ConstMember cm1(100);
+>     ConstMember cm2 = std::move(cm1);  // 移动构造 OK
+>     std::cout << "cm2.value = " << cm2.value << '\n';
+>
+>     std::cout << "\n=== All static_asserts passed ===\n";
+>     return 0;
+> }
+> ```
+
+> [!info]- 练习 3 思考题参考答案：修复 GPUTexture Bug
+> **问题诊断：**
+> `GPUTexture` 声明了析构函数（释放 `id_`），但没有声明拷贝/移动构造。
+> 编译器自动生成了拷贝构造 → 两个 `GPUTexture` 持有同一个 `id_` → 双方析构时双重 `glDeleteTextures`。
+> 同时，编译器**不会**自动生成移动构造（因为析构被声明了），所以 `vector` 扩容时回退使用拷贝构造。
+>
+> **修复方案：**
+> ```cpp
+> // 修复后的 GPUTexture
+> class GPUTexture {
+>     unsigned id_ = 0;    // 使用 unsigned 替代 GLuint
+>     size_t width_, height_;
+> public:
+>     GPUTexture(size_t w, size_t h) : width_(w), height_(h) {
+>         glGenTextures(1, &id_);
+>         glBindTexture(GL_TEXTURE_2D, id_);
+>         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, (int)w, (int)h,
+>                      0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+>     }
+>
+>     ~GPUTexture() {
+>         if (id_ != 0) glDeleteTextures(1, &id_);
+>     }
+>
+>     // 删除拷贝（GPU 资源不可拷贝）
+>     GPUTexture(const GPUTexture&) = delete;
+>     GPUTexture& operator=(const GPUTexture&) = delete;
+>
+>     // 实现 noexcept 移动
+>     GPUTexture(GPUTexture&& other) noexcept
+>         : id_(std::exchange(other.id_, 0))
+>         , width_(other.width_), height_(other.height_) {}
+>
+>     GPUTexture& operator=(GPUTexture&& other) noexcept {
+>         if (this != &other) {
+>             if (id_ != 0) glDeleteTextures(1, &id_);
+>             id_ = std::exchange(other.id_, 0);
+>             width_ = other.width_;
+>             height_ = other.height_;
+>         }
+>         return *this;
+>     }
+>
+>     void bind() const { glBindTexture(GL_TEXTURE_2D, id_); }
+>     unsigned id() const { return id_; }
+> };
+>
+> // 验证修复
+> static_assert(!std::is_copy_constructible_v<GPUTexture>);
+> static_assert(std::is_nothrow_move_constructible_v<GPUTexture>);
+> // 现在 std::vector<GPUTexture> 扩容时使用 noexcept 移动，不使用拷贝
+> ```
+>
+> **为什么修复正确：**
+> 1. 拷贝=delete → 编译期阻止意外拷贝
+> 2. 移动=noexcept → `std::vector` 扩容时使用移动而非拷贝
+> 3. 析构后移动构造不再自动生成 → 必须手动实现
+> 4. `std::exchange` 确保源对象的 `id_` 被置零 → 不会双重删除
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了编译和测试，或分析得出了合理结论，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读] C++ Reference — Rule of Three/Five/Zero:** https://en.cppreference.com/w/cpp/language/rule_of_three

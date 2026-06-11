@@ -759,6 +759,145 @@ Worker 数:  16
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Amdahl 定律分析：**
+>
+> 总时间 T = 2 + 1.5 + 1 + 2 + 1.5 + 2 = 10ms
+>
+> 串行部分 S = 2ms（渲染提交，完全不可并行）+ 各任务中不可并行的部分：
+> - 粒子: 2 × (1-1.00) = 0ms
+> - 动画: 1.5 × (1-0.90) = 0.15ms
+> - AI: 1 × (1-0.70) = 0.3ms
+> - 物理: 2 × (1-0.60) = 0.8ms
+> - 游戏逻辑: 1.5 × (1-0.30) = 1.05ms
+> - 渲染: 2 × (1-0.00) = 2ms
+>
+> 总串行 = 0 + 0.15 + 0.3 + 0.8 + 1.05 + 2 = 4.3ms
+>
+> P = (10 - 4.3) / 10 = 0.57（可并行比例 57%）
+>
+> **理论加速比：**
+> - 4 核: 1 / ((1-0.57) + 0.57/4) = 1 / (0.43 + 0.143) = 1 / 0.573 = **1.75×**
+> - 8 核: 1 / (0.43 + 0.571/8) = 1 / (0.43 + 0.071) = 1 / 0.501 = **2.00×**
+> - 16 核: 1 / (0.43 + 0.571/16) = 1 / (0.43 + 0.036) = 1 / 0.466 = **2.15×**
+>
+> **16 核上各工作负载实际加速比：**
+> - 粒子: 16×（完美并行）
+> - 动画: 1 / (0.10 + 0.90/16) = 1 / 0.156 = 6.4×
+> - AI: 1 / (0.30 + 0.70/16) = 1 / 0.344 = 2.9×
+> - 物理: 1 / (0.40 + 0.60/16) = 1 / 0.438 = 2.3×
+> - 游戏逻辑: 1 / (0.70 + 0.30/16) = 1 / 0.719 = 1.4×
+> - 渲染提交: 1×（完全串行，无法加速）
+>
+> **关键洞察**：即使有 16 个核心，整体加速仅 2.15×。瓶颈在渲染提交（永远串行）和游戏逻辑（低并行度）。优化策略应当是：(1) 将渲染提交分解为多个可并行的子任务；(2) 重构游戏逻辑提高并行度。
+
+> [!tip]- 练习 2 参考答案
+> **动态分块 ParallelFor 实现：**
+>
+> ```cpp
+> // 动态分块 ParallelFor — 工作窃取友好
+> void ParallelFor_Dynamic(size_t total, size_t chunk_size,
+>                          std::function<void(size_t, size_t)> body,
+>                          JobSystem& js) {
+>     std::atomic<size_t> next_chunk{0};
+>     const size_t num_chunks = (total + chunk_size - 1) / chunk_size;
+>
+>     // 一个 JobCounter：当所有 chunk 完成时调用回调
+>     auto counter = std::make_shared<JobCounter>();
+>     counter->Set(static_cast<int>(num_chunks), []{ /* all done */ });
+>
+>     // 为每个 Worker 提交一个"贪婪"Job
+>     // 每个 Job 自己循环 fetch_add 抢 chunk
+>     auto worker_job = [=, &next_chunk]() {
+>         while (true) {
+>             size_t chunk = next_chunk.fetch_add(1, std::memory_order_relaxed);
+>             if (chunk >= num_chunks) break;
+>
+>             size_t start = chunk * chunk_size;
+>             size_t end = std::min(start + chunk_size, total);
+>             body(start, end);
+>         }
+>         counter->CountDown();
+>     };
+>
+>     for (size_t w = 0; w < js.NumWorkers(); ++w) {
+>         js.Submit(w, worker_job);
+>     }
+> }
+> ```
+>
+> **静态 vs 动态对比：**
+> - 静态分块：每个 Worker 预分配到相等数量的 chunk，无原子操作开销，但负载不均时（如某些 chunk 工作量差异大）部分 Worker 早完成并闲置。
+> - 动态分块：每个 Worker 用 `fetch_add` 抢下一个 chunk。开销是原子操作（~20ns/次），但只要 chunk_size 不太小（如 > 1000 次迭代），原子开销可忽略。**大量小任务场景下动态分块明显优于静态分块**。
+> - 经验法则：chunk_size 设为使每个 chunk 的计算时间 ≈ 10-100μs；这样可以平衡原子开销和负载均衡。
+
+> [!tip]- 练习 3 参考答案
+> **Fiber-based Job System 核心设计：**
+>
+> ```cpp
+> #include <ucontext.h>  // POSIX: makecontext/swapcontext
+>
+> struct Fiber {
+>     ucontext_t context;
+>     char       stack[65536];  // 64KB 栈（比线程栈小得多）
+>     bool       finished = false;
+>     JobCounter* waiting_on = nullptr;  // 当前等待的 counter
+> };
+>
+> class FiberWorker {
+>     std::vector<Fiber> fibers_;
+>     size_t current_fiber_ = 0;
+>     ucontext_t scheduler_context_;  // Worker 自己的调度器上下文
+>
+>     // 每个 fiber 的执行体
+>     static void fiber_entry(uint32_t low, uint32_t high) {
+>         uint64_t fiber_id = (uint64_t(high) << 32) | low;
+>         auto* self = FiberWorker::instance();
+>         self->execute_fiber(fiber_id);
+>     }
+>
+>     void execute_fiber(size_t id) {
+>         auto& fiber = fibers_[id];
+>         // 执行 Job...
+>         // 如果 Job 调用 WaitForCounter(counter):
+>         //   1. fiber.waiting_on = counter
+>         //   2. counter 完成时，把 fiber 标记为就绪
+>         //   3. swapcontext(&fiber.context, &scheduler_context_)
+>         //      → 控制权交还给调度器
+>         fiber.finished = true;
+>         swapcontext(&fiber.context, &scheduler_context_);  // yield back
+>     }
+>
+>     void run() {
+>         while (true) {
+>             // Round-robin 调度就绪 fiber
+>             bool any_ready = false;
+>             for (size_t i = 0; i < fibers_.size(); ++i) {
+>                 auto& f = fibers_[(current_fiber_ + i) % fibers_.size()];
+>                 if (!f.finished && !f.waiting_on) {
+>                     current_fiber_ = (current_fiber_ + i) % fibers_.size();
+>                     swapcontext(&scheduler_context_, &f.context);
+>                     any_ready = true;
+>                     break;
+>                 }
+>             }
+>             if (!any_ready) break;  // 所有 fiber 完成或等待
+>         }
+>     }
+> };
+> ```
+>
+> **关键设计要点：**
+> 1. **等待挂起而非阻塞**：当 fiber 调用 `WaitForCounter(counter)` 时，它设置 `waiting_on` 并 `swapcontext` 回调度器，线程不会阻塞在锁上。
+> 2. **同一个线程交错执行多种任务**：如 fiber A 执行游戏逻辑等 IO，fiber B 执行渲染命令生成 —— 充分利用等待时间。
+> 3. **轻量栈**：fiber 栈通常 64-128KB，而线程栈默认 1-8MB。可以同时存在数万个 fiber。
+> 4. **跨平台替代方案**：Windows 用 `CreateFiber`/`SwitchToFiber`；Boost.Fiber 提供跨平台包装；C++20 协程也可以模拟类似行为。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 | 资源 | 说明 |

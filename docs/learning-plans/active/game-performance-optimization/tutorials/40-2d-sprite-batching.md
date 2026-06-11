@@ -662,6 +662,194 @@ int main() {
    - 如果 Batches 增加 → 你的 Shader 不支持 SRP Batcher
    - 如果 Batches 不变 → SRP Batcher 生效
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **合批观测实验记录模板：**
+>
+> 1. **创建场景**：20 个 `SpriteRenderer`，10 个引用 `Sprite A`（Atlas X），10 个引用 `Sprite B`（Atlas Y）。
+>
+> 2. **交替排列 Sorting Order**：
+>    ```
+>    Order: [A(0)] [B(1)] [A(2)] [B(3)] ... [A(18)] [B(19)]
+>    ```
+>
+> 3. **Frame Debugger 观察（合并前 — 无 Atlas）**：
+>    - 每个 `A` Sprite 来自独立纹理 A → 1 Batch/个 → 10 个 Batches
+>    - 每个 `B` Sprite 来自独立纹理 B → 1 Batch/个 → 10 个 Batches
+>    - 由于交替排列 → 每个切换纹理的位置打断合批
+>    - **总计：~20 Batches**（每个 Sprite 独立的 Draw Call）
+>
+> 4. **创建 Sprite Atlas 并重新打包**：将 A 和 B 的源纹理拖入同一 Atlas → `Pack Preview`。
+>
+> 5. **Frame Debugger 观察（合并后 — 有 Atlas）**：
+>    - A 和 B 的 Sprite 现在都引用同一 Atlas 纹理
+>    - 但由于 Sorting Order 交替 → 不同图集位置不打断，相同纹理可合批
+>    - **总计：~1-5 Batches**（取决于是否还有材质/SortingLayer 差异）
+>    - Frame Debugger 显示 `Draw Dynamic` → 动态合批生效
+>
+> **关键理解**：合并的是**纹理**，不是 Sprite 本身。Atlas 让所有 Sprite 共享一张纹理 → 合批条件"相同纹理"满足 → 即使 Sorting Order 交替也能合批（同纹理+同材质即可）。
+
+> [!tip]- 练习 2 参考答案
+> **Frustum Culling 修改 — 核心代码补充：**
+>
+> ```cpp
+> // 在示例 B 的 SpriteBatchRenderer 中添加以下函数：
+>
+> // 1. 添加一个简单的 AABB 到 SpriteInstance
+> struct SpriteInstance {
+>     // ... 原有字段 ...
+>     // 新增：用于可见性判断
+>     float worldMinX, worldMinY;
+>     float worldMaxX, worldMaxY;
+> };
+>
+> // 2. 在 AddSprite 时计算包围盒（世界空间）
+> void SpriteBatchRenderer::AddSprite(SpriteInstance& sprite) {
+>     // 计算旋转后的四个角，取 min/max
+>     float halfW = sprite.scaleX * 0.5f;
+>     float halfH = sprite.scaleY * 0.5f;
+>     float cosR = cosf(sprite.rotation);
+>     float sinR = sinf(sprite.rotation);
+>
+>     // 四个角的偏移（旋转后）
+>     float corners[4][2] = {
+>         {  halfW * cosR - halfH * sinR,  halfW * sinR + halfH * cosR },
+>         { -halfW * cosR - halfH * sinR, -halfW * sinR + halfH * cosR },
+>         {  halfW * cosR + halfH * sinR,  halfW * sinR - halfH * cosR },
+>         { -halfW * cosR + halfH * sinR, -halfW * sinR - halfH * cosR }
+>     };
+>
+>     sprite.worldMinX = sprite.worldMaxX = sprite.posX + corners[0][0];
+>     sprite.worldMinY = sprite.worldMaxY = sprite.posY + corners[0][1];
+>     for (int i = 1; i < 4; i++) {
+>         float wx = sprite.posX + corners[i][0];
+>         float wy = sprite.posY + corners[i][1];
+>         if (wx < sprite.worldMinX) sprite.worldMinX = wx;
+>         if (wx > sprite.worldMaxX) sprite.worldMaxX = wx;
+>         if (wy < sprite.worldMinY) sprite.worldMinY = wy;
+>         if (wy > sprite.worldMaxY) sprite.worldMaxY = wy;
+>     }
+>
+>     // 继续原有的顶点填充逻辑...
+> }
+>
+> // 3. 添加摄像机结构和视锥体裁剪函数
+> struct Camera {
+>     float x, y;      // 摄像机中心位置
+>     float halfW, halfH; // 视口半尺寸（世界单位）
+> };
+>
+> bool IsSpriteVisible(const SpriteInstance& sprite, const Camera& cam) {
+>     // AABB vs 视口 AABB 测试
+>     if (sprite.worldMaxX < cam.x - cam.halfW) return false;
+>     if (sprite.worldMinX > cam.x + cam.halfW) return false;
+>     if (sprite.worldMaxY < cam.y - cam.halfH) return false;
+>     if (sprite.worldMinY > cam.y + cam.halfH) return false;
+>     return true;
+> }
+>
+> // 4. 在填充 VBO 时添加可见性检查（BeginBatch/EndBatch 之间）
+> void SpriteBatchRenderer::EndBatch() {
+>     int visibleCount = 0;
+>     for (auto& sprite : m_PendingSprites) {
+>         if (!IsSpriteVisible(sprite, m_Camera)) continue;
+>         // 仅对可见 Sprite 填充顶点数据
+>         FillVertexData(sprite, visibleCount);
+>         visibleCount++;
+>     }
+>     // 仅绘制可见的顶点范围
+>     glDrawElements(GL_TRIANGLES, visibleCount * INDICES_PER_SPRITE,
+>         GL_UNSIGNED_INT, 0);
+>     m_PendingSprites.clear();
+> }
+>
+> // 5. 简单的 WASD 摄像机控制（在主循环中）
+> void UpdateCamera(Camera& cam, GLFWwindow* window) {
+>     float speed = 200.0f * deltaTime;
+>     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS) cam.y += speed;
+>     if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS) cam.y -= speed;
+>     if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS) cam.x -= speed;
+>     if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS) cam.x += speed;
+> }
+> ```
+>
+> **测量结果预期**：1000 个 Sprite 分布在大地图（10000×10000），仅 10% 可见：
+> - 无裁剪：1 Draw Call 提交 1000 个 Sprite（GPU 仍需处理 1000 个的 VS）
+> - 有裁剪：1 Draw Call 提交 ~100 个 Sprite → GPU 的 VS 工作量减少 90%，但 Draw Call 数不变（合批优势）
+
+> [!tip]- 练习 3 参考答案（可选）
+> **自定义 Shader 合批验证：**
+>
+> ```hlsl
+> // FlashSprite.shader — 基于 Sprites/Default，兼容 SRP Batcher
+> Shader "Custom/FlashSprite"
+> {
+>     Properties
+>     {
+>         [PerRendererData] _MainTex ("Sprite Texture", 2D) = "white" {}
+>         _Color ("Tint", Color) = (1,1,1,1)
+>         [PerRendererData] _FlashColor ("Flash Color", Color) = (1,0,0,1)
+>         [PerRendererData] _FlashAmount ("Flash Amount", Range(0,1)) = 0
+>         [MaterialToggle] PixelSnap ("Pixel snap", Float) = 0
+>     }
+>
+>     SubShader
+>     {
+>         Tags { "RenderType"="Transparent" "Queue"="Transparent"
+>                "RenderPipeline"="UniversalPipeline" }
+>         Blend SrcAlpha OneMinusSrcAlpha
+>         ZWrite Off
+>
+>         Pass
+>         {
+>             HLSLPROGRAM
+>             #pragma vertex SpriteVert
+>             #pragma fragment frag
+>             #include "Packages/com.unity.render-pipelines.universal/Shaders/2D/Include/Sprite2D.hlsl"
+>
+>             // 关键：声明为 SRP Batcher 兼容的 CBUFFER
+>             CBUFFER_START(UnityPerMaterial)
+>                 float4 _Color;
+>                 float4 _FlashColor;
+>                 float  _FlashAmount;
+>             CBUFFER_END
+>
+>             float4 frag(v2f IN) : SV_Target
+>             {
+>                 float4 texColor = SAMPLE_TEXTURE2D(_MainTex, sampler_MainTex, IN.uv);
+>                 float4 baseColor = texColor * IN.color * _Color;
+>                 // 闪烁效果：lerp 原色 → 闪烁色
+>                 float4 finalColor = lerp(baseColor, _FlashColor * baseColor.a, _FlashAmount);
+>                 return finalColor;
+>             }
+>             ENDHLSL
+>         }
+>     }
+> }
+> ```
+>
+> ```csharp
+> // C# 端：通过 MaterialPropertyBlock 传递 per-Sprite FlashColor
+> private MaterialPropertyBlock mpb;
+>
+> void UpdateFlash(SpriteRenderer sr, Color flashColor, float amount)
+> {
+>     sr.GetPropertyBlock(mpb);
+>     mpb.SetColor("_FlashColor", flashColor);
+>     mpb.SetFloat("_FlashAmount", amount);
+>     sr.SetPropertyBlock(mpb);
+> }
+> ```
+>
+> **Frame Debugger 判断结果**：
+> - **Batches 不变** → SRP Batcher 生效：Shader 使用了 `CBUFFER_START(UnityPerMaterial)`，URP 的 SRP Batcher 将属性缓存在 GPU 端，不同 `_FlashColor` 不打断合批
+> - **Batches 增加** → Shader 不兼容 SRP Batcher：检查是否缺少 `CBUFFER_START(UnityPerMaterial)` 块，或者属性没有用 `[PerRendererData]` 修饰
+> - **关键理解**：SRP Batcher 不是传统"合批"，而是加速材质属性切换。它让 GPU 在切换 MaterialPropertyBlock 时只需更新一个常量缓冲区，而不是重建整个管线状态
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

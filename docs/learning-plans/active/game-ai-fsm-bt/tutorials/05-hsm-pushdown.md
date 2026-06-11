@@ -1608,6 +1608,328 @@ RangedState.Transitions[1].target = MeleeState
 - 所有状态转移都可以通过修改模拟数据（血量、距离等）来触发和验证。
 - 无状态泄露（每个 Enter 对应恰好一次 Exit）。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Boss 三阶段 HSM 层次结构图（嵌套框）：**
+>
+> ```
+> ┌── BossRoot ────────────────────────────────────────────┐
+> │ 转移: health ≤ 0 → Dead (吸收态，最高优先级)            │
+> │ 数据: BossData { health, phaseDamageMultiplier, ... }   │
+> │                                                         │
+> │  ┌── Phase1 (health > 66%) ──────────────────────────┐ │
+> │  │ 转移: health ≤ 66% → Phase2                        │ │
+> │  │ 数据: damageScale = 1.0, abilityCooldowns = {...}  │ │
+> │  │                                                     │ │
+> │  │  ┌── Idle ────────────────────────────────────┐    │ │
+> │  │  │ 转移: targetInRange → MeleeAttack           │    │ │
+> │  │  │       targetFar → RangedAttack              │    │ │
+> │  │  │       (继承 BossRoot: health ≤ 0 → Dead)    │    │ │
+> │  │  └────────────────────────────────────────────┘    │ │
+> │  │  ┌── MeleeAttack ────────────────────────────┐    │ │
+> │  │  │ 转移: targetFar → RangedAttack             │    │ │
+> │  │  │       heavyHit → Stunned                   │    │ │
+> │  │  │       (继承 Phase1 + BossRoot 转移)         │    │ │
+> │  │  └────────────────────────────────────────────┘    │ │
+> │  │  ┌── RangedAttack ───────────────────────────┐    │ │
+> │  │  │ 转移: targetClose → MeleeAttack            │    │ │
+> │  │  │       heavyHit → Stunned                   │    │ │
+> │  │  └────────────────────────────────────────────┘    │ │
+> │  │  ┌── Stunned ────────────────────────────────┐    │ │
+> │  │  │ 转移: stunTimer ≥ 2s → Idle (默认子状态)   │    │ │
+> │  │  └────────────────────────────────────────────┘    │ │
+> │  │  ┌── SpecialSkill ───────────────────────────┐    │ │
+> │  │  │ (Phase1 独有: 冲锋斩)                       │    │ │
+> │  │  │ 转移: cooldown 完成 → Idle                  │    │ │
+> │  │  └────────────────────────────────────────────┘    │ │
+> │  └────────────────────────────────────────────────────┘ │
+> │                                                         │
+> │  ┌── Phase2 (33% < health ≤ 66%) ────────────────────┐ │
+> │  │ 转移: health ≤ 33% → Phase3                        │ │
+> │  │ 数据: damageScale = 1.5, 新增 SummonMinions        │ │
+> │  │ (子状态与 Phase1 相同，继承树结构)                   │ │
+> │  │ 新增: SummonMinions 子状态                          │ │
+> │  └────────────────────────────────────────────────────┘ │
+> │                                                         │
+> │  ┌── Phase3 (health ≤ 33%) ──────────────────────────┐ │
+> │  │ 转移: (无向上转移，只有 Dead)                        │ │
+> │  │ 数据: damageScale = 2.0, 攻速翻倍                   │ │
+> │  │ 新增: DesperationSkill 子状态                        │ │
+> │  └────────────────────────────────────────────────────┘ │
+> │                                                         │
+> │  ┌── Dead ──────────────────────────────────────────┐  │
+> │  │ 终态: FindTransition() 返回 null，永不转移          │  │
+> │  │ OnEnter: 播放死亡动画、掉落战利品、禁用碰撞           │  │
+> │  └──────────────────────────────────────────────────┘  │
+> └─────────────────────────────────────────────────────────┘
+> ```
+>
+> **各层转移规则清单：**
+>
+> | 层级 | 定义的转移 | 继承自父层的转移 |
+> |------|-----------|-----------------|
+> | BossRoot | `health ≤ 0 → Dead` | (无) |
+> | Phase1 | `health ≤ 66% → Phase2` | `health ≤ 0 → Dead` |
+> | Phase2 | `health ≤ 33% → Phase3` | `health ≤ 0 → Dead` |
+> | Phase3 | (无) | `health ≤ 0 → Dead` |
+> | Idle | `targetInRange → MeleeAttack`, `targetFar → RangedAttack`, `heavyHit → Stunned` | Phase 转移到上层 + BossRoot.Dead |
+> | MeleeAttack | `targetFar → RangedAttack`, `heavyHit → Stunned` | Phase + BossRoot.Dead |
+> | RangedAttack | `targetClose → MeleeAttack`, `heavyHit → Stunned` | Phase + BossRoot.Dead |
+> | Stunned | `stunTimer ≥ 2s → Idle` | Phase + BossRoot.Dead |
+> | SpecialSkill | `skillComplete → Idle` | 同上 |
+> | DesperationSkill | `skillComplete → Idle` | 同上 |
+>
+> **Phase1 → Phase2 转移的实现位置与理由：**
+>
+> 转移条件 `health ≤ 66%` 定义在 **Phase1 父状态**中，而非其任何子状态（Idle、MeleeAttack 等）。理由：(1) 所有 Phase1 子状态应共享这个转移——无论 Boss 在近战、远程还是硬直中，血量跌破阈值都应触发阶段切换。(2) 如果定义在子状态中，需要在每个子状态复制该规则，违反 DRY。(3) 阶段转移是跨层次的行为——从 Phase1 切换到 Phase2 时，需要退出整个 Phase1 子树（所有子状态 Exit），再进入 Phase2 的默认子状态。只有父状态层面才能正确管理这个子树级切换。
+>
+> **DesperationSkill vs SpecialSkill 的区别：**
+>
+> DesperationSkill 与 SpecialSkill 在**结构上**相同（都是"释放技能 → 回到 Idle"的子状态），但在**数据上**不同：DesperationSkill 的伤害倍率从 Phase3 的数据容器读取（damageScale = 2.0），冷却时间更短。**不需要**在 DesperationSkill 中重新定义"血量归零 → Dead"——该转移已在 BossRoot 定义，DesperationSkill 作为 Phase3 的子状态，通过转移向上查找链（DesperationSkill → Phase3 → BossRoot）自动继承。这是 HSM 的核心优势：父状态定义一次，所有子孙自动获取。
+
+> [!tip]- 练习 2 参考答案
+> **Pushdown Automata 核心实现（C#）：**
+>
+> ```csharp
+> public class PushdownStateMachine
+> {
+>     private readonly Stack<IPushdownState> _stateStack = new Stack<IPushdownState>();
+>
+>     public IPushdownState CurrentState => _stateStack.Count > 0 ? _stateStack.Peek() : null;
+>
+>     // Push: 暂停当前状态，压入新状态
+>     public void Push(IPushdownState newState)
+>     {
+>         CurrentState?.OnPause();
+>         _stateStack.Push(newState);
+>         newState.OnEnter();
+>     }
+>
+>     // Pop: 弹出栈顶，恢复下层状态
+>     public void Pop()
+>     {
+>         if (_stateStack.Count == 0) return;
+>         var popped = _stateStack.Pop();
+>         popped.OnExit();
+>         var resumed = CurrentState;
+>         if (resumed != null)
+>         {
+>             resumed.OnResume(); // ✓ OnResume ≠ OnEnter — 恢复之前的行为
+>         }
+>     }
+>
+>     // Switch: 替换栈顶状态
+>     public void Switch(IPushdownState newState)
+>     {
+>         if (_stateStack.Count > 0)
+>         {
+>             _stateStack.Pop().OnExit();
+>         }
+>         _stateStack.Push(newState);
+>         newState.OnEnter();
+>     }
+>
+>     // 事件分发: 栈顶 → 栈底，第一个消费事件的消费它
+>     public void DispatchEvent(string eventName)
+>     {
+>         foreach (var state in _stateStack)
+>         {
+>             if (state.HandleEvent(eventName)) return;
+>         }
+>         // 未消费的事件被丢弃
+>     }
+>
+>     public void Update(float dt)
+>     {
+>         CurrentState?.OnUpdate(dt);
+>     }
+> }
+>
+> // 状态接口
+> public interface IPushdownState
+> {
+>     void OnEnter();      // 首次进入
+>     void OnExit();       // 永久离开（从栈中移除）
+>     void OnPause();      // 被 Push 临时暂停
+>     void OnResume();     // 上方 Pop 后恢复
+>     void OnUpdate(float dt);
+>     bool HandleEvent(string eventName); // 返回 true 表示消费了事件
+> }
+>
+> // Idle 状态的实现示例
+> public class IdleState : IPushdownState
+> {
+>     private Vector3 _wanderTarget;
+>
+>     public void OnEnter()
+>     {
+>         _wanderTarget = GetRandomWanderPoint(); // 新目标
+>         Debug.Log("[Idle] Enter — chose new wander target");
+>     }
+>
+>     public void OnResume()
+>     {
+>         // 恢复时继续之前的目标 —— 不等同于 OnEnter！
+>         Debug.Log($"[Idle] Resume — continuing to {_wanderTarget}");
+>     }
+>
+>     public void OnPause()
+>     {
+>         Debug.Log("[Idle] Paused — interrupted by higher priority behavior");
+>     }
+>
+>     public void OnExit()
+>     {
+>         Debug.Log("[Idle] Exit — leaving idle permanently");
+>     }
+>
+>     public void OnUpdate(float dt)
+>     {
+>         // 向 _wanderTarget 移动...
+>     }
+>
+>     public bool HandleEvent(string eventName)
+>     {
+>         if (eventName == "InvestigateSound")
+>         {
+>             return true; // 消费事件，实际 Push 由外部调用
+>         }
+>         return false;
+>     }
+> }
+> ```
+>
+> **组合中断场景测试脚本：**
+>
+> ```csharp
+> void TestPushdownSequence()
+> {
+>     var pda = new PushdownStateMachine();
+>     var logger = new List<string>();
+>
+>     pda.Push(new IdleState());
+>     // 栈: [Idle]          — Idle.OnEnter()
+>     AssertLog(logger, "Idle.OnEnter");
+>
+>     pda.Push(new InvestigateState());
+>     // 栈: [Idle, Investigate] — Idle.OnPause(), Investigate.OnEnter()
+>     AssertLog(logger, "Idle.OnPause", "Investigate.OnEnter");
+>
+>     pda.Push(new CombatState());
+>     // 栈: [Idle, Investigate, Combat]
+>     AssertLog(logger, "Investigate.OnPause", "Combat.OnEnter");
+>
+>     pda.Push(new FleeState());
+>     // 栈: [Idle, Investigate, Combat, Flee]
+>     AssertLog(logger, "Combat.OnPause", "Flee.OnEnter");
+>
+>     pda.Pop(); // Flee 结束
+>     // 栈: [Idle, Investigate, Combat] — Flee.OnExit, Combat.OnResume()
+>     AssertLog(logger, "Flee.OnExit", "Combat.OnResume");
+>
+>     pda.Pop(); // Combat 结束 (敌人死亡)
+>     // 栈: [Idle, Investigate] — Combat.OnExit, Investigate.OnResume()
+>     AssertLog(logger, "Combat.OnExit", "Investigate.OnResume");
+>
+>     pda.Pop(); // Investigate 结束
+>     // 栈: [Idle] — Investigate.OnExit, Idle.OnResume()
+>     AssertLog(logger, "Investigate.OnExit", "Idle.OnResume");
+>
+>     // Idle.OnResume 验证：_wanderTarget 仍是之前的随机目标，未重新随机。
+>     // 这证明了 OnResume ≠ OnEnter。
+> }
+> ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Boss 战 HSM 实现要点（以示例 A C# 框架为基础）：**
+>
+> ```csharp
+> // Phase1_Parent.cs — Phase1 父状态
+> public class Phase1Parent : HierarchicalState
+> {
+>     public Phase1Parent()
+>     {
+>         AddTransition<Phase2Parent>(() =>
+>             ((BossData)fsm.GetOrCreateState<BossData>()).healthPercent < 0.66f);
+>         // 不定义 health ≤ 0 → Dead —— 从 BossRoot 继承
+>     }
+>     protected override Type DefaultChildType => typeof(IdleState);
+>
+>     public override void OnEnter()
+>     {
+>         Debug.Log("[Phase1] Boss emerges — preparing for battle!");
+>     }
+> }
+>
+> // Phase2_Parent.cs
+> public class Phase2Parent : HierarchicalState
+> {
+>     public Phase2Parent()
+>     {
+>         AddTransition<Phase3Parent>(() =>
+>             ((BossData)fsm.GetOrCreateState<BossData>()).healthPercent < 0.33f);
+>     }
+>     public override void OnEnter()
+>     {
+>         Debug.Log("[Phase2] Boss enrages — new abilities unlocked!");
+>         // 播放阶段转换动画 + 台词
+>         ((BossData)fsm.GetOrCreateState<BossData>()).PlayPhaseTransition(2);
+>     }
+> }
+>
+> // Phase3_Parent.cs
+> public class Phase3Parent : HierarchicalState
+> {
+>     public override void OnEnter()
+>     {
+>         Debug.Log("[Phase3] Final phase — Boss goes all out!");
+>         // 改变场景光照
+>         ((BossData)fsm.GetOrCreateState<BossData>()).SetSceneLighting(Color.red);
+>         ((BossData)fsm.GetOrCreateState<BossData>()).PlayPhaseTransition(3);
+>     }
+> }
+>
+> // Stunned 子状态（所有 Phase 共享的子状态类型）
+> public class StunnedState : HierarchicalState
+> {
+>     private float _stunTimer;
+>     public StunnedState()
+>     {
+>         AddTransition<IdleState>(() => _stunTimer >= 2f);
+>     }
+>     public override void OnEnter() { _stunTimer = 0f; }
+>     public override void OnUpdate() { _stunTimer += Time.deltaTime; }
+> }
+> ```
+>
+> **调试功能：打印当前活动状态路径**
+>
+> ```csharp
+> public string GetActivePath()
+> {
+>     var path = new List<string>();
+>     var node = GetDeepestActiveState();
+>     while (node != null)
+>     {
+>         path.Add(node.GetType().Name);
+>         node = node.Parent;
+>     }
+>     path.Reverse();
+>     return string.Join(" → ", path);
+>     // 输出: "BossRoot → Phase2 → MeleeAttack"
+> }
+> ```
+>
+> **验收验证清单：**
+> - ✓ Phase 切换时，当前子状态正确 Exit → 新 Phase 的默认子状态正确 Enter。
+> - ✓ 阶段转换动画播放期间，Boss 的 OnUpdate 不执行（在 Phase 转移的 Exit/Enter 间加锁）。
+> - ✓ 修改模拟数据（health = 65% → 32% → 0%）可以触发全部转移路径。
+> - ✓ 每个 Enter 都有对应的 Exit，通过计数器验证 `enterCount == exitCount`。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

@@ -1981,6 +1981,298 @@ class XorFEC:
 
 **输出要求**：选择你擅长的语言（C#/C++/Lua/Python），实现并附上能运行的测试代码。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> XOR FEC 编解码器完整实现（Python）：
+>
+> ```python
+> class XorFEC:
+>     def __init__(self, group_size=3):
+>         self.group_size = group_size
+>         self.buffer = []  # (packet_bytes, original_length)
+>
+>     def add_data_packet(self, data: bytes):
+>         """添加一个数据包。组满时返回 (fec_packet, original_lengths)，否则返回 None。"""
+>         self.buffer.append((data, len(data)))
+>         if len(self.buffer) == self.group_size:
+>             return self._generate_fec()
+>         return None
+>
+>     def _generate_fec(self):
+>         # 找到最大长度，短包尾部补零
+>         max_len = max(len(d) for d, _ in self.buffer)
+>         fec = bytearray(max_len)
+>         for data, _ in self.buffer:
+>             for i in range(len(data)):
+>                 fec[i] ^= data[i]
+>             # 超出 data 长度的部分 XOR 0，不影响 fec
+>         result = (bytes(fec), [orig_len for _, orig_len in self.buffer])
+>         self.buffer.clear()
+>         return result
+>
+>     @staticmethod
+>     def recover(available_packets: list[bytes],
+>                 fec_packet: bytes,
+>                 original_lengths: list[int],
+>                 missing_index: int) -> bytes:
+>         """从组内其他包 + FEC 包恢复缺失的数据包。
+>         available_packets: 除缺失包外的所有数据包
+>         missing_index: 缺失包在组内的索引 (0-based)
+>         """
+>         recovered = bytearray(fec_packet)
+>         for pkt in available_packets:
+>             for i in range(min(len(pkt), len(recovered))):
+>                 recovered[i] ^= pkt[i]
+>         # 截断到原始长度
+>         return bytes(recovered[:original_lengths[missing_index]])
+>
+>
+> # --- 测试 ---
+> def test_xor_fec():
+>     fec = XorFEC(group_size=3)
+>
+>     p0 = b"Hello"
+>     p1 = b"World!"
+>     p2 = b"FEC"
+>
+>     assert fec.add_data_packet(p0) is None
+>     assert fec.add_data_packet(p1) is None
+>     fec_result = fec.add_data_packet(p2)
+>     assert fec_result is not None
+>
+>     fec_pkt, orig_lens = fec_result
+>
+>     # 模拟丢失 p1（索引 1）
+>     recovered = XorFEC.recover([p0, p2], fec_pkt, orig_lens, missing_index=1)
+>     assert recovered == p1, f"Recovery failed: {recovered} != {p1}"
+>
+>     # 模拟丢失 p0（索引 0）
+>     recovered = XorFEC.recover([p1, p2], fec_pkt, orig_lens, missing_index=0)
+>     assert recovered == p0
+>
+>     print("All XOR FEC tests passed!")
+>
+> test_xor_fec()
+> ```
+>
+> **设计要点**：
+> - **等长要求**：XOR 操作要求所有操作数等长。短包尾部补 0x00 后参与 XOR，恢复时按 `original_lengths` 截断
+> - **恢复原理**：FEC = P0 ⊕ P1 ⊕ P2，恢复 P1 = FEC ⊕ P0 ⊕ P2（异或的自逆性）
+> - **局限性**：只能容忍组内丢失 1 个包。丢失 ≥ 2 个包无法恢复。这正是教程中提到的"Reed-Solomon 可以恢复多个但延迟/计算量不适合帧同步"的原因
+> - **帧同步适用性**：冗余度 2~3 时 XOR FEC group_size=5 可将带宽从 300%（冗余度 3）降到 120%（5 个包 + 1 个 FEC），但代价是必须等满一组才能生成/恢复 → 引入额外延迟
+
+> [!tip]- 练习 2 参考答案
+> 自适应冗余度控制器：
+>
+> ```python
+> import time
+> from collections import deque
+>
+> class AdaptiveRedundancy:
+>     def __init__(self):
+>         self.redundancy = 2          # 初始冗余度
+>         self.smoothed_loss = 0.0     # EWMA 平滑后的丢包率
+>         self.alpha = 0.3             # EWMA 衰减因子
+>
+>         # 滑动窗口：最近 100 个包的发送/确认状态
+>         self.window = deque(maxlen=100)
+>         self.pending = {}            # frame_id -> send_time（未确认的包）
+>
+>         # 降冗余迟滞：记录进入低丢包区间的起始时间
+>         self.low_loss_since = None
+>         self.HYSTERESIS_SEC = 5.0
+>
+>     def on_packet_sent(self, frame_id: int):
+>         self.pending[frame_id] = time.time()
+>
+>     def on_packet_acked(self, frame_id: int):
+>         """收到间接确认：收到 frame_id=N+3 → 确认 N 已到达"""
+>         send_time = self.pending.pop(frame_id, None)
+>         if send_time is not None:
+>             self.window.append(1)  # 成功
+>         # 跳过的帧号视为丢失
+>         expired = [fid for fid in self.pending if fid < frame_id]
+>         for fid in expired:
+>             self.pending.pop(fid)
+>             self.window.append(0)  # 丢失
+>
+>     def update(self):
+>         """定期评估丢包率并调整冗余度"""
+>         if len(self.window) < 10:
+>             return  # 样本不足，不做调整
+>
+>         # 瞬时丢包率
+>         instant_loss = 1.0 - sum(self.window) / len(self.window)
+>         # EWMA 平滑
+>         self.smoothed_loss = (1 - self.alpha) * self.smoothed_loss \
+>                            + self.alpha * instant_loss
+>
+>         # 根据平滑丢包率决定目标冗余度
+>         target = self._loss_to_redundancy(self.smoothed_loss)
+>
+>         now = time.time()
+>         if target < self.redundancy:
+>             # 降冗余需要迟滞
+>             if self.low_loss_since is None:
+>                 self.low_loss_since = now
+>             elif now - self.low_loss_since >= self.HYSTERESIS_SEC:
+>                 self.redundancy = target
+>                 self.low_loss_since = None
+>         else:
+>             # 升冗余立即生效
+>             self.redundancy = target
+>             self.low_loss_since = None
+>
+>     def _loss_to_redundancy(self, loss: float) -> int:
+>         if loss < 0.01:   return 1
+>         if loss < 0.03:   return 2
+>         if loss < 0.08:   return 3
+>         if loss < 0.15:   return 5
+>         print("WARNING: Network extremely poor!")
+>         return 5
+> ```
+>
+> **设计要点**：
+> - **EWMA 平滑**：`α=0.3` 意味着新样本权重 30%，旧值权重 70%。比简单平均更抗抖动，但比纯滑动平均反应更快
+> - **迟滞（Hysteresis）**：降冗余需要持续 5 秒低丢包——防止网络短时波动导致冗余度来回振荡，振荡会引入不必要的带宽开销
+> - **间接确认**：帧同步中没有显式 ACK。收到 frame_id=N+3 的包即确认 N 已到达（发送方能推断出来，因为后续帧的到达说明网络通畅）
+> - **滑动窗口**：`deque(maxlen=100)` 自动丢弃老样本——丢包率的统计窗口始终是最近的 100 个包
+> - **初始值**：初始冗余度 2 是保守默认值，适合 WiFi/有线环境
+
+> [!tip]- 练习 3 参考答案
+> 完整帧同步协议栈的核心架构与关键代码片段：
+>
+> **整体数据流**：
+>
+> ```
+> 发送: GameLogic → CommandBuffer.collect()
+>      → FramePacket.build(frameId, commands)
+>      → CRC32.compute(packet)
+>      → RedundantSender.send(packet, redundancy=N)
+>      → UDP socket
+>
+> 接收: UDP socket → RingBuffer.insert(seq, data)
+>      → FrameReceiver.try_extract()
+>      → CRC32.verify(packet) → 失败则丢弃
+>      → FramePacket.parse(packet)
+>      → NACK检测 (FrameId间隙) → 发送NACK
+>      → GameLogic.execute(framePacket)
+> ```
+>
+> **1. 命令缓冲器**：
+>
+> ```csharp
+> public class CommandBuffer {
+>     private List<GameCommand> _pending = new();
+>
+>     public void AddCommand(GameCommand cmd) => _pending.Add(cmd);
+>
+>     public List<GameCommand> Flush() {
+>         var result = _pending;
+>         _pending = new List<GameCommand>();
+>         return result;
+>     }
+> }
+> ```
+>
+> **2. 交错冗余发送器**：
+>
+> ```csharp
+> public class RedundantSender {
+>     private int _redundancy = 3;
+>     private int _interleaveMs = 12;  // 相邻拷贝间隔
+>     private Queue<(uint frameId, byte[] data, int copy)> _queue = new();
+>
+>     public void SendFrame(uint frameId, byte[] packet) {
+>         for (int i = 0; i < _redundancy; i++)
+>             _queue.Enqueue((frameId, packet, i));
+>     }
+>
+>     public void Update(float nowMs) {
+>         // 按交错间隔发送排队的拷贝
+>         while (_queue.Count > 0 && ShouldSendNext(nowMs)) {
+>             var (frameId, data, copy) = _queue.Dequeue();
+>             byte seq = (byte)((frameId * (uint)_redundancy + (uint)copy) & 0xFF);
+>             UdpSend(frameId, seq, data);
+>             _lastSendMs = nowMs;
+>         }
+>     }
+> }
+> ```
+>
+> **3. NACK 处理与超时兜底**：
+>
+> ```csharp
+> public class FrameReceiver {
+>     private uint _nextExpected = 0;
+>     private SortedDictionary<uint, byte[]> _buffer = new();
+>     private Dictionary<uint, float> _nackSentAt = new();  // NACK 发送时间
+>     private const float NACK_TIMEOUT_MS = 200f;
+>
+>     public bool TryConsume(out uint frameId, out byte[] data,
+>                            float nowMs, Action<uint> sendNack) {
+>         frameId = 0; data = null;
+>
+>         // 检查 NACK 超时
+>         foreach (var kv in _nackSentAt.ToList()) {
+>             if (nowMs - kv.Value > NACK_TIMEOUT_MS) {
+>                 // 超时兜底：用上一帧的输入填坑
+>                 if (_buffer.TryGetValue(kv.Key - 1, out var prevData)) {
+>                     _buffer[kv.Key] = prevData;
+>                 }
+>                 _nackSentAt.Remove(kv.Key);
+>             }
+>         }
+>
+>         // 尝试按序消费
+>         if (_buffer.TryGetValue(_nextExpected, out data)) {
+>             frameId = _nextExpected;
+>             _buffer.Remove(_nextExpected);
+>             _nextExpected++;
+>             return true;
+>         }
+>
+>         // 有空隙 → 发送 NACK
+>         if (!_nackSentAt.ContainsKey(_nextExpected)) {
+>             sendNack(_nextExpected);
+>             _nackSentAt[_nextExpected] = nowMs;
+>         }
+>         return false;
+>     }
+>
+>     public void Insert(uint frameId, byte[] data) {
+>         if (frameId < _nextExpected) return;  // 过期
+>         _buffer[frameId] = data;
+>         _nackSentAt.Remove(frameId);  // 收到了，取消 NACK
+>     }
+> }
+> ```
+>
+> **4. 集成测试要点**：
+>
+> ```python
+> # 模拟不同丢包场景的测试框架
+> def simulate_network(protocol, total_frames, loss_rate, burst_size=0):
+>     for frame in range(total_frames):
+>         protocol.tick()
+>         if burst_size > 0 and frame % 100 < burst_size:
+>             continue  # 突发丢包
+>         if random.random() < loss_rate:
+>             continue  # 随机丢包
+>         protocol.deliver_packet(frame)
+>     assert protocol.current_frame >= total_frames, \
+>         f"Stuck at frame {protocol.current_frame}"
+> ```
+>
+> **关键设计决策**：
+> - **NACK 而非 ACK**：在帧同步中，期望帧号间隙就是丢包信号——不需要专门的 ACK 包
+> - **超时兜底用上一帧输入**：简单粗暴但在大多数情况下可行。玩家的输入在相邻帧之间通常不变（持续按住方向键），丢失一帧的输入不会导致灾难性后果
+> - **SeqNumber 去重**：RedundantSender 为每个拷贝分配不同的 SeqNumber，接收方用 `SeqNumber` 判断是否已收到同一 FrameId 的其他拷贝
+> - **CRC32 校验**：必须在 decode **之前**验证 CRC——如果 CRC 失败说明包损坏，不应该喂给逻辑层（可能引入非确定性）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

@@ -229,6 +229,82 @@ vim.cmd.colorscheme 'tokyonight-night'
 2. 将插件目录删除（模拟新机器）: 删除 `~/.local/share/nvim/site/pack/core/`
 3. 重新启动 Neovim —— 观察 `vim.pack.add()` 如何根据 lockfile 自动恢复到锁定版本
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **操作步骤与预期结果：**
+>
+> 1. **备份现有配置：**
+>    ```bash
+>    # Linux/macOS
+>    mv ~/.config/nvim ~/.config/nvim.bak
+>    # Windows (PowerShell)
+>    Rename-Item $env:LOCALAPPDATA\nvim $env:LOCALAPPDATA\nvim.bak
+>    ```
+>
+> 2. **创建最小 init.lua：**
+>    ```lua
+>    -- ~/.config/nvim/init.lua (Windows: %LOCALAPPDATA%/nvim/init.lua)
+>    vim.g.mapleader = ' '
+>    local function gh(r) return 'https://github.com/' .. r end
+>    vim.pack.add { gh 'folke/tokyonight.nvim' }
+>    require('tokyonight').setup { style = 'night' }
+>    vim.cmd.colorscheme 'tokyonight-night'
+>    ```
+>
+> 3. **启动 Neovim：** 首次启动会弹出确认对话框，按 `a` 允许安装。观察底部状态栏的下载进度。
+>
+> 4. **查看 lockfile：** 安装完成后，在 `~/.config/nvim/nvim-pack-lock.json` 中可以看到类似内容：
+>    ```json
+>    {
+>      "tokyonight.nvim": {
+>        "type": "git",
+>        "url": "https://github.com/folke/tokyonight.nvim",
+>        "commit": "abc123...",
+>        "version": null
+>      }
+>    }
+>    ```
+>
+> **关键理解：** 这个 JSON 文件记录了插件的精确 commit，确保在任何机器上重装都能得到完全相同的代码版本。
+
+> [!tip]- 练习 2 参考答案
+> 运行 `:lua vim.pack.update(nil, { offline = true })` 后会出现一个分屏界面：
+>
+> | 区域 | 内容 |
+> |---|---|
+> | 左侧列表 | 每个插件的名称和状态：`ok`（已是最新）、`behind`（远程有更新）、`new`（未锁定） |
+> | 右侧 diff | 选中插件时显示当前 commit 与远程最新 commit 之间的差异（文件变更列表） |
+>
+> `offline = true` 表示**只读模式**——只检查本地状态而不拉取远程。这让你在离线时也能查看插件信息。去掉 `offline = true` 才会真正拉取远程仓库并显示可更新的 diff。
+>
+> **操作提示：** 在 diff 窗口中使用 `j`/`k` 上下移动；按 `<Enter>` 展开某个文件的详细 diff；`:write` 应用选中插件的更新；`:quit` 退出。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **模拟多机同步步骤：**
+>
+> 1. **定位 lockfile：** `nvim-pack-lock.json` 位于 `~/.config/nvim/`（Windows: `%LOCALAPPDATA%/nvim/`）。
+>
+> 2. **删除插件目录（模拟新机器）：**
+>    ```bash
+>    # Linux/macOS
+>    rm -rf ~/.local/share/nvim/site/pack/core/
+>    # Windows (PowerShell)
+>    Remove-Item -Recurse -Force $env:LOCALAPPDATA\nvim-data\site\pack\core\
+>    ```
+>
+> 3. **重启 Neovim：** `vim.pack.add()` 检测到 `opt/` 下没有对应插件，但 `nvim-pack-lock.json` 中有锁定记录，因此会**自动 clone 到锁定版本**——不会弹出更新确认，因为安装的是已锁定的 commit 而非最新版。
+>
+> **核心机制：**
+> ```
+> nvim-pack-lock.json   →  知道应该装哪个 commit
+> vim.pack.add()        →  发现插件缺失 → 从 GitHub clone → checkout 到锁定 commit
+> ```
+> 这就是 lockfile 的价值：**可重现的构建**。只需要把 `init.lua` 和 `nvim-pack-lock.json` 两个文件放到版本控制中，就能在任何机器上重建完全相同的插件环境。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

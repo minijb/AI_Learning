@@ -149,6 +149,98 @@ struct B { uint32_t a:16, b:8, c:4, d:4; };
 用 `static_assert` 断言两者的大小。然后用 `reinterpret_cast` 查看它们的原始字节序列，解释为什么会有区别。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <cstdint>
+> #include <iostream>
+>
+> int main() {
+>     // 核心思路：取一个多字节整数的低字节
+>     // 小端：低字节存低地址 → 0x01 在 &val[0]
+>     // 大端：低字节存高地址 → 0x01 在 &val[sizeof(val)-1]
+>     uint16_t val = 0x0001;
+>     uint8_t first_byte = *reinterpret_cast<uint8_t*>(&val);
+>
+>     if (first_byte == 0x01) {
+>         std::cout << "little-endian\n";
+>     } else {
+>         std::cout << "big-endian\n";
+>     }
+>     return 0;
+> }
+> ```
+>
+> **关键点：** `uint16_t(0x0001)` 的字节表示在小端机器上是 `[0x01, 0x00]`（低地址存低字节），在大端机器上是 `[0x00, 0x01]`（低地址存高字节）。取 `reinterpret_cast<uint8_t*>(&val)` 的第一个字节即可判断。不需要预定义宏——这是纯类型系统技巧。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <cstddef>
+> #include <iostream>
+>
+> void my_memcpy(void* dst, const void* src, size_t n) {
+>     // char* 是 C++ 中唯一合法的逐字节别名类型
+>     // void* 不能做指针算术——不知道步长
+>     const char* s = static_cast<const char*>(src);
+>     char* d = static_cast<char*>(dst);
+>
+>     for (size_t i = 0; i < n; ++i) {
+>         d[i] = s[i];
+>     }
+> }
+>
+> int main() {
+>     int src[5] = {10, 20, 30, 40, 50};
+>     int dst[5] = {};
+>
+>     my_memcpy(dst, src, sizeof(src));
+>
+>     // 验证
+>     bool ok = true;
+>     for (int i = 0; i < 5; ++i) {
+>         if (dst[i] != src[i]) { ok = false; break; }
+>     }
+>     std::cout << (ok ? "my_memcpy: OK\n" : "my_memcpy: FAILED\n");
+>     return 0;
+> }
+> ```
+>
+> **关键点：** C++ 标准保证 `char*` 可以安全地逐字节访问任何对象的底层表示（严格别名规则的唯一例外）。`void*` 不提供步长信息——`void* + 1` 甚至无法编译。注意循环中用 `size_t` 而不是 `int`：与 `memcpy` 的接口保持一致，且避免符号类型警告。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> #include <cstdint>
+> #include <iostream>
+> #include <cstddef>
+>
+> struct A { uint32_t a:4, b:4, c:8, d:16; };
+> struct B { uint32_t a:16, b:8, c:4, d:4; };
+>
+> static_assert(sizeof(A) == 4, "A occupies one uint32_t");
+> static_assert(sizeof(B) == 4, "B occupies one uint32_t");
+>
+> int main() {
+>     A a_struct{1, 2, 3, 4};
+>     B b_struct{1, 2, 3, 4};
+>
+>     // 直接读取底层 uint32_t（注意：依赖实现定义行为）
+>     uint32_t raw_a = *reinterpret_cast<uint32_t*>(&a_struct);
+>     uint32_t raw_b = *reinterpret_cast<uint32_t*>(&b_struct);
+>
+>     std::cout << std::hex;
+>     std::cout << "A raw: 0x" << raw_a << "\n";
+>     std::cout << "B raw: 0x" << raw_b << "\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **解释：** 位域的内存布局是实现定义的（implementation-defined），C++ 标准不规定位域在存储单元中的分配方向（从 LSB 还是 MSB 开始）、位域能否跨越存储单元边界。在 GCC/Clang 的 x86-64 上，位域通常从 LSB 开始紧凑分配：A 的布局为 `[d:16][c:8][b:4][a:4]`（低 16 位给 d），B 的布局为 `[d:4][c:4][b:8][a:16]`。两者 sizeof 相同，但字段排列顺序不同导致原始字节序列完全不同——这就是为什么**永远不要用位域定义跨平台二进制协议**。如需可移植的位操作，用 `uint32_t` + 位掩码。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 
 ## 4. 扩展阅读
 

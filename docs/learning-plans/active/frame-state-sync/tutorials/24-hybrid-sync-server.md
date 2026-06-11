@@ -2595,6 +2595,329 @@ end)
 - 带宽限制用 token bucket 算法
 - 测试时打印每个客户端的"本帧收到多少字节的状态数据"
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1：Room 生命周期状态机
+> **状态转换表（transition table）实现**：
+>
+> ```csharp
+> // 在 BattleRoom 中定义合法转换
+> private static readonly Dictionary<(RoomState from, RoomState to), bool> _validTransitions = new()
+> {
+>     { (RoomState.Idle,    RoomState.Loading),  true },
+>     { (RoomState.Loading, RoomState.Fighting), true },
+>     { (RoomState.Loading, RoomState.Settle),   true },  // 加载失败直接结算
+>     { (RoomState.Fighting,RoomState.Settle),   true },
+>     { (RoomState.Settle,  RoomState.Destroy),  true },
+> };
+>
+> private bool CanTransition(RoomState from, RoomState to)
+>     => _validTransitions.TryGetValue((from, to), out _);
+>
+> // AllPlayersLoaded — 所有玩家就绪 → 开始战斗
+> public void AllPlayersLoaded()
+> {
+>     if (State != RoomState.Loading) return;
+>
+>     // 检查所有槽位是否已分配且已发送加载完成通知
+>     bool allReady = Players.Count == MaxPlayers
+>                  && Players.Values.All(p => p.IsConnected);
+>     if (!allReady) return;
+>
+>     var oldState = State;
+>     StartFighting(); // 内部设置 State = Fighting
+>     Console.WriteLine($"[Room {RoomId}] F{CurrentFrame}: {oldState} → {State} (AllPlayersLoaded)");
+> }
+>
+> // CheckDisconnectTimeout — 所有玩家断线超时
+> public void CheckDisconnectTimeout()
+> {
+>     if (State != RoomState.Fighting) return;
+>
+>     bool allDisconnected = Players.Values.All(p => !p.IsConnected);
+>     if (!allDisconnected) return;
+>
+>     // 检查最早断线时间
+>     var earliestDisconnect = Players.Values
+>         .Where(p => !p.IsConnected)
+>         .Min(p => p.DisconnectTime);
+>
+>     if ((DateTime.UtcNow - earliestDisconnect).TotalSeconds > 60)
+>     {
+>         var oldState = State;
+>         StartSettle("All players disconnected > 60s");
+>         Console.WriteLine($"[Room {RoomId}] F{CurrentFrame}: {oldState} → {State} (DisconnectTimeout)");
+>     }
+> }
+> ```
+>
+> **单元测试示例**：
+>
+> ```csharp
+> [Test]
+> public void CannotTransitionFromFightingBackToIdle()
+> {
+>     var room = new BattleRoom(1, 4);
+>     room.State = RoomState.Fighting; // 模拟已进入战斗
+>     // 尝试非法转换
+>     Assert.Throws<InvalidOperationException>(() => {
+>         // room.State = RoomState.Idle; // 如果是 setter 中有校验
+>     });
+>     // 或验证 transition table 不让通过:
+>     Assert.IsFalse(CanTransition(RoomState.Fighting, RoomState.Idle));
+> }
+>
+> [Test]
+> public void AllPlayersLoaded_TransitionsToFighting()
+> {
+>     var room = new BattleRoom(1, 2);
+>     room.AllocatePlayerSlot(1001, "127.0.0.1:1");
+>     room.AllocatePlayerSlot(1002, "127.0.0.1:2");
+>     room.State = RoomState.Loading;
+>     room.AllPlayersLoaded();
+>     Assert.AreEqual(RoomState.Fighting, room.State);
+> }
+> ```
+>
+> **关键点**：
+> - 用 transition table（字典）比 if-else 链更可维护——新增状态时只需添加一行
+> - 每个转换都应有日志（帧号+RoomID+旧状态→新状态），这是线上问题定位的关键
+> - `AllPlayersLoaded` 不应在 `StartFighting` 中有隐式假设——必须显式检查 `players == maxPlayers` 和 `allConnected`
+
+> [!tip]- 练习 2：增量快照与重连数据包
+> **`CreateDeltaSnapshot` 实现**（基于 2.1 节的 `SnapshotEntry` 结构）：
+>
+> ```csharp
+> // 在 BattleRoom 中新增字段
+> private byte[] _lastFullState;  // 上一帧的完整序列化状态
+>
+> private byte[] CreateDeltaSnapshot()
+> {
+>     // 获取当前帧的完整状态（序列化为字节数组）
+>     byte[] currentState = SerializeGameWorld();
+>
+>     if (_lastFullState == null || _lastFullState.Length != currentState.Length)
+>     {
+>         _lastFullState = currentState;
+>         return null; // 首次无法做增量
+>     }
+>
+>     // 按实体 ID 排序后逐个对比，只收集变化的部分
+>     var diffs = new List<EntityDiff>();
+>     int entitySize = 64; // 假设每个实体序列化后 64 字节
+>     int entityCount = currentState.Length / entitySize;
+>
+>     for (int i = 0; i < entityCount; i++)
+>     {
+>         int offset = i * entitySize;
+>         bool changed = false;
+>         for (int b = 0; b < entitySize; b++)
+>         {
+>             if (currentState[offset + b] != _lastFullState[offset + b])
+>             {
+>                 changed = true;
+>                 break;
+>             }
+>         }
+>         if (changed)
+>         {
+>             diffs.Add(new EntityDiff
+>             {
+>                 EntityIndex = (uint)i,
+>                 Data = currentState.AsSpan(offset, entitySize).ToArray()
+>             });
+>         }
+>     }
+>
+>     _lastFullState = currentState;
+>     return diffs.Count > 0 ? SerializeDiffs(diffs) : null;
+> }
+> ```
+>
+> **重连包构建**（已在 2.1 节 `BuildReconnectPackage` 中有框架，补充说明）：
+>
+> ```csharp
+> // 核心逻辑（此方法在 2.1 节已有骨架）
+> // 1. 从 _snapshots 列表尾部向前扫描，找最近一次完整快照
+> // 2. 收集该快照之后的所有增量快照
+> // 3. 打包返回: { baseFrame, fullSnapshot, deltaSnapshots[] }
+>
+> // 客户端 ApplyReconnectPackage 的对应逻辑:
+> public void ApplyReconnectPackage(ReconnectPackage pkg)
+> {
+>     // 1. 用完整快照重建世界
+>     DeserializeGameWorld(pkg.FullSnapshot);
+>     uint currentFrame = pkg.BaseFrame;
+>
+>     // 2. 按顺序应用所有增量
+>     foreach (var delta in pkg.DeltaSnapshots)
+>     {
+>         currentFrame++;
+>         var diffs = DeserializeDiffs(delta);
+>         foreach (var diff in diffs)
+>             ApplyEntityDiff(diff.EntityIndex, diff.Data);
+>     }
+>
+>     Debug.Log($"Reconnect: restored to frame {currentFrame}");
+> }
+> ```
+>
+> **500 帧测试验证**：
+> ```csharp
+> [Test]
+> public void ReconnectAt450_RestoresCorrectState()
+> {
+>     var room = CreateTestRoom(seed: 42);
+>     // 跑 500 帧
+>     for (uint f = 1; f <= 500; f++)
+>         room.Tick(f);
+>
+>     // 记录第 500 帧的正确状态
+>     var expectedState = room.CaptureStateHash();
+>
+>     // 模拟重连：用第 400 帧的快照 + 后续增量
+>     var pkg = room.BuildReconnectPackage();
+>     Assert.IsNotNull(pkg);
+>     Assert.AreEqual(400, pkg.BaseFrame); // 最近完整快照在第400帧
+>
+>     // 重建
+>     var restoredRoom = new BattleRoom(99, room.MaxPlayers);
+>     restoredRoom.ApplyReconnectPackage(pkg);
+>
+>     // 验证 hash 一致
+>     Assert.AreEqual(expectedState, restoredRoom.CaptureStateHash());
+> }
+> ```
+>
+> **关键点**：增量 diff 的正确性依赖实体 ID 排序——两个快照必须按相同顺序比较。全量快照间隔 300 帧意味着最坏情况需要 299 个增量 diff，测试中需验证这个路径的性能。生产环境用二进制 delta 编码（如 bsdiff 思路），这里用 JSON 方便调试。
+
+> [!tip]- 练习 3：AOI 过滤的状态广播调度器
+> **C# 实现（基于 .NET 6+ `PriorityQueue`）**：
+>
+> ```csharp
+> public class StateBroadcaster
+> {
+>     // AOI 距离阈值
+>     private const float HIGH_PRIORITY_RADIUS = 15f;
+>     private const float MED_PRIORITY_RADIUS  = 50f;
+>     private const float LOW_PRIORITY_RADIUS  = 100f;
+>
+>     // 带宽限制
+>     private const int MAX_BYTES_PER_FRAME = 1200;
+>     private int _bytesSentThisFrame;
+>
+>     // 低优先级发送计数器（减半频率用）
+>     private int _frameCounter;
+>
+>     private record BroadcastEntry(
+>         float Priority,     // 用于 PriorityQueue 排序（负值 = 高优先）
+>         uint EntityId,
+>         byte TargetPlayerId,
+>         byte PropertyId,
+>         byte[] Data,
+>         int DataSize
+>     );
+>
+>     public void BroadcastFrame(
+>         Dictionary<uint, EntityState> entities,
+>         Dictionary<byte, Vector2> playerPositions,
+>         Dictionary<byte, byte> playerTeams)
+>     {
+>         _bytesSentThisFrame = 0;
+>         _frameCounter++;
+>
+>         var pq = new PriorityQueue<BroadcastEntry, float>();
+>
+>         foreach (var (entityId, state) in entities)
+>         {
+>             foreach (var (targetPid, targetPos) in playerPositions)
+>             {
+>                 float dist = Vector2.Distance(state.Position, targetPos);
+>                 bool sameTeam = playerTeams.GetValueOrDefault((byte)state.OwnerId, 0)
+>                              == playerTeams.GetValueOrDefault(targetPid, 0);
+>
+>                 // 阵营规则
+>                 if (sameTeam)
+>                 {
+>                     // 队友全量同步（所有属性）
+>                     EnqueueFullSync(pq, entityId, targetPid, dist, 0.01f);
+>                 }
+>                 else
+>                 {
+>                     // 敌人按距离分级
+>                     if (dist <= HIGH_PRIORITY_RADIUS)
+>                         EnqueueFullSync(pq, entityId, targetPid, dist, 0.5f);
+>                     else if (dist <= MED_PRIORITY_RADIUS)
+>                         EnqueuePosOnly(pq, entityId, targetPid, dist, 0.3f);
+>                     else if (dist <= LOW_PRIORITY_RADIUS)
+>                     {
+>                         // 低优先级：只同步位置，且频率减半
+>                         if (_frameCounter % 2 == 0)
+>                             EnqueuePosOnly(pq, entityId, targetPid, dist, 0.15f);
+>                     }
+>                     // > 100m: 不同步
+>                 }
+>             }
+>         }
+>
+>         // 按优先级发送，填满带宽
+>         while (pq.TryDequeue(out var entry, out _) && _bytesSentThisFrame < MAX_BYTES_PER_FRAME)
+>         {
+>             if (_bytesSentThisFrame + entry.DataSize > MAX_BYTES_PER_FRAME)
+>                 break;  // 不拆分单个实体的数据
+>
+>             SendToClient(entry.TargetPlayerId, entry.EntityId, entry.PropertyId, entry.Data);
+>             _bytesSentThisFrame += entry.DataSize;
+>         }
+>     }
+>
+>     private void EnqueueFullSync(PriorityQueue<BroadcastEntry, float> pq,
+>         uint entityId, byte targetPid, float dist, float weight)
+>     {
+>         // 全量同步：hp, pos, angle, flags 等全部属性，约 40 bytes
+>         float priority = -(weight / Math.Max(dist, 1f));
+>         pq.Enqueue(new BroadcastEntry(priority, entityId, targetPid,
+>             0xFF, Array.Empty<byte>(), 40), priority);
+>     }
+>
+>     private void EnqueuePosOnly(PriorityQueue<BroadcastEntry, float> pq,
+>         uint entityId, byte targetPid, float dist, float weight)
+>     {
+>         // 只同步位置+朝向，约 14 bytes
+>         float priority = -(weight / Math.Max(dist, 1f));
+>         pq.Enqueue(new BroadcastEntry(priority, entityId, targetPid,
+>             0x01, Array.Empty<byte>(), 14), priority);
+>     }
+> }
+> ```
+>
+> **Token Bucket 带宽限制**（替代简单计数器）：
+> ```csharp
+> private float _tokens = MAX_BYTES_PER_FRAME;
+> private const float TOKEN_REFILL_RATE = MAX_BYTES_PER_FRAME; // 每帧回满
+>
+> // 每帧开始时
+> _tokens = Math.Min(_tokens + TOKEN_REFILL_RATE, MAX_BYTES_PER_FRAME * 2);
+>
+> // 发送时
+> if (_tokens >= entry.DataSize)
+> {
+>     SendToClient(...);
+>     _tokens -= entry.DataSize;
+> }
+> ```
+>
+> **验证标准对照**：
+> - **全量 vs AOI 过滤对比**：4 玩家 + 10 NPC = 14 实体。全量广播 = 14×4 = 56 条消息/帧。AOI 过滤后：近处 ~3-5 实体全量 + 中距离 ~3-5 实体只位置，约 20-30 条消息。**< 60%（远低于 30% 的宽松目标）**
+> - **队伍规则**：队友 `weight=0.01` 使队友优先于任何敌人（`-0.01/dist` 比其他权重负得少 = 优先级更高），且全量同步；敌人不暴露 HP/MP/技能冷却
+> - **带宽限制**：每帧 1200 字节，全量 56×40=2240 字节会超标；AOI 过滤后约 30×(14~40) ≈ 500-900 字节，在预算内
+> - **低优先级减半**：`_frameCounter % 2 == 0` 使 100m 内实体每 2 帧只发一次，进一步节省 ~30% 带宽
+
+> [!note] 答案使用方式
+> - 练习 1 的 transition table 模式是生产级代码的标准做法——直接在 `BattleRoom` 中替换 `StartFighting`/`StartSettle` 的 `State = xxx` 为带校验的 setter
+> - 练习 2 的 500 帧测试建议用**确定性随机种子**（seed=42）确保可复现——否则每次运行的 hash 不同
+> - 练习 3 的 `PriorityQueue` 在 .NET 6+ 中有内置实现，C++ 用 `std::priority_queue`，核心是优先级公式的调参——`weight / dist` 中的 weight 需要根据实际游戏场景校准
 ---
 
 ## 4. 扩展阅读

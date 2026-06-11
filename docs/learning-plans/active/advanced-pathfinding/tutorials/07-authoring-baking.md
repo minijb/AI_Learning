@@ -624,6 +624,553 @@ Authoring → Baking → Runtime 管线演示
 1. **mmap 加载**：在 Linux/Mac 上实现基于 `mmap` 的导航数据加载——文件直接映射到进程地址空间，零拷贝、零解析开销。（Windows 上用 `MapViewOfFile`）
 2. **多线程 Baking**：将世界按 256×256 chunk 分区，用 `std::async` 并行烘焙每个 chunk，最后合并结果。测量 N 线程的速度提升。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案（CRC32 数据完整性校验）
+> **修改 BakedHeader：在末尾添加 `uint32_t crc32` 字段**
+> ```cpp
+> struct BakedHeader {
+>     uint32_t magic;
+>     uint16_t version;
+>     uint16_t flags;
+>     uint32_t width;
+>     uint32_t height;
+>     float    min_cost;
+>     uint32_t island_count;
+>     uint32_t crc32;     // 新增：所有 BakedCell 的 CRC32 校验和
+> };
+> ```
+>
+> **Baking 时计算 CRC32：**
+> ```cpp
+> // CRC32 查表实现 (IEEE 802.3 多项式)
+> static uint32_t crc32_table[256];
+> static bool crc_table_built = false;
+>
+> static void build_crc32_table() {
+>     for (uint32_t i = 0; i < 256; ++i) {
+>         uint32_t crc = i;
+>         for (int j = 0; j < 8; ++j)
+>             crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+>         crc32_table[i] = crc;
+>     }
+>     crc_table_built = true;
+> }
+>
+> static uint32_t crc32(const uint8_t* data, size_t len, uint32_t crc = 0xFFFFFFFF) {
+>     if (!crc_table_built) build_crc32_table();
+>     for (size_t i = 0; i < len; ++i)
+>         crc = (crc >> 8) ^ crc32_table[(crc ^ data[i]) & 0xFF];
+>     return crc ^ 0xFFFFFFFF;
+> }
+> ```
+>
+> **在 `NavBaker::bake()` 末尾（写入 header 之后）计算并回填：**
+> ```cpp
+> // 计算所有 cells 的 CRC32
+> uint32_t checksum = crc32(
+>     reinterpret_cast<const uint8_t*>(cells),
+>     total_cells * sizeof(BakedCell));
+> header->crc32 = checksum;
+> ```
+>
+> **在 `RuntimeNavData::load()` 中验证：**
+> ```cpp
+> bool load(const std::vector<uint8_t>& blob) {
+>     if (!NavBaker::validate_blob(blob)) return false;
+>     header_ = reinterpret_cast<const BakedHeader*>(blob.data());
+>     cells_  = reinterpret_cast<const BakedCell*>(blob.data() + sizeof(BakedHeader));
+>
+>     // 验证 CRC32
+>     uint32_t computed = crc32(
+>         reinterpret_cast<const uint8_t*>(cells_),
+>         header_->width * header_->height * sizeof(BakedCell));
+>     if (computed != header_->crc32) {
+>         std::cerr << "CRC32 mismatch! Data corrupted.\n";
+>         return false;
+>     }
+>     // ...
+> }
+> ```
+>
+> **注意：** `crc32` 字段本身不参与校验和计算。校验和保护的是 cells 数据，而非 header。生产环境中可扩展为对 `BakedHeader` 自身（除 crc32 字段外）也做校验。
+
+> [!tip]- 练习 2 参考答案（版本迁移 v1→v2）
+> **定义 v2 的 BakedCell：增加 `area_id` 字段**
+> ```cpp
+> #pragma pack(push, 1)
+> struct BakedCellV2 {
+>     float cost;
+>     uint8_t flags;
+>     uint8_t area_id;    // 新增：区域 ID (0-255)
+> };
+> struct BakedCellV1 {
+>     float cost;
+>     uint8_t flags;
+>     // v1 没有 area_id
+> };
+> #pragma pack(pop)
+> ```
+>
+> **迁移函数（在 `load()` 中自动检测版本）：**
+> ```cpp
+> static std::vector<uint8_t> migrate_v1_to_v2(const std::vector<uint8_t>& old_blob) {
+>     const auto* old_hdr = reinterpret_cast<const BakedHeader*>(old_blob.data());
+>     size_t cell_count = old_hdr->width * old_hdr->height;
+>
+>     // 新 blob 大小: header + cell_count * sizeof(BakedCellV2)
+>     size_t new_size = sizeof(BakedHeader) + cell_count * sizeof(BakedCellV2);
+>     std::vector<uint8_t> new_blob(new_size, 0);
+>
+>     // 复制并更新 header
+>     auto* new_hdr = reinterpret_cast<BakedHeader*>(new_blob.data());
+>     std::memcpy(new_hdr, old_hdr, sizeof(BakedHeader));
+>     new_hdr->version = 2;
+>
+>     // 逐 cell 迁移：v1 → v2，area_id 默认填 0
+>     const auto* old_cells = reinterpret_cast<const BakedCellV1*>(
+>         old_blob.data() + sizeof(BakedHeader));
+>     auto* new_cells = reinterpret_cast<BakedCellV2*>(
+>         new_blob.data() + sizeof(BakedHeader));
+>
+>     for (size_t i = 0; i < cell_count; ++i) {
+>         new_cells[i].cost    = old_cells[i].cost;
+>         new_cells[i].flags   = old_cells[i].flags;
+>         new_cells[i].area_id = 0;  // v1 没有此信息，默认 0
+>     }
+>     return new_blob;
+> }
+> ```
+>
+> **RuntimeNavData::load() 的版本分支：**
+> ```cpp
+> bool load(const std::vector<uint8_t>& blob) {
+>     if (blob.size() < sizeof(BakedHeader)) return false;
+>     const auto* hdr = reinterpret_cast<const BakedHeader*>(blob.data());
+>
+>     if (hdr->version == 1) {
+>         // 自动迁移到 v2
+>         auto migrated = migrate_v1_to_v2(blob);
+>         return load_internal(migrated);  // 递归加载 v2 格式
+>     }
+>     if (hdr->version != 2) {
+>         std::cerr << "Unsupported version: " << hdr->version << "\n";
+>         return false;
+>     }
+>     return load_internal(blob);
+> }
+> ```
+>
+> **关键设计决策：**
+> - **为什么不就地修改原 blob？** 原 blob 可能是 mmap 的只读映射，不可写。迁移产生新 blob。
+> - **area_id=0 的语义**：默认区域（"未分配"），与设计工具中 "No Area" 的含义一致。
+> - **可扩展为 vN 链式迁移**：`v1→v2→v3`，每个迁移步骤只转换相邻版本。
+
+> [!tip]- 练习 3 参考答案（增量烘焙）
+> 扩展 `NavBaker` 支持区域增量烘焙：
+>
+> ```cpp
+> #include <cstdio>
+>
+> class NavBaker {
+>     // ... 原有成员 ...
+>
+> public:
+>     // 增量烘焙指定矩形区域到已有文件
+>     BakeResult bake_region(const AuthoringData& auth,
+>                            int x0, int y0, int x1, int y1,
+>                            const std::string& file_path) {
+>         BakeResult result{};
+>
+>         // 边界裁剪
+>         x0 = std::max(0, x0); y0 = std::max(0, y0);
+>         x1 = std::min(auth.width - 1, x1);
+>         y1 = std::min(auth.height - 1, y1);
+>
+>         // 打开已有文件（二进制读写模式，不清空）
+>         FILE* f = fopen(file_path.c_str(), "r+b");
+>         if (!f) {
+>             result.error = "Cannot open file for incremental bake";
+>             return result;
+>         }
+>
+>         // 验证 header
+>         BakedHeader hdr;
+>         fread(&hdr, sizeof(BakedHeader), 1, f);
+>         if (hdr.magic != NAV_MAGIC) {
+>             fclose(f);
+>             result.error = "Invalid file magic";
+>             return result;
+>         }
+>
+>         // 遍历矩形区域，计算并写入每个 cell
+>         for (int y = y0; y <= y1; ++y) {
+>             for (int x = x0; x <= x1; ++x) {
+>                 size_t idx = y * auth.width + x;
+>                 auto terrain = static_cast<AuthoringTerrain>(auth.terrain_ids[idx]);
+>
+>                 BakedCell cell;
+>                 cell.cost  = static_cast<float>(auth_terrain_cost(terrain));
+>                 cell.flags = auth_terrain_walkable(terrain) ? 0x01 : 0x00;
+>
+>                 // 计算该 cell 在文件中的偏移：header + cell 偏移
+>                 long offset = sizeof(BakedHeader) + idx * sizeof(BakedCell);
+>                 fseek(f, offset, SEEK_SET);
+>                 fwrite(&cell, sizeof(BakedCell), 1, f);
+>
+>                 // 更新统计
+>                 if (auth_terrain_walkable(terrain))
+>                     result.walkable_cells++;
+>                 else
+>                     result.unwalkable_cells++;
+>             }
+>         }
+>
+>         fclose(f);
+>         result.success = true;
+>         result.baked_bytes = (y1 - y0 + 1) * (x1 - x0 + 1) * sizeof(BakedCell);
+>         return result;
+>     }
+> };
+> ```
+>
+> **核心要点：**
+> - 用 `"r+b"` 模式打开文件——读写但不截断
+> - `fseek` + `fwrite` 定点写入，不影响其他区域
+> - 只重烘焙修改过的矩形区域（如设计师刚编辑的 16×16 刷子区域）
+> - 生产级变体：使用 `pwrite()`（POSIX）或 `OVERLAPPED` I/O（Windows）避免 seek+write 的竞态
+> - **局限：** 此方案不更新 header 中的 `min_cost` 和 `island_count`——若增量修改影响了这些值，需重新全量烘焙
+
+> [!tip]- 练习 4 参考答案（FlatBuffers 集成）
+> **FlatBuffers schema (`nav_data.fbs`)：**
+> ```fbs
+> namespace NavData;
+>
+> // 单个导航格子
+> table NavCell {
+>     cost: float = 1.0;
+>     flags: uint8 = 1;       // bit 0: walkable
+> }
+>
+> // 导航网格（根表）
+> table NavGrid {
+>     width: uint32;
+>     height: uint32;
+>     min_cost: float;
+>     island_count: uint32 = 0;
+>     cells: [NavCell];  // 平坦数组
+> }
+>
+> root_type NavGrid;
+> ```
+>
+> **生成 C++ 代码并序列化：**
+> ```cpp
+> // flatc --cpp nav_data.fbs → nav_data_generated.h
+> #include "nav_data_generated.h"
+>
+> flatbuffers::FlatBufferBuilder builder(1024 * 1024);
+>
+> // 构建 cells 向量
+> std::vector<flatbuffers::Offset<NavData::NavCell>> cell_offsets;
+> for (size_t i = 0; i < total_cells; ++i) {
+>     cell_offsets.push_back(
+>         NavData::CreateNavCell(builder, cost, walkable ? 1 : 0));
+> }
+> auto cells_vec = builder.CreateVector(cell_offsets);
+>
+> // 构建根表
+> auto grid = NavData::CreateNavGrid(builder, width, height, min_cost,
+>                                     island_count, cells_vec);
+> builder.Finish(grid);
+>
+> // 获取二进制 blob
+> const uint8_t* buf = builder.GetBufferPointer();
+> size_t size = builder.GetSize();
+> ```
+>
+> **零拷贝读取（Runtime）：**
+> ```cpp
+> // 直接映射文件内容到内存（无需反序列化步骤）
+> const NavData::NavGrid* grid = NavData::GetNavGrid(blob.data());
+>
+> auto cells = grid->cells();
+> float c = cells->Get(idx)->cost();
+> bool walkable = cells->Get(idx)->flags() & 0x01;
+> ```
+>
+> **对比自定义二进制：**
+>
+> | 维度 | 自定义二进制 | FlatBuffers |
+> |------|-------------|-------------|
+> | 文件大小 | ~5B/cell（紧凑） | ~8-12B/cell（vtable 开销） |
+> | 加载速度 | 指针转换（O(1)） | 零拷贝读取（O(1)） |
+> | Schema 演进 | 手动管理 version | 自动后向兼容（字段可选） |
+> | 调试难度 | 困难（hex dump） | 可读（JSON 导出） |
+> | 跨平台 | 手动处理字节序 | 自动处理 |
+>
+> **结论：** 自定义二进制文件更小（约 40-50%），FlatBuffers 更安全可维护。大团队/长生命周期项目选 FlatBuffers；性能极致/受控环境选手动二进制。
+
+> [!tip]- 练习 5 参考答案（Baking 验证规则）
+> 在 `NavBaker::bake()` 开头添加验证 pass：
+>
+> ```cpp
+> struct BakeValidationResult {
+>     bool passed;
+>     std::vector<std::string> warnings;
+>     std::vector<std::string> errors;
+> };
+>
+> BakeValidationResult validate(const AuthoringData& auth) {
+>     BakeValidationResult vr{true};
+>     int w = auth.width, h = auth.height;
+>
+>     // 规则 1：地图边缘是否全部不可通行/封闭？
+>     int edge_walkable = 0;
+>     for (int x = 0; x < w; ++x) {
+>         if (auth_terrain_walkable(static_cast<AuthoringTerrain>(
+>                 auth.terrain_ids[x]))) ++edge_walkable;          // top
+>         if (auth_terrain_walkable(static_cast<AuthoringTerrain>(
+>                 auth.terrain_ids[(h-1) * w + x]))) ++edge_walkable; // bottom
+>     }
+>     for (int y = 0; y < h; ++y) {
+>         if (auth_terrain_walkable(static_cast<AuthoringTerrain>(
+>                 auth.terrain_ids[y * w]))) ++edge_walkable;      // left
+>         if (auth_terrain_walkable(static_cast<AuthoringTerrain>(
+>                 auth.terrain_ids[y * w + w - 1]))) ++edge_walkable; // right
+>     }
+>     if (edge_walkable > w + h) // 超过一半的边缘可通行 → 警告
+>         vr.warnings.push_back("地图边缘" + std::to_string(edge_walkable)
+>             + "个格子可通行——单位可能走出地图");
+>
+>     // 规则 2：检测孤立 1×1 可通行小岛
+>     int isolated_count = 0;
+>     const int DIRS[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1}};
+>     for (int y = 0; y < h; ++y) {
+>         for (int x = 0; x < w; ++x) {
+>             auto t = static_cast<AuthoringTerrain>(auth.terrain_ids[y * w + x]);
+>             if (!auth_terrain_walkable(t)) continue;
+>             // 检查 8 邻域是否全部不可通行
+>             bool isolated = true;
+>             for (int d = 0; d < 8; ++d) {
+>                 int nx = x + DIRS[d][0], ny = y + DIRS[d][1];
+>                 if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+>                 if (auth_terrain_walkable(static_cast<AuthoringTerrain>(
+>                         auth.terrain_ids[ny * w + nx]))) {
+>                     isolated = false; break;
+>                 }
+>             }
+>             if (isolated) ++isolated_count;
+>         }
+>     }
+>     if (isolated_count > 0)
+>         vr.warnings.push_back("检测到" + std::to_string(isolated_count)
+>             + "个孤立可通行格子——可能是作者遗漏");
+>
+>     // 规则 3：可通行区域是否足够大？
+>     int total_walkable = 0;
+>     for (auto tid : auth.terrain_ids)
+>         if (auth_terrain_walkable(static_cast<AuthoringTerrain>(tid)))
+>             ++total_walkable;
+>     if (total_walkable < w * h / 4)
+>         vr.errors.push_back("可通行区域仅占" +
+>             std::to_string(100 * total_walkable / (w * h)) +
+>             "%，低于 25%——游戏可能无法正常寻路");
+>
+>     vr.passed = vr.errors.empty();
+>     return vr;
+> }
+> ```
+>
+> **在 `bake()` 中集成：**
+> ```cpp
+> BakeResult bake(const AuthoringData& auth, std::vector<uint8_t>& out_blob) {
+>     // 先验证
+>     auto validation = validate(auth);
+>     if (!validation.passed) {
+>         BakeResult result{};
+>         result.success = false;
+>         for (auto& e : validation.errors) result.error += e + "\n";
+>         return result;
+>     }
+>     for (auto& w : validation.warnings)
+>         std::cerr << "Baking warning: " << w << "\n";
+>
+>     // ... 原有烘焙逻辑 ...
+> }
+> ```
+
+> [!tip]- 练习 6 参考答案（mmap 加载，可选）
+> **Linux/macOS 实现：**
+> ```cpp
+> #include <sys/mman.h>
+> #include <sys/stat.h>
+> #include <fcntl.h>
+> #include <unistd.h>
+>
+> class MmapNavData {
+>     int fd_ = -1;
+>     void* mapped_ = nullptr;
+>     size_t file_size_ = 0;
+>     const BakedHeader* header_ = nullptr;
+>     const BakedCell* cells_ = nullptr;
+>
+> public:
+>     ~MmapNavData() { unload(); }
+>
+>     bool load(const char* file_path) {
+>         fd_ = open(file_path, O_RDONLY);
+>         if (fd_ < 0) return false;
+>
+>         struct stat st;
+>         if (fstat(fd_, &st) < 0) { close(fd_); return false; }
+>         file_size_ = st.st_size;
+>
+>         // 将整个文件映射到进程地址空间
+>         mapped_ = mmap(nullptr, file_size_, PROT_READ,
+>                        MAP_PRIVATE, fd_, 0);
+>         if (mapped_ == MAP_FAILED) { close(fd_); return false; }
+>
+>         // 可选：提示内核预读
+>         madvise(mapped_, file_size_, MADV_SEQUENTIAL);
+>
+>         header_ = static_cast<const BakedHeader*>(mapped_);
+>         cells_  = reinterpret_cast<const BakedCell*>(
+>             static_cast<const char*>(mapped_) + sizeof(BakedHeader));
+>
+>         return header_->magic == NAV_MAGIC;
+>     }
+>
+>     void unload() {
+>         if (mapped_) { munmap(mapped_, file_size_); mapped_ = nullptr; }
+>         if (fd_ >= 0)  { close(fd_); fd_ = -1; }
+>     }
+>
+>     bool walkable(uint32_t x, uint32_t y) const {
+>         return (cells_[y * header_->width + x].flags & 0x01) != 0;
+>     }
+>     float cost(uint32_t x, uint32_t y) const {
+>         return cells_[y * header_->width + x].cost;
+>     }
+> };
+> ```
+>
+> **Windows 实现（`MapViewOfFile`）：**
+> ```cpp
+> #include <windows.h>
+>
+> class MmapNavDataWin {
+>     HANDLE file_handle_ = INVALID_HANDLE_VALUE;
+>     HANDLE mapping_handle_ = nullptr;
+>     void* mapped_ = nullptr;
+>     // ... (类似 mmap 版本，用 CreateFileMapping + MapViewOfFile)
+> };
+> ```
+>
+> **核心优势：**
+> - 零拷贝——数据直接映射到页缓存，无 `memcpy`、无解析
+> - 延迟加载——操作系统按需调页（page fault），不用一次读完整个文件
+> - 多进程共享——同一文件的同一物理页可被多个游戏实例共享（节约 RAM）
+> - **注意事项：** mmap 映射的指针在文件被替换/截断后可能访问已释放内存→需在打开文件后 `flock` 加读锁
+
+> [!tip]- 练习 7 参考答案（多线程 Baking，可选）
+> 将地图按 chunk 分区，并行烘焙：
+>
+> ```cpp
+> #include <future>
+> #include <thread>
+>
+> BakeResult bake_parallel(const AuthoringData& auth,
+>                          std::vector<uint8_t>& out_blob) {
+>     constexpr int CHUNK_SIZE = 256;
+>     int chunks_x = (auth.width + CHUNK_SIZE - 1) / CHUNK_SIZE;
+>     int chunks_y = (auth.height + CHUNK_SIZE - 1) / CHUNK_SIZE;
+>     int total_chunks = chunks_x * chunks_y;
+>
+>     // 预分配输出 blob（包含 header 空间）
+>     size_t total_cells = auth.width * auth.height;
+>     size_t data_size = sizeof(BakedHeader) + total_cells * sizeof(BakedCell);
+>     out_blob.resize(data_size, 0);
+>
+>     // 写入 header
+>     auto* header = reinterpret_cast<BakedHeader*>(out_blob.data());
+>     header->magic = NAV_MAGIC;
+>     header->version = 1;
+>     header->width = auth.width;
+>     header->height = auth.height;
+>     // min_cost 最后统一计算
+>
+>     auto* cells = reinterpret_cast<BakedCell*>(
+>         out_blob.data() + sizeof(BakedHeader));
+>
+>     // 每个 chunk 一个异步任务
+>     std::vector<std::future<void>> futures;
+>     std::vector<BakeResult> chunk_results(total_chunks);
+>
+>     for (int cy = 0; cy < chunks_y; ++cy) {
+>         for (int cx = 0; cx < chunks_x; ++cx) {
+>             int ci = cy * chunks_x + cx;
+>             futures.push_back(std::async(std::launch::async,
+>                 [&, ci, cx, cy]() {
+>                     BakeResult& r = chunk_results[ci];
+>                     int x0 = cx * CHUNK_SIZE;
+>                     int y0 = cy * CHUNK_SIZE;
+>                     int x1 = std::min(x0 + CHUNK_SIZE, auth.width);
+>                     int y1 = std::min(y0 + CHUNK_SIZE, auth.height);
+>
+>                     double local_min_cost = std::numeric_limits<double>::max();
+>                     for (int y = y0; y < y1; ++y) {
+>                         for (int x = x0; x < x1; ++x) {
+>                             size_t idx = y * auth.width + x;
+>                             auto terrain = static_cast<AuthoringTerrain>(
+>                                 auth.terrain_ids[idx]);
+>                             bool walkable = auth_terrain_walkable(terrain);
+>                             double cost = auth_terrain_cost(terrain);
+>
+>                             cells[idx].cost  = static_cast<float>(cost);
+>                             cells[idx].flags = walkable ? 0x01 : 0x00;
+>
+>                             if (walkable) {
+>                                 r.walkable_cells++;
+>                                 if (cost < local_min_cost) local_min_cost = cost;
+>                             } else {
+>                                 r.unwalkable_cells++;
+>                             }
+>                         }
+>                     }
+>                     r.success = true;
+>                 }));
+>         }
+>     }
+>
+>     // 等待所有 chunk 完成
+>     for (auto& f : futures) f.get();
+>
+>     // 合并结果：汇总统计、计算全局 min_cost
+>     BakeResult merged{true};
+>     double global_min = std::numeric_limits<double>::max();
+>     for (auto& cr : chunk_results) {
+>         if (!cr.success) { merged.success = false; continue; }
+>         merged.walkable_cells += cr.walkable_cells;
+>         merged.unwalkable_cells += cr.unwalkable_cells;
+>     }
+>     merged.baked_bytes = data_size;
+>
+>     // 最终的 min_cost 需要遍历（各 chunk 的局部 min 的最小值）
+>     // TODO: 从 chunk_results 收集各自的 local_min_cost 取全局最小值
+>     return merged;
+> }
+> ```
+>
+> **关键点：**
+> - 每个 chunk 写入独立的 `cells[idx]` 区域，无数据竞争（归并写入到预分配数组的不同偏移）
+> - `std::async` 按 chunk 分区，数量 = CPU 核数时效率最优
+> - **速度提升**：N 核理论加速 N 倍，实际约 0.7N–0.85N（受内存带宽限制）
+> - **内存布局关键**：按 `y` 顺序遍历（缓存友好），chunk 按 256×256 划分（一页 4KB 内紧密排列）
+> - **合并阶段的 min_cost** 可存储在每个 chunk_result 的 `local_min_cost` 字段中，最后取 `min()`
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Recast Navigation**：`Recast` 是 NavMesh 的 baking 工具链，其 `rcConfig` 中的 `baking` 参数是理解 baking 概念的最佳实践。读 `RecastDemo` 的 `Sample_SoloMesh::handleBuild()` 流程：体素化→过滤→区域→轮廓→多边形网格。

@@ -886,6 +886,376 @@ public interface ILogWriter   // Bridge 的 Implementation
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using System;
+>
+> // ============================================
+> // Triangle — 扩展 Bridge 的 Abstraction 维度
+> // ============================================
+> public class Triangle : Shape
+> {
+>     private readonly double _a, _b, _c;
+>
+>     public Triangle(IRenderer renderer, double a, double b, double c)
+>         : base(renderer)
+>     {
+>         _a = a; _b = b; _c = c;
+>     }
+>
+>     protected override string Name =>
+>         $"三角形 (a={_a}, b={_b}, c={_c})";
+>
+>     protected override void DrawShape() =>
+>         Renderer.RenderTriangle(_a, _b, _c);
+> }
+>
+> // ============================================
+> // OpenGLRenderer — 扩展 Bridge 的 Implementation 维度
+> // ============================================
+> public class OpenGLRenderer : IRenderer
+> {
+>     public void RenderCircle(double radius)
+>         => Console.WriteLine(
+>             $"  [OpenGL] 绘制圆形 (r={radius}) — glDrawArrays + GL_TRIANGLE_FAN");
+>
+>     public void RenderRectangle(double width, double height)
+>         => Console.WriteLine(
+>             $"  [OpenGL] 绘制矩形 ({width}×{height}) — glDrawArrays + GL_TRIANGLE_STRIP");
+>
+>     public void RenderTriangle(double a, double b, double c)
+>         => Console.WriteLine(
+>             $"  [OpenGL] 绘制三角形 ({a},{b},{c}) — glDrawArrays + GL_TRIANGLES");
+> }
+>
+>
+> // ============================================
+> // 验证：Triangle × 全部 3 种 Renderer 组合
+> // ============================================
+> static void TestExercise1()
+> {
+>     IRenderer vector = new VectorRenderer();
+>     IRenderer raster = new RasterRenderer();
+>     IRenderer openGL = new OpenGLRenderer();
+>
+>     Shape[] shapes =
+>     {
+>         new Triangle(vector, 3, 4, 5),
+>         new Triangle(raster, 5, 6, 7),
+>         new Triangle(openGL, 6, 8, 10),
+>     };
+>
+>     foreach (var shape in shapes)
+>         shape.Draw();
+>
+>     Console.WriteLine();
+>     Console.WriteLine("新增 2 个类 — Shape 基类零改动");
+>     Console.WriteLine("3 种 Shape × 3 种 Renderer = 9 种组合");
+>     Console.WriteLine("仅需: 1+3+1+3+3 = 11 个类型声明");
+>     Console.WriteLine("若用继承: 9 个具体类（Circle+Rectangle+Triangle × Vector+Raster+OpenGL）");
+> }
+> ```
+> **验证点：**
+> 1. `Triangle` 只依赖 `IRenderer` 接口，不关心具体是哪种 Renderer
+> 2. `OpenGLRenderer` 只实现 `IRenderer` 契约，不关心被哪个 Shape 调用
+> 3. 新增两个维度各增加一个类，原有代码（`Shape`、`Circle`、`Rectangle`、`VectorRenderer`、`RasterRenderer`）**一行不改**
+> 4. 这就是 Bridge 的核心收益：两个维度独立扩展，笛卡尔积组合在运行时通过构造函数完成
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // Message 数据类
+> // ============================================
+> public record Message(string Recipient, string Title, string Body);
+>
+> // ============================================
+> // Bridge 的 Implementation：发送渠道（ISender）
+> // ============================================
+> public class EmailSender : ISender
+> {
+>     public void Send(string recipient, string title, string body)
+>     {
+>         Console.WriteLine($"[Email] To: {recipient}");
+>         Console.WriteLine($"         Subject: {title}");
+>         Console.WriteLine($"         Body: {body}");
+>     }
+> }
+>
+> public class SmsSender : ISender
+> {
+>     public void Send(string recipient, string title, string body)
+>     {
+>         // SMS 没有 Title 的概念 — 不同渠道的差异由 Bridge 隔离
+>         Console.WriteLine($"[SMS]  To: {recipient}");
+>         Console.WriteLine($"        Text: [{title}] {body}");
+>     }
+> }
+>
+> // ============================================
+> // Strategy：发送策略（ISendStrategy）
+> // ============================================
+>
+> /// <summary>立即发送策略 — 逐条立即发送</summary>
+> public class ImmediateStrategy : ISendStrategy
+> {
+>     public void Execute(ISender sender, IReadOnlyList<Message> messages)
+>     {
+>         Console.WriteLine("--- 即时发送策略 ---");
+>         foreach (var msg in messages)
+>         {
+>             sender.Send(msg.Recipient, msg.Title, msg.Body);
+>         }
+>     }
+> }
+>
+> /// <summary>批量发送策略 — 攒够 batchSize 条后统一发送</summary>
+> public class BatchStrategy : ISendStrategy
+> {
+>     private readonly int _batchSize;
+>
+>     public BatchStrategy(int batchSize = 5)
+>     {
+>         if (batchSize < 1)
+>             throw new ArgumentOutOfRangeException(nameof(batchSize));
+>         _batchSize = batchSize;
+>     }
+>
+>     public void Execute(ISender sender, IReadOnlyList<Message> messages)
+>     {
+>         Console.WriteLine($"--- 批量发送策略 (batchSize={_batchSize}) ---");
+>         for (int i = 0; i < messages.Count; i += _batchSize)
+>         {
+>             var batch = messages
+>                 .Skip(i)
+>                 .Take(_batchSize)
+>                 .ToList();
+>
+>             Console.WriteLine($"  [批次 {i / _batchSize + 1}] 发送 {batch.Count} 条:");
+>             foreach (var msg in batch)
+>             {
+>                 sender.Send(msg.Recipient, msg.Title, msg.Body);
+>             }
+>         }
+>     }
+> }
+>
+> // ============================================
+> // NotificationDispatcher: Bridge Abstraction + Strategy
+> // ============================================
+> public class NotificationDispatcher
+> {
+>     private readonly ISendStrategy _strategy; // Strategy — 如何发
+>     private readonly ISender _sender;         // Bridge Implementation — 用什么发
+>
+>     public NotificationDispatcher(ISendStrategy strategy, ISender sender)
+>     {
+>         _strategy = strategy ?? throw new ArgumentNullException(nameof(strategy));
+>         _sender = sender ?? throw new ArgumentNullException(nameof(sender));
+>     }
+>
+>     public void Dispatch(IReadOnlyList<Message> messages)
+>     {
+>         _strategy.Execute(_sender, messages);
+>     }
+> }
+>
+>
+> // ============================================
+> // 验证：Strategy × Sender 笛卡尔积组合
+> // ============================================
+> static void TestExercise2()
+> {
+>     var messages = new List<Message>
+>     {
+>         new("alice@corp.com", "会议通知", "明天 10:00 开会"),
+>         new("bob@corp.com",   "系统维护", "今晚 22:00 维护"),
+>         new("13900001111",    "验证码",   "您的验证码: 8842"),
+>         new("13900002222",    "物流通知", "快递已发出"),
+>         new("carol@corp.com", "周报提醒", "请提交本周周报"),
+>         new("13900003333",    "扣款通知", "本月扣款 ¥59.9"),
+>         new("dave@corp.com",  "安全告警", "检测到异常登录"),
+>     };
+>
+>     Console.WriteLine("===== 组合 1: ImmediateStrategy × SmsSender =====");
+>     new NotificationDispatcher(
+>         new ImmediateStrategy(), new SmsSender()
+>     ).Dispatch(messages);
+>
+>     Console.WriteLine("\n===== 组合 2: BatchStrategy × EmailSender =====");
+>     new NotificationDispatcher(
+>         new BatchStrategy(batchSize: 3), new EmailSender()
+>     ).Dispatch(messages);
+> }
+> ```
+> **设计要点：**
+> - **Bridge 维度**：`ISender`（Email / SMS）— 两种发送渠道，未来可以加 `WeChatSender` 而不影响 Strategy 层
+> - **Strategy 维度**：`ISendStrategy`（Immediate / Batch）— 两种发送方式，未来可以加 `ThrottledStrategy` 而不影响 Sender 层
+> - `NotificationDispatcher` 是 Bridge 的 Abstraction：它持有 `ISender`（Implementation），同时持有 `ISendStrategy`（Strategy）——两者同时解耦
+> - 关键区别记忆：Bridge 分离"不同种类的东西"（渠道 vs 是否渠道相关）；Strategy 分离"同种东西的不同做法"（怎么发）
+
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.IO;
+>
+> // ============================================
+> // 第三方旧库（不可修改）— Adaptee
+> // ============================================
+> public class LegacyFileLogger
+> {
+>     private readonly string _filePath;
+>
+>     public LegacyFileLogger(string filePath) => _filePath = filePath;
+>
+>     public void WriteLine(string text)
+>     {
+>         File.AppendAllText(_filePath, text + Environment.NewLine);
+>         Console.WriteLine($"[LegacyFile] {text}");
+>     }
+>
+>     public void Flush()
+>     {
+>         Console.WriteLine("[LegacyFile] 缓冲区已刷新");
+>     }
+> }
+>
+> // ============================================
+> // Bridge 的 Implementation 接口
+> // ============================================
+> public interface ILogWriter
+> {
+>     void WriteLog(string level, string message);
+> }
+>
+> // ============================================
+> // 原生 Bridge Implementation: ConsoleLogWriter
+> // ============================================
+> public class ConsoleLogWriter : ILogWriter
+> {
+>     public void WriteLog(string level, string message)
+>     {
+>         var color = level switch
+>         {
+>             "ERROR" => ConsoleColor.Red,
+>             "WARN"  => ConsoleColor.Yellow,
+>             _       => ConsoleColor.Gray
+>         };
+>         Console.ForegroundColor = color;
+>         Console.WriteLine($"[{level}] {DateTime.Now:HH:mm:ss} {message}");
+>         Console.ResetColor();
+>     }
+> }
+>
+> // ============================================
+> // 原生 Bridge Implementation: DatabaseLogWriter
+> // ============================================
+> public class DatabaseLogWriter : ILogWriter
+> {
+>     public void WriteLog(string level, string message)
+>     {
+>         // 真实项目中会写入数据库，这里模拟
+>         Console.WriteLine($"[DB] INSERT INTO Logs VALUES ('{level}', '{message}', '{DateTime.Now:O}')");
+>     }
+> }
+>
+> // ============================================
+> // Adapter: 将 LegacyFileLogger 适配为 ILogWriter
+> // ============================================
+> public class LegacyFileLoggerAdapter : ILogWriter
+> {
+>     private readonly LegacyFileLogger _adaptee;
+>
+>     public LegacyFileLoggerAdapter(LegacyFileLogger adaptee)
+>     {
+>         _adaptee = adaptee ?? throw new ArgumentNullException(nameof(adaptee));
+>     }
+>
+>     public void WriteLog(string level, string message)
+>     {
+>         // Adapter 的职责：参数映射 + 格式转换
+>         _adaptee.WriteLine($"[{level}] {DateTime.Now:HH:mm:ss} {message}");
+>         _adaptee.Flush();
+>     }
+> }
+>
+> // ============================================
+> // Bridge 的 Abstraction: Logger
+> // ============================================
+> public interface ILogger
+> {
+>     void Info(string message);
+>     void Warn(string message);
+>     void Error(string message);
+> }
+>
+> public class Logger : ILogger
+> {
+>     private readonly ILogWriter _writer;
+>
+>     public Logger(ILogWriter writer)
+>     {
+>         _writer = writer ?? throw new ArgumentNullException(nameof(writer));
+>     }
+>
+>     public void Info(string message)  => _writer.WriteLog("INFO", message);
+>     public void Warn(string message)  => _writer.WriteLog("WARN", message);
+>     public void Error(string message) => _writer.WriteLog("ERROR", message);
+> }
+>
+>
+> // ============================================
+> // 验证：Bridge vs Adapter 的组合使用
+> // ============================================
+> static void TestExercise3()
+> {
+>     Console.WriteLine("===== 原生 Bridge: ConsoleLogWriter =====");
+>     // ConsoleLogWriter 是为 ILogWriter 接口设计的 → 纯 Bridge
+>     ILogger consoleLogger = new Logger(new ConsoleLogWriter());
+>     consoleLogger.Info("系统启动");
+>     consoleLogger.Error("数据库连接失败");
+>
+>     Console.WriteLine("\n===== 原生 Bridge: DatabaseLogWriter =====");
+>     ILogger dbLogger = new Logger(new DatabaseLogWriter());
+>     dbLogger.Warn("磁盘使用率 85%");
+>
+>     Console.WriteLine("\n===== Bridge + Adapter 组合: LegacyFileLogger =====");
+>     // LegacyFileLogger 不是为 ILogWriter 设计的 → 需要 Adapter 桥接
+>     var legacyFileLogger = new LegacyFileLogger("app.log");
+>     ILogger hybridLogger = new Logger(
+>         new LegacyFileLoggerAdapter(legacyFileLogger));
+>     hybridLogger.Info("通过 Adapter 写入文件日志");
+>     hybridLogger.Error("严重错误 — 已写入文件");
+>
+>     Console.WriteLine("\n===== 关键分析 =====");
+>     Console.WriteLine("ConsoleLogWriter / DatabaseLogWriter:");
+>     Console.WriteLine("  → 天生为 ILogWriter 设计 → 纯 Bridge");
+>     Console.WriteLine("LegacyFileLoggerAdapter:");
+>     Console.WriteLine("  → LegacyFileLogger 不是为 ILogWriter 设计");
+>     Console.WriteLine("  → Adapter 负责接口转换: WriteLine + Flush → WriteLog");
+>     Console.WriteLine("Logger (Bridge Abstraction):");
+>     Console.WriteLine("  → 对所有 ILogWriter 一视同仁");
+>     Console.WriteLine("  → 不知道背后是原生实现还是 Adapter 包装");
+> }
+> ```
+> **关键分析：**
+> 1. **ConsoleLogWriter** 是 Bridge 的 Implementation —— 它**天生为 `ILogWriter` 而设计**，接口方法名、参数语义完全匹配
+> 2. **LegacyFileLoggerAdapter** 是 Adapter —— `LegacyFileLogger` **不是为了 `ILogWriter` 而设计的**（它只有 `WriteLine` + `Flush`），是后期适配的
+> 3. 两者在 `Logger`（Bridge Abstraction）看来**完全一样**：都实现了 `ILogWriter`，都可以通过构造函数注入
+> 4. **Bridge 解决"多实现如何共存"**（Console / DB / File 三个 Writer 各自独立变化）、**Adapter 解决"不兼容的旧实现如何接入"**（`LegacyFileLogger` 加入 Bridge 体系）
+> 5. 两者可以组合：`Logger`（Abstraction）← `LegacyFileLoggerAdapter`（Adapter）← `LegacyFileLogger`（Adaptee）— 适配器成了桥的一部分
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
+
 ## 4. 扩展阅读
 
 - [[08-structural-intro|结构型模式总览]] — 理解结构型模式分类和 Bridge 在其中的定位

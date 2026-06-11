@@ -1074,6 +1074,277 @@ private struct PlayerState
 // }
 ```
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1：补全计分板 UI
+> #### PlayerHUD 实现
+>
+> ```csharp
+> // PlayerHUD.cs — 挂载在 Canvas 上
+> public class PlayerHUD : NetworkBehaviour
+> {
+>     [Header("UI 引用")]
+>     [SerializeField] private Slider _healthBar;
+>     [SerializeField] private TMP_Text _ammoText;
+>     [SerializeField] private TMP_Text _killsText;
+>     [SerializeField] private TMP_Text _deathsText;
+>
+>     // 非 Owner 隐藏整个 Canvas
+>     private Canvas _canvas;
+>
+>     public override void OnNetworkSpawn()
+>     {
+>         base.OnNetworkSpawn();
+>         _canvas = GetComponent<Canvas>();
+>
+>         if (!IsOwner)
+>         {
+>             _canvas.enabled = false;  // 远程玩家的 UI 不可见
+>             return;
+>         }
+>
+>         // 订阅本地玩家的数据变化
+>         var health = GetComponentInParent<HealthSystem>();
+>         if (health != null)
+>             health.OnHealthChanged += UpdateHealthBar;
+>
+>         var shooting = GetComponentInParent<ShootingSystem>();
+>         if (shooting != null)
+>         {
+>             shooting._ammo.OnValueChanged += (prev, curr) =>
+>                 _ammoText.text = $"{curr}/{shooting._maxAmmo.Value}";
+>             shooting._maxAmmo.OnValueChanged += (prev, curr) =>
+>                 _ammoText.text = $"{shooting._ammo.Value}/{curr}";
+>         }
+>
+>         // 击杀/死亡 —— 需在 ShootingSystem 或独立的 StatsSystem 中添加 NetworkVariable
+>         var stats = GetComponentInParent<PlayerStats>();
+>         if (stats != null)
+>         {
+>             stats._kills.OnValueChanged += (prev, curr) => _killsText.text = curr.ToString();
+>             stats._deaths.OnValueChanged += (prev, curr) => _deathsText.text = curr.ToString();
+>         }
+>     }
+>
+>     void UpdateHealthBar(int currentHp, int maxHp)
+>     {
+>         _healthBar.value = (float)currentHp / maxHp;
+>     }
+> }
+> ```
+>
+> #### ShootingSystem 添加弹药 NetworkVariable
+>
+> ```csharp
+> public class ShootingSystem : NetworkBehaviour
+> {
+>     public NetworkVariable<int> _ammo = new(writePerm: NetworkVariableWritePermission.Server);
+>     public NetworkVariable<int> _maxAmmo = new(30, writePerm: NetworkVariableWritePermission.Server);
+>
+>     [ServerRpc]
+>     void RequestFireServerRpc(Vector3 origin, Vector3 direction)
+>     {
+>         if (_ammo.Value <= 0) return;
+>         _ammo.Value--;
+>         // ... 射线检测与伤害 ...
+>     }
+> }
+> ```
+>
+> #### PlayerStats 添加击杀/死亡 NetworkVariable
+>
+> ```csharp
+> public class PlayerStats : NetworkBehaviour
+> {
+>     public NetworkVariable<int> _kills = new(writePerm: NetworkVariableWritePermission.Server);
+>     public NetworkVariable<int> _deaths = new(writePerm: NetworkVariableWritePermission.Server);
+>
+>     [ServerRpc(RequireOwnership = false)]
+>     public void ReportKillServerRpc(ulong victimId)
+>     {
+>         _kills.Value++;
+>         // 通知受害者增加死亡数 → 在 HealthSystem.TakeDamage 中处理
+>     }
+> }
+> ```
+>
+> #### 关键设计点
+> - **UI 过滤**：`IsOwner` 控制整个 Canvas 的 `enabled`，而非单个 UI 元素。这比逐个隐藏更简洁、性能更好。
+> - **NetworkVariable 订阅**：`OnValueChanged` 在值变化时自动触发，无需手动轮询。注意：初始值不会触发回调，所以需要在 `OnNetworkSpawn` 中手动设置一次初始值。
+> - **弹药同步方向**：`_ammo` 的 WritePermission 设为 Server——客户端不能直接修改，只能通过 `RequestFireServerRpc` 请求服务器扣减。这是反外挂的基础。
+>
+> #### 验证
+> 两个客户端连接后：各自 HUD 显示自己的血量和弹药。客户端 A 射击客户端 B → B 的血条减少，A 的弹药减少。击杀数正确累积。
+
+> [!tip]- 练习 2：基于历史缓冲区的延迟补偿
+> #### 服务器端位置历史
+>
+> ```csharp
+> // LagCompensationSystem.cs — 服务器端专用（IsServer 检查）
+> public class LagCompensationSystem : NetworkBehaviour
+> {
+>     // 每个玩家维护最近 60 帧的位置历史
+>     private Dictionary<ulong, Queue<(float serverTime, Vector3 position)>> _history = new();
+>     private const int MAX_HISTORY = 60;
+>     private const float HISTORY_DURATION = 2.0f; // 覆盖 2 秒的历史
+>
+>     void FixedUpdate()
+>     {
+>         if (!IsServer) return;
+>         foreach (var kvp in _history)
+>         {
+>             kvp.Value.Enqueue((Time.time, GetPlayerPosition(kvp.Key)));
+>             // 清理过期帧
+>             while (kvp.Value.Count > 0 &&
+>                    Time.time - kvp.Value.Peek().serverTime > HISTORY_DURATION)
+>                 kvp.Value.Dequeue();
+>         }
+>     }
+>
+>     /// <summary>
+>     /// 根据客户端发送的 serverTime 倒推目标在该时刻的位置
+>     /// </summary>
+>     public bool TryGetRewoundPosition(ulong targetId, float clientServerTime,
+>         out Vector3 rewoundPos)
+>     {
+>         rewoundPos = Vector3.zero;
+>         if (!_history.TryGetValue(targetId, out var queue)) return false;
+>
+>         // RTT 估算（简化：直接用当前时间减去客户端时间戳）
+>         float rtt = Time.time - clientServerTime;
+>         float lookbackTime = Time.time - rtt / 2f; // 目标在过去时刻的位置
+>
+>         // 在历史队列中找到最接近的时间点（二分查找更精确，此处用线性扫描）
+>         (float serverTime, Vector3 position) best = default;
+>         float bestDiff = float.MaxValue;
+>         foreach (var entry in queue)
+>         {
+>             float diff = Mathf.Abs(entry.serverTime - lookbackTime);
+>             if (diff < bestDiff) { bestDiff = diff; best = entry; }
+>         }
+>
+>         rewoundPos = best.position;
+>         return bestDiff < 0.1f; // 找到的记录偏差 < 100ms 才算有效
+>     }
+> }
+> ```
+>
+> #### ShootingSystem 修改
+>
+> ```csharp
+> [ServerRpc]
+> void RequestFireServerRpc(Vector3 origin, Vector3 direction, float clientServerTime)
+> {
+>     // 用倒推位置做射线检测，而非当前位置
+>     if (_lagComp.TryGetRewoundPosition(targetId, clientServerTime, out Vector3 rewound))
+>     {
+>         Ray ray = new Ray(origin, direction);
+>         // 将目标碰撞体临时移动到倒推位置（或直接做数学检测）
+>         Vector3 savedPos = target.transform.position;
+>         target.transform.position = rewound;
+>         if (Physics.Raycast(ray, out RaycastHit hit, _range, _hitMask))
+>             hit.collider.GetComponent<HealthSystem>()?.TakeDamage(_damage);
+>         target.transform.position = savedPos; // 恢复
+>     }
+> }
+> ```
+>
+> #### 效果分析
+>
+> | 延迟 | 无补偿命中率（体感） | 有补偿命中率（体感） |
+> |------|-------------------|-------------------|
+> | 50ms | ~95%（误差可忽略） | ~98% |
+> | 100ms | ~80%（开始感觉到打不中） | ~95% |
+> | 200ms | ~50%（明显"瞄中打不中"） | ~88% |
+>
+> **关键认知**：延迟补偿不能消除延迟，只能让**命中判定**与**客户端视角**一致。200ms 延迟下，玩家仍然会感到"按下鼠标到看到火花"的延迟——补偿只解决了"明明瞄准了为什么没掉血"的挫败感。
+
+> [!tip]- 练习 3：完整的预测回滚和解系统
+> #### 核心实现
+>
+> ```csharp
+> // 添加到 PlayerController
+> private struct PlayerState
+> {
+>     public uint Tick;
+>     public Vector3 Position;
+>     public Vector3 Velocity;
+>     public Vector3 InputDirection;
+> }
+> private Queue<PlayerState> _stateHistory = new(); // 待确认的预测帧
+>
+> // 在 Update 中记录每帧预测状态（IsOwner 分支内）
+> void RecordPrediction()
+> {
+>     _stateHistory.Enqueue(new PlayerState
+>     {
+>         Tick = _inputTick,
+>         Position = transform.position,
+>         Velocity = _verticalVelocity,
+>         InputDirection = GetInputDirection()
+>     });
+>     while (_stateHistory.Count > MAX_PENDING) _stateHistory.Dequeue();
+> }
+>
+> // 收到服务器权威位置时调用（替代 OnServerPositionChanged 的简单赋值）
+> void Reconcile(Vector3 serverPos, uint serverAckedTick)
+> {
+>     // 1. 清理已确认的旧状态（Tick <= serverAckedTick）
+>     while (_stateHistory.Count > 0 && _stateHistory.Peek().Tick <= serverAckedTick)
+>         _stateHistory.Dequeue();
+>
+>     if (_stateHistory.Count == 0) return; // 没有待重放的帧
+>
+>     // 2. 计算误差：服务器 ackedTick 对应的预测位置 vs 服务器位置
+>     // 注意：ackedTick 对应的状态在 Dequeue 时已经被移除了
+>     // 所以此处用当前队列中最早的帧位置作为"刚被确认帧"的预测位置
+>     Vector3 predictedAtAck = _stateHistory.Count > 0
+>         ? _stateHistory.Peek().Position : transform.position;
+>     Vector3 error = serverPos - predictedAtAck;
+>     float errorMag = error.magnitude;
+>
+>     // 3. Hard vs Soft 决策
+>     if (errorMag > 2.0f)
+>     {
+>         // 硬修正：直接设位置 + 清空历史（之前的预测全错）
+>         transform.position = serverPos;
+>         _stateHistory.Clear();
+>     }
+>     else if (errorMag > 0.1f)
+>     {
+>         // 回滚重放：重置到服务器位置，重放所有未确认输入
+>         Vector3 savedPos = transform.position;
+>         transform.position = serverPos;
+>
+>         foreach (var state in _stateHistory)
+>         {
+>             // 使用与原始预测完全相同的输入和 deltaTime
+>             Vector3 move = state.InputDirection * _moveSpeed * Time.fixedDeltaTime;
+>             _verticalVelocity.y += _gravity * Time.fixedDeltaTime;
+>             _controller.Move(move + _verticalVelocity * Time.fixedDeltaTime);
+>         }
+>     }
+>     else
+>     {
+>         // 小误差 → 平滑 Lerp（不改动状态历史，只做视觉修正）
+>         transform.position = Vector3.Lerp(
+>             transform.position, serverPos, 0.1f);
+>     }
+> }
+> ```
+>
+> #### 关键设计决策
+> - **确定性重放**：重放时必须使用相同的 `Time.fixedDeltaTime`，不能使用 `Time.deltaTime`（渲染帧间隔不可预测）。
+> - **硬修正触发条件**：误差 > 2m 意味着发生了严重的不一致（如被击退、被传送）；继续平滑修正只会延长不一致的时间，对游戏性有害。
+> - **平滑修正 vs 硬修正**：平滑修正的视觉体验好但修正期间玩家实际位置不准确。对于 0.1m 级的误差，玩家无法感知，可以缓慢修正而不影响游戏性。但对于穿墙检测等逻辑，应该用服务器位置而非显示位置。
+> - **为什么硬修正在穿墙/外挂场景更好**：如果外挂修改了客户端位置，平滑修正确实会让它慢慢"滑回"正确位置——但在此期间外挂可能已经利用瞬移获得了优势（如捡起道具、穿越障碍物）。硬修正可以立即阻止这种行为。
+
+> [!note] 答案使用方式
+> 以上参考答案提供的是**实现思路和关键代码片段**。建议：
+>
+> - 练习 1 的 HUD 实现中，注意 `NetworkVariable.OnValueChanged` 不会在订阅时触发初始值——需要在 `OnNetworkSpawn` 中手动刷新一次 UI
+> - 练习 2 的位置历史应使用环形缓冲区（而非 Queue + Dequeue），以减少 GC 分配。生产代码中建议用 `FixedSizeQueue<T>` 或原生数组 + head/tail 指针
+> - 练习 3 的 `Reconcile` 是客户端预测系统的核心——Valve 的 Source 引擎、UE 的 CMC、Overwatch 的状态同步都基于相同的"回滚+重放"原理。理解它你就理解了网络同步的基石
 ---
 
 ## 4. 扩展阅读

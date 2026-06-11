@@ -501,6 +501,177 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **计算步骤：**
+>
+> 使用屏幕覆盖率公式：
+> ```
+> 屏幕覆盖率 = (物体包围球半径 × 2 / 距离) × (屏幕高度 / (2 × tan(FOV/2)))
+>           = (2.4 / 距离) × (1080 / (2 × tan(30°)))
+>           = (2.4 / 距离) × (1080 / 1.1547)
+>           = (2.4 / 距离) × 935.3
+>           = 2244.7 / 距离
+> ```
+>
+> 反解距离：
+> ```
+> 距离 = 2244.7 / 覆盖率
+> ```
+>
+> | LOD 切换点 | 覆盖率 | 计算 | 距离 |
+> |-----------|--------|------|------|
+> | LOD0 → LOD1 | 20% = 0.20 | 2244.7 / 0.20 | **11.2 米** |
+> | LOD1 → LOD2 | 8% = 0.08 | 2244.7 / 0.08 | **28.1 米** |
+> | LOD2 → 剔除 | 2% = 0.02 | 2244.7 / 0.02 | **112.2 米** |
+>
+> **验证**：
+> - 距离 11.2m 时覆盖率 = 2244.7/11.2/1080 ≈ 0.186 ≈ 18.6% ≈ 20% ✓
+> - 距离 28.1m 时覆盖率 = 2244.7/28.1/1080 ≈ 0.074 ≈ 7.4% ≈ 8% ✓
+> - 距离 112.2m 时覆盖率 = 2244.7/112.2/1080 ≈ 0.0185 ≈ 1.85% ≈ 2% ✓
+>
+> **实用建议**：这个距离基于纯几何覆盖率。实际项目中还需要考虑：
+> - 屏幕分辨率越高，切换距离越远（4K 屏幕覆盖率需求更大）
+> - FOV 变化（瞄准镜放大 FOV→切换距离也变化）
+> - 在实际项目中通常会在计算结果上叠加 ±15-20% 的容差
+
+> [!tip]- 练习 2 参考答案
+> **使用 RenderDoc 分析 LOD 的步骤：**
+>
+> 1. **捕获一帧**：
+>    - 打开 RenderDoc，Launch 目标游戏
+>    - 选择一个有开阔视野的场景（如开放世界的山顶俯视）
+>    - 按 F12 捕获
+>
+> 2. **在 Event Browser 中识别 LOD**：
+>    - 按 Draw Call 排序，找使用相同 Material 但不同 Mesh 的 Draw Call
+>    - 同一个资产的 LOD 层级通常有命名规律：`SM_Tree_LOD0`, `SM_Tree_LOD1`, `SM_Tree_LOD2`
+>    - 在 Mesh Viewer 中查看三角形数量来确认 LOD 级别
+>
+> 3. **统计 LOD 分布**：
+>    - 筛选所有带 `LOD` 后缀的 Draw Call
+>    - 按 LOD 级别分组统计数量
+>    - 典型分布：LOD0 ~15%, LOD1 ~35%, LOD2 ~30%, LOD3 ~20%（取决于摄像机位置和场景密度）
+>
+> 4. **异常检测**：
+>    - 距离摄像机 5 米的物体用了 LOD2（切换距离设置过大）
+>    - 距离摄像机 200 米的物体用了 LOD0（没有 LOD 或切换距离过小）
+>    - UI/武器模型用了 LOD → 这些物体永远近距离，不应有 LOD
+>
+> 5. **判断标准**：
+>    - 好的 LOD 配置：近处物体高精度，远处物体低精度，切换点不可见
+>    - 差的 LOD 配置：LOD 级别分布与距离不相关、大量物体无 LOD、切换 pop-in 明显
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // lod_alpha_transition.cpp — LOD Alpha Fade 过渡实现
+> // 编译: g++ -std=c++17 lod_alpha_transition.cpp -o lod_trans && ./lod_trans
+> #include <iostream>
+> #include <cmath>
+> #include <iomanip>
+>
+> struct LODTransitionResult {
+>     int lod_current;     // 当前主要 LOD 级别
+>     int lod_next;        // 过渡目标 LOD 级别
+>     float alpha_current; // 当前 LOD 的 alpha (1.0 = 完全不透明)
+>     float alpha_next;    // 下一级 LOD 的 alpha
+>     int extra_draw_call; // 过渡期间的额外 Draw Call
+> };
+>
+> LODTransitionResult ComputeLODTransition(
+>     float distance,              // 当前距离
+>     float transition_distance,   // 切换点距离
+>     float transition_band_pct = 0.20f) // 过渡带宽（±20%）
+> {
+>     LODTransitionResult r = {};
+>     r.extra_draw_call = 0;
+>
+>     float band_half = transition_distance * transition_band_pct;
+>     float band_start = transition_distance - band_half;
+>     float band_end   = transition_distance + band_half;
+>
+>     if (distance < band_start) {
+>         // 完全在 LOD 当前级别内
+>         r.lod_current = 0;
+>         r.lod_next = -1;
+>         r.alpha_current = 1.0;
+>         r.alpha_next = 0.0;
+>     } else if (distance > band_end) {
+>         // 完全过渡到下一级 LOD
+>         r.lod_current = 1;
+>         r.lod_next = -1;
+>         r.alpha_current = 1.0;
+>         r.alpha_next = 0.0;
+>     } else {
+>         // 在过渡带内：同时渲染两级 LOD
+>         r.lod_current = 0;
+>         r.lod_next = 1;
+>         r.extra_draw_call = 1; // 额外渲染一级 LOD
+>
+>         // 计算过渡系数 t (0→1)
+>         float t = (distance - band_start) / (band_end - band_start);
+>         // 使用 smoothstep 让过渡更自然
+>         float st = t * t * (3.0f - 2.0f * t);
+>
+>         r.alpha_current = 1.0f - st; // LOD0 逐渐变透明
+>         r.alpha_next    = st;        // LOD1 逐渐变不透明
+>     }
+>
+>     return r;
+> }
+>
+> // GLSL 中的使用:
+> // vec4 finalColor = mix(LOD0_color, LOD1_color, transition_alpha);
+>
+> int main() {
+>     std::cout << "========== LOD Alpha Fade 过渡分析 ==========\n\n";
+>
+>     const float SWITCH_DIST = 30.0f; // LOD0→LOD1 切换点 30 米
+>     const float BAND_PCT = 0.20f;    // ±20% = 24m~36m 过渡带
+>
+>     std::cout << "切换点: " << SWITCH_DIST << "m | 过渡带: ±"
+>               << (int)(BAND_PCT * 100) << "% (" << SWITCH_DIST * (1-BAND_PCT)
+>               << "m ~ " << SWITCH_DIST * (1+BAND_PCT) << "m)\n\n";
+>
+>     std::cout << std::setw(8) << "距离" << std::setw(10) << "LOD0 α"
+>               << std::setw(10) << "LOD1 α" << std::setw(12) << "额外 Draw Call\n";
+>     std::cout << std::string(40, '-') << "\n";
+>
+>     float test_distances[] = {20.0f, 25.0f, 28.0f, 30.0f, 32.0f, 35.0f, 40.0f};
+>     for (float d : test_distances) {
+>         auto r = ComputeLODTransition(d, SWITCH_DIST, BAND_PCT);
+>         std::cout << std::fixed << std::setprecision(1)
+>                   << std::setw(6) << d << "m  "
+>                   << std::setprecision(2) << std::setw(6) << r.alpha_current
+>                   << "   " << std::setw(6) << r.alpha_next
+>                   << "   " << std::setw(10) << r.extra_draw_call << "\n";
+>     }
+>
+>     // 成本分析
+>     std::cout << "\n========== 过渡带渲染成本分析 ==========\n"
+>               << "过渡带宽度: " << SWITCH_DIST * BAND_PCT * 2 << "m\n"
+>               << "过渡带内: 额外 1 个 Draw Call (同时渲染两级 LOD)\n"
+>               << "过渡带外: 无额外开销\n"
+>               << "总体影响: 只有距离恰好在过渡带内的物体才双倍渲染\n"
+>               << "         (通常 < 10% 的物体同时处于过渡带)\n\n"
+>               << "替代方案对比:\n"
+>               << "  Alpha Fade:  效果好，但额外 Draw Call\n"
+>               << "  Dithering:   几乎零额外开销，UE 默认方案\n"
+>               << "  Pop (硬切):  零开销，但有视觉跳变\n";
+>     return 0;
+> }
+> ```
+>
+> **设计要点：**
+> - smoothstep 过渡函数避免线性渐变的生硬感
+> - 过渡带宽度通常设为切换距离的 ±15-20%
+> - Dithering（UE 默认）比 Alpha Fade 更推荐：无额外 Draw Call，使用棋盘格像素剔除实现过渡
+> - 过渡期间需要同时渲染两级 LOD，shader 中使用 `mix(LOD0_color, LOD1_color, alpha)` 合成最终颜色
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Garland & Heckbert (1997)** — *Surface Simplification Using Quadric Error Metrics*：QEM 算法的原始论文，所有现代 LOD 工具的数学基础

@@ -1030,6 +1030,313 @@ public:
 
 4. 分析：在这种混合架构下，FSM 的 **转移评估** 应该放在 C++ 侧还是 Lua 侧？为什么？考虑性能、热更新便利性和调试难度。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **对话 FSM 状态定义（table-based）：**
+>
+> ```lua
+> local DialogueStates = {}
+>
+> -- ---- Idle: 等待玩家交互 ----
+> DialogueStates.Idle = {
+>     enter = function(fsm, npc)
+>         print("[FSM] 进入 Idle — NPC 空闲中")
+>         npc:show_prompt("按 E 交谈")
+>     end,
+>     update = function(fsm, npc, dt) end,
+>     exit = function(fsm, npc)
+>         npc:hide_prompt()
+>     end,
+>     transitions = {
+>         interact_pressed = {
+>             check = function(npc) return npc.input.interact end,
+>             target = "Talking",
+>         },
+>         dialogue_timeout = {
+>             check = function(npc) return npc.idle_timer > 30 end,
+>             target = "End",
+>         },
+>     },
+> }
+>
+> -- ---- Talking: NPC 正在说台词 ----
+> DialogueStates.Talking = {
+>     enter = function(fsm, npc)
+>         print("[FSM] 进入 Talking")
+>         fsm.data.line_index = 0          -- 对话进度存在 FSM 上
+>         fsm.data.lines = npc:get_dialogue_lines()  -- 从 NPC 数据加载台词
+>         fsm:advance_line(npc)            -- 显示第一句
+>     end,
+>     update = function(fsm, npc, dt)
+>         fsm.data.type_timer = (fsm.data.type_timer or 0) + dt
+>         -- 打字机效果省略...
+>     end,
+>     exit = function(fsm, npc)
+>         npc:hide_dialogue_box()
+>         print("[FSM] 退出 Talking")
+>     end,
+>     transitions = {
+>         dialogue_advance = {
+>             check = function(npc)
+>                 return npc.input.confirm and fsm.data.text_complete
+>             end,
+>             target = function(fsm, npc)
+>                 fsm.data.line_index = fsm.data.line_index + 1
+>                 local next_line = fsm.data.lines[fsm.data.line_index]
+>                 if next_line.type == "choice" then
+>                     return "Choice"
+>                 elseif next_line then
+>                     fsm:advance_line(npc)
+>                     return "Talking"  -- 自转移
+>                 else
+>                     return "End"
+>                 end
+>             end,
+>         },
+>         dialogue_timeout = {
+>             check = function(npc) return npc.idle_timer > 30 end,
+>             target = "End",
+>         },
+>     },
+> }
+>
+> -- ---- Choice: 选项分支 ----
+> DialogueStates.Choice = {
+>     enter = function(fsm, npc)
+>         print("[FSM] 进入 Choice — 显示选项")
+>         local options = fsm.data.lines[fsm.data.line_index].options
+>         npc:show_choices(options)  -- 副作用：显示 3 个选项的 UI
+>     end,
+>     update = function(fsm, npc, dt) end,
+>     exit = function(fsm, npc)
+>         npc:hide_choices()
+>     end,
+>     transitions = {
+>         choice_selected = {
+>             check = function(npc) return npc.input.choice_index > 0 end,
+>             target = function(fsm, npc)
+>                 local idx = npc.input.choice_index
+>                 npc.input.choice_index = 0  -- 消费输入
+>                 local choice = fsm.data.lines[fsm.data.line_index].options[idx]
+>                 if choice.branch == "end" then
+>                     return "End"
+>                 else
+>                     -- 跳转到选择对应的分支台词
+>                     fsm.data.lines = choice.follow_up_lines
+>                     fsm.data.line_index = 0
+>                     fsm:advance_line(npc)
+>                     return "Talking"
+>                 end
+>             end,
+>         },
+>         dialogue_timeout = {
+>             check = function(npc) return npc.idle_timer > 30 end,
+>             target = "End",
+>         },
+>     },
+> }
+>
+> -- ---- End: 对话结束 ----
+> DialogueStates.End = {
+>     enter = function(fsm, npc)
+>         print("[FSM] 对话结束")
+>         npc:hide_all_ui()
+>         npc:start_cooldown(3)  -- 3 秒后才能再次对话
+>     end,
+>     update = function(fsm, npc, dt) end,
+>     exit = function(fsm, npc) end,
+>     transitions = {
+>         -- 冷却结束后自动回到 Idle
+>         cooldown_done = {
+>             check = function(npc) return npc.dialogue_cooldown <= 0 end,
+>             target = "Idle",
+>         },
+>     },
+> }
+> ```
+>
+> **5 句台词 + 1 个选项节点示例数据：**
+>
+> ```lua
+> npc.dialogue_lines = {
+>     { type = "text", text = "冒险者，你终于来了。" },
+>     { type = "text", text = "北方森林出现了怪物，村民们很不安。" },
+>     { type = "choice", options = {
+>         { text = "交给我吧", branch = "accept",
+>           follow_up_lines = {
+>               { type = "text", text = "感谢你！请消灭 5 只狼。" },
+>               { type = "text", text = "回来我会给你报酬。" },
+>           }},
+>         { text = "报酬多少？", branch = "negotiate",
+>           follow_up_lines = {
+>               { type = "text", text = "200 金币，外加这把剑。" },
+>           }},
+>         { text = "没兴趣", branch = "end" },
+>     }},
+> }
+> ```
+>
+> **未处理组合分析：**
+>
+> | 状态\事件 | interact_pressed | dialogue_advance | choice_selected | dialogue_end | dialogue_timeout |
+> |-----------|:---:|:---:|:---:|:---:|:---:|
+> | Idle | →Talking | 忽略(不可能) | 忽略(不可能) | 忽略(未在对话) | →End |
+> | Talking | 忽略(已在对话) | →Talking/Choice/End | 忽略(无选项) | →End | →End |
+> | Choice | 忽略(对话中) | 忽略(等待选择) | →Talking/End | →End | →End |
+> | End | 忽略(冷却中) | 忽略(已结束) | 忽略(无 UI) | 忽略 | →Idle (cooldown_done) |
+>
+> 标记为"忽略"的组合中，大部分是"该状态下该事件不会发生"（如 Idle 状态下不会收到 choice_selected），部分是"该状态下事件无意义"（如 End 状态下的 interact）。只有 `Talking + choice_selected` 被标记为"忽略(无选项)"——如果你的实现中对话系统可能在打字机效果播放期间收到输入，这一步需要更细粒度的处理。
+
+> [!tip]- 练习 2 参考答案
+> **协程式对话 FSM 重写（核心函数）：**
+>
+> ```lua
+> function DialogueFSM:dialogue_coroutine(npc)
+>     -- Idle 状态等价：等待玩家交互
+>     npc:show_prompt("按 E 交谈")
+>     self:wait_until(function() return npc.input.interact end)
+>
+>     -- Talking 阶段：逐句播放台词
+>     npc:hide_prompt()
+>     for _, line in ipairs(npc.dialogue_lines) do
+>         if line.type == "text" then
+>             self:dialogue_say(npc, line.text)  -- 打字机效果 + 等待确认
+>         elseif line.type == "choice" then
+>             -- Choice 阶段
+>             local choice = self:dialogue_choice(npc, line.options)
+>             if choice.branch == "end" then
+>                 goto dialogue_end
+>             end
+>             -- 继续走分支的后续台词...
+>             for _, follow_line in ipairs(choice.follow_up_lines) do
+>                 self:dialogue_say(npc, follow_line.text)
+>             end
+>         end
+>     end
+>
+>     ::dialogue_end::
+>     npc:hide_all_ui()
+>     npc:start_cooldown(3)
+>     self:wait_seconds(3)
+>     -- 协程结束 → FSM 自然回到 Idle
+> end
+> ```
+>
+> **对比分析表：**
+>
+> | 对比维度 | Table-based FSM | 协程式 FSM |
+> |----------|----------------|------------|
+> | 总代码行数 | ~120 行（状态定义 + 转移规则 + FSM 框架） | ~40 行（一个 coroutine 函数） |
+> | 台词与流程的可视化程度 | 低——台词分散在 `enter`/`transitions` 中，需要拼接才能看到完整流程 | 高——台词按顺序写在 coroutine 中，像读剧本一样从上到下 |
+> | 添加新对话节点的改动范围 | 需要在 `transitions` 中添加新事件 + 修改状态 table | 在 coroutine 中插入几行 `self:dialogue_say()` 和 `self:wait_until()` |
+> | 中断正在进行的对话的难度 | 容易——FSM 从任意状态可被外部事件转移（如被攻击 → Combat） | 困难——coroutine 必须是协作式的，外部中断需要 `coroutine.close()` 或检查标志位 |
+> | 调试时追踪"当前在第几句"的难度 | 需要打日志看 `fsm.data.line_index` + `fsm.current_state` | 协程停在 `coroutine.yield()` 处，堆栈信息直接告诉你当前位置 |
+> | 多人协作时合并冲突的概率 | 中——不同人修改不同状态的 `transitions` 可能冲突 | 低——整个对话在一个函数里，git merge 要么全接受要么全拒绝 |
+>
+> **选型分析（100-200 字）：**
+>
+> Table-based 适合**分支多、可能被打断**的场景：如果你需要"对话中 NPC 被攻击 → 强制切换到战斗状态"，table-based 的显式转移比协程的破坏性中断更安全可控。协程式适合**线性流程为主、很少被中断**的场景：过场对话、教程提示、Boss 转阶段台词——这些天然是按顺序执行的"剧本"，协程写法更接近设计文档的表达方式，减少认知翻译负担。第三种更优选择：**数据驱动**——将对话内容定义为 JSON/CSV（节点 ID、台词文本、选项分支、跳转目标），FSM 作为纯粹的解释器逐节点播放。这样策划可以在 Excel/对话编辑器中编写剧情，程序只维护 FSM 播放器。这是 AAA 对话系统的标准做法（如《巫师3》的叙事工具）。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **C++ LuaStateMachine 接口声明（使用 Sol2）：**
+>
+> ```cpp
+> // LuaStateMachine.h
+> #include <sol/sol.hpp>
+>
+> class LuaStateMachine {
+>     sol::state m_lua;
+>     sol::table m_fsm;    // Lua 侧的 FSM table
+>     sol::table m_states; // Lua 侧的状态定义表
+>
+> public:
+>     bool LoadScript(const char* path) {
+>         m_lua.open_libraries(sol::lib::base, sol::lib::math, sol::lib::table);
+>         // 注册 C++ API 到 Lua
+>         m_lua.set_function("MoveTo", [this](float x, float y) { /* ... */ });
+>         m_lua.set_function("PlayAnimation", [this](const char* name) { /* ... */ });
+>         m_lua.set_function("GetDistanceToPlayer", [this]() -> float { /* ... */ });
+>
+>         auto result = m_lua.safe_script_file(path);
+>         if (!result.valid()) return false;
+>
+>         m_states = m_lua["States"];
+>         m_fsm = m_lua["FSMFactory"](/* entity ref */);
+>         m_fsm["setInitialState"](m_fsm, "Idle", m_states);
+>         return true;
+>     }
+>
+>     void Update(float dt) {
+>         m_fsm["update"](m_fsm, dt);
+>     }
+>
+>     void SendEvent(const char* event_name) {
+>         m_fsm["onEvent"](m_fsm, event_name);
+>     }
+> };
+> ```
+>
+> **Lua 侧状态 table 接口规范：**
+>
+> ```lua
+> -- 状态 table 必须字段：
+> -- {
+> --   enter       = function(fsm, entity)     -- 可选。进入状态时调用一次
+> --   update      = function(fsm, entity, dt) -- 可选。每帧调用
+> --   exit        = function(fsm, entity)     -- 可选。离开状态时调用一次
+> --   transitions = {                         -- 可选。转移规则表
+> --     [event_name] = {
+> --       check  = function(entity) → bool,   -- 必须。转移条件
+> --       target = string,                    -- 必须。(状态名) 或 function(entity) → string
+> --     },
+> --   },
+> -- }
+> --
+> -- entity 字段约定（由 C++ 在创建 FSM 时注入）：
+> --   entity.health, entity.x, entity.y        -- C++ 同步的属性
+> --   entity.player (table)                     -- 感知数据
+> --   entity:MoveTo(x, y)                       -- 调用 C++ 注册的函数
+> --   entity:PlayAnimation(name)
+> -->
+> -- 约束：
+> --   - enter/update/exit 中禁止使用 coroutine（由 C++ 每帧驱动）
+> --   - check 函数必须无副作用（纯读操作）
+> --   - 转移 target 为函数时，可用于"条件分支转移"
+> ```
+>
+> **C++ 暴露的 API 示例：**
+>
+> ```cpp
+> m_lua.set_function("MoveTo", [](float x, float y) {
+>     // 调用引擎的寻路系统，驱动实体移动。由 C++ 在物理帧中执行，返回后 Lua 继续。
+> });
+> m_lua.set_function("PlayAnimation", [](const char* name) {
+>     // 通过动画系统播放命名动画。在 C++ 侧处理动画混合和事件。
+> });
+> ```
+>
+> 在 Lua 侧的状态 `update` 中：
+> ```lua
+> update = function(fsm, entity, dt)
+>     if not entity.is_moving then
+>         entity:MoveTo(entity.patrol_points[entity.waypoint_idx].x,
+>                       entity.patrol_points[entity.waypoint_idx].y)
+>     end
+> end
+> ```
+>
+> **转移评估应该放在哪一侧？**
+>
+> **推荐放在 Lua 侧。** 原因：
+> 1. **热更新便利性**：转移规则是 AI 行为的核心——设计师最需要迭代的部分。放在 Lua 侧可以在不重新编译 C++ 的情况下调整条件阈值（如"检测范围从 10 米改成 15 米"）。
+> 2. **性能可接受**：转移评估是条件检查（几个 float 比较 + 距离计算），Lua 执行这些操作的开销在每帧约 0.1-1μs，对于几百个 AI 实体是可接受的。真正的性能瓶颈（寻路、物理、渲染）在 C++ 侧。
+> 3. **调试难度缓解**：Lua 侧转移逻辑可以用 `print` 或调试器快速查看，比 C++ 的重新编译+断点快一个数量级。
+> 4. **但要注意**：转移评估中如果有重计算（如 LineTrace 视线检测），应通过 C++ 函数暴露给 Lua 调用，而非在 Lua 中纯脚本实现。Lua 只负责**决策逻辑**（if 条件判断和组合），C++ 负责**感知查询**。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

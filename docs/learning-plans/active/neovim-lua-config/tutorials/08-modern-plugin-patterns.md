@@ -228,6 +228,149 @@ end
 2. 打开 `nvim-pack-lock.json`，找一个插件的 commit hash
 3. 在 GitHub 上查看该 commit 的内容，理解 lockfile 与实际代码的对应关系
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 将 lazy.nvim spec 转换为 vim.pack 风格：
+>
+> ```lua
+> -- vim.pack 版本
+> local function gh(r) return 'https://github.com/' .. r end
+>
+> -- 策略: 将加载时机推迟——放在靠后的 do 块中，利用 Lua 从上到下的执行顺序
+> do
+>   vim.pack.add { gh 'folke/which-key.nvim' }
+>   require('which-key').setup {
+>     delay = 300,
+>     spec = {
+>       {
+>         '<leader>?',
+>         function()
+>           require('which-key').show()
+>         end,
+>         desc = '显示按键',
+>       },
+>     },
+>   }
+> end
+> ```
+>
+> **对照说明：**
+>
+> | lazy.nvim 概念 | vim.pack 等价 |
+> |---|---|
+> | `"folke/which-key.nvim"` | `vim.pack.add { gh 'folke/which-key.nvim' }` |
+> | `event = "VeryLazy"` | 放在 init.lua 靠后的 `do` 块（自然的延迟加载） |
+> | `keys = { {...} }` | 在 `.setup()` 的 `spec` 中定义（which-key 自身支持） |
+> | `opts = { delay = 300 }` | 直接传给 `require('which-key').setup { delay = 300 }` |
+>
+> **进阶：** 如果需要更精确的懒加载，可以配合 autocmd：
+> ```lua
+> vim.api.nvim_create_autocmd("User", {
+>   pattern = "VeryLazy",
+>   once = true,
+>   callback = function()
+>     vim.pack.add { gh 'folke/which-key.nvim' }
+>     require('which-key').setup { delay = 300 }
+>   end,
+> })
+> ```
+
+> [!tip]- 练习 2 参考答案
+> 完整的 nvim-treesitter 安装 + 构建步骤配置：
+>
+> ```lua
+> -- 放在 init.lua 中，紧接在 gh 辅助函数之后
+> local function gh(r) return 'https://github.com/' .. r end
+>
+> -- Build Hooks: 处理需要编译的插件
+> do
+>   local function run_build(name, cmd, cwd)
+>     local result = vim.system(cmd, { cwd = cwd }):wait()
+>     if result.code ~= 0 then
+>       vim.notify(
+>         ('Build failed for %s:\n%s'):format(name, result.stderr or ''),
+>         vim.log.levels.ERROR
+>       )
+>     else
+>       vim.notify(('Build succeeded for %s'):format(name), vim.log.levels.INFO)
+>     end
+>   end
+>
+>   vim.api.nvim_create_autocmd('PackChanged', {
+>     callback = function(ev)
+>       local name = ev.data.spec.name
+>       local kind = ev.data.kind
+>
+>       -- 只在安装或更新时触发，跳过 remove 等其他操作
+>       if kind ~= 'install' and kind ~= 'update' then
+>         return
+>       end
+>
+>       if name == 'nvim-treesitter' then
+>         -- treesitter 需要 packadd 后才能使用 :TSUpdate
+>         if not ev.data.active then
+>           vim.cmd.packadd('nvim-treesitter')
+>         end
+>         vim.cmd('TSUpdate')
+>       end
+>     end,
+>   })
+> end
+>
+> -- 在后面的 do 块中安装 nvim-treesitter
+> do
+>   vim.pack.add { gh 'nvim-treesitter/nvim-treesitter' }
+>   require('nvim-treesitter.configs').setup {
+>     ensure_installed = { 'lua', 'vim', 'vimdoc', 'c' },
+>     auto_install = true,
+>     highlight = { enable = true },
+>   }
+> end
+> ```
+>
+> **验证步骤：**
+> 1. 删除 `~/.local/share/nvim/site/pack/core/nvim-treesitter/` 目录
+> 2. 重启 Neovim，观察自动下载和编译过程
+> 3. 运行 `:checkhealth treesitter` 确认 parser 安装成功
+> 4. 打开一个 `.lua` 文件，确认语法高亮生效
+>
+> **关键陷阱：** `PackChanged` 回调中 `ev.data.active` 为 `false` 时，插件目录已克隆但未通过 `:packadd` 加载。此时直接调用插件的命令会失败——必须先 `vim.cmd.packadd(name)` 激活它。这是与 lazy.nvim 的 `build` 字段最关键的区别。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **操作步骤：**
+>
+> 1. **查看状态：**
+>    ```vim
+>    :lua vim.pack.update(nil, { offline = true })
+>    ```
+>    界面显示每个插件的本地 commit vs 远程最新 commit。`behind` 状态表示远程有更新。
+>
+> 2. **打开 lockfile：**
+>    `nvim-pack-lock.json` 结构如下：
+>    ```json
+>    {
+>      "tokyonight.nvim": {
+>        "type": "git",
+>        "url": "https://github.com/folke/tokyonight.nvim",
+>        "commit": "a1b2c3d4e5f6...",
+>        "version": null
+>      }
+>    }
+>    ```
+>
+> 3. **在 GitHub 上验证：**
+>    打开 `https://github.com/folke/tokyonight.nvim/commit/<commit_hash>`，对比文件内容与本地 `~/.local/share/nvim/site/pack/core/tokyonight.nvim/` 目录下的代码。
+>
+> **核心理解：**
+> - lockfile 是**可重现构建**的关键：它把模糊的 "folke/tokyonight.nvim" 锁定到精确的 `a1b2c3d` commit。
+> - `version = null` 表示未指定 semver 约束，跟随默认分支（通常是 `main`/`master`）的最新 commit。
+> - 如果指定了 `version = vim.version.range('1.*')`，lockfile 中会记录 `"version": "^1.0.0"`，更新时只会拉取 semver 兼容的版本。
+> - **不要手动编辑 lockfile。** 修改由 `vim.pack.add()`（安装）和 `vim.pack.update()`（更新）自动完成。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

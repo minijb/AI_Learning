@@ -244,6 +244,118 @@ create_autocmd({ "BufWritePre", "BufRead" }, {
 })
 ```
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```lua
+> -- exercise1_minmax.lua
+> local function minmax(t)
+>     -- 用第一个元素初始化 min 和 max
+>     local min_val = t[1]
+>     local max_val = t[1]
+>
+>     for i = 2, #t do
+>         local v = t[i]
+>         if v < min_val then
+>             min_val = v
+>         end
+>         if v > max_val then
+>             max_val = v
+>         end
+>     end
+>
+>     return min_val, max_val  -- 多返回值
+> end
+>
+> -- 测试：用多返回值接收
+> local min, max = minmax({ 3, 1, 4, 1, 5, 9 })
+> print(min, max)  -- 1  9
+> ```
+>
+> **设计要点：** 遍历从索引 2 开始（索引 1 已用于初始化），避免无意义的自比较。多返回值在 `return` 语句中用逗号分隔，调用方也用逗号分隔的变量列表接收。
+
+> [!tip]- 练习 2 参考答案
+> ```lua
+> -- stats.lua（模块文件）
+> local M = {}
+>
+> function M.minmax(t)
+>     local min_val = t[1]
+>     local max_val = t[1]
+>     for i = 2, #t do
+>         local v = t[i]
+>         if v < min_val then min_val = v end
+>         if v > max_val then max_val = v end
+>     end
+>     return min_val, max_val
+> end
+>
+> function M.average(t)
+>     local sum = 0
+>     for _, v in ipairs(t) do
+>         sum = sum + v
+>     end
+>     return sum / #t
+> end
+>
+> return M
+> ```
+>
+> ```lua
+> -- test_stats.lua（入口文件，与 stats.lua 同目录）
+> local stats = require("stats")
+>
+> local data = { 3, 1, 4, 1, 5, 9 }
+>
+> local min, max = stats.minmax(data)
+> print("最小值: " .. min .. ", 最大值: " .. max)
+>
+> local avg = stats.average(data)
+> print("平均值: " .. avg)  -- 约 3.833
+> ```
+>
+> **关键点：** 模块惯例用 `local M = {}` 收集导出函数，最后 `return M`。`require("stats")` 会自动查找同目录下的 `stats.lua`（Lua 的 `package.path` 默认包含当前目录）。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```lua
+> -- exercise3_autocmd.lua
+> local function create_autocmd(events, opts)
+>     -- 将事件列表转为显示字符串
+>     local event_str = table.concat(events, ", ")
+>     print("[自动命令] 事件: " .. event_str)
+>
+>     if opts.pattern then
+>         local pattern_val = opts.pattern
+>         if type(pattern_val) == "table" then
+>             print("  匹配: " .. table.concat(pattern_val, ", "))
+>         else
+>             print("  匹配: " .. pattern_val)
+>         end
+>     end
+>
+>     if opts.callback then
+>         print("  回调: 已设置（函数 " .. tostring(opts.callback) .. "）")
+>     end
+>
+>     if opts.group then
+>         print("  组: " .. opts.group)
+>     end
+> end
+>
+> -- 测试
+> create_autocmd({ "BufWritePre", "BufRead" }, {
+>     pattern = "*.lua",
+>     callback = function()
+>         print("检测到 Lua 文件")
+>     end,
+> })
+> ```
+>
+> **设计要点：** 这是模拟 `vim.api.nvim_create_autocmd` 的接口。真实版本还处理 `group`（自动命令组，用 `vim.api.nvim_create_augroup` 创建）、`once`（一次性触发）、`buffer`（缓冲区局部）等选项。此处简化版演示了如何用 table 传递命名参数——这是 Neovim 配置中最常见的 API 模式。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

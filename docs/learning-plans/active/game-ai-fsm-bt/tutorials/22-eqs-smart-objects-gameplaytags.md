@@ -1158,6 +1158,155 @@ void AMyAIController::BeginPlay()
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **EQS Query: FindBestSniperPosition**
+>
+> **Generator**: `UEnvQueryGenerator_SimpleGrid`
+> - `GridSize`: 1000×1000（覆盖狙击手周围 50m×50m 区域）
+> - `SpaceBetween`: 200（约 25 个候选点，间距 2m）
+> - `GenerateAround`: Querier（以狙击手当前位置为中心）
+> - `bProjectPoints = true`（强制投影到 NavMesh，过滤不可达点）
+>
+> **Tests（按执行顺序）**:
+>
+> | Test | 类型 | 配置 | 权重 | 理由 |
+> |------|------|------|------|------|
+> | Distance (Target) | Filter + Score | `FilterType=Range`, `Min=1500`(15m), `Max=5000`(50m)。ScoreMode=PreferMiddle（30-35m 最优） | 3.0 | 狙击手核心约束。太近 → 近战劣势；太远 → 超过有效射程。中间值最优 |
+> | Height Difference | Score | 将点投影到地面后，用 Z 轴差值评分。TestMode=Absolute, ClampMax=500, Scoring=PreferHigh | 2.0 | 高位 = 视野优势 + 更难被近战敌人触及 |
+> | Trace (Target) | Filter | `BoolMatch=true`, TraceMode=Visibility。从候选点到目标执行 LineTrace（忽略自身和队友） | Filter Only（非 Score） | 硬约束——视野被阻挡的位置直接排除。Filter 不贡献分数，只做二元排除 |
+> | Dot (Target Direction) | Score | 狙击手前方方向 vs 候选点→目标方向。Scoring=PreferMatch | 1.0 | 朝向目标的位置自然视野更好（通常障碍物在背后） |
+> | Trace (Retreat Cover) | Score | `Context`: 候选点向后退 2m（反向目标方向）→ Trace 检测是否有阻挡。`BoolMatch=true`, Scoring=PreferTrue | 1.5 | 有退路的位置更安全——"射击后可以躲" |
+>
+> **权重比例解释**：
+> - 距离权重最高（3.0）→ 狙击手的"存在理由"是远距离压制。距离不对，其他维度都无意义
+> - 高度（2.0）→ 高位提供战术优势，但并非绝对必需（平地狙击也能工作）
+> - 退路掩护（1.5）→ 生存能力仅次于攻击能力。狙击手 50% 撤退阈值——需要安全的撤退路径
+> - 朝向（1.0）→ 锦上添花。调整朝向比换位置便宜得多
+>
+> **不与 Trace(Visibility) 冲突的说明**：Trace(Visibility) 是 Filter——不满足直接排除。四个 Score Test 只在通过 Filter 的点上打分。最终选出的位置：可达 + 视野可见 + 距离合适 + 高位 + 有退路的最高分点。
+
+> [!tip]- 练习 2 参考答案
+> **1. SmartObject 定义**：
+>
+> ```
+> USmartObjectDefinition 资产: SO_MedStation
+>   ├── Slot[0]:
+>   │     ├── GameplayBehaviorConfig: UGameplayBehaviorConfig_MedStation
+>   │     │     └── HealDuration = 3.0s, HealToPercent = 1.0
+>   │     └── SelectionPreconditions:
+>   │           ├── TagQuery: Slot Owner has "AI.State.Alive"（只有活着的 AI 可 Claim）
+>   │           └── TagQuery: Slot is NOT "SmartObject.Slot.Claimed"（未被占据）
+>   └── Runtime: GameplayBehavior 执行:
+>         OnActivated → Play HealMontage (3s)
+>                       → 结束后 Set Health = MaxHealth
+>                       → Apply GameplayEffect (短暂无敌 0.5s 过渡)
+>                       → OnDeactivated → Release Slot
+> ```
+>
+> **2. BT 集成**：
+>
+> ```
+> [Selector] Root
+>  ├── [Sequence] HealSeek
+>  │    ├── [Condition] HealthPercent < 0.3          ← 触发条件
+>  │    ├── [Service] UpdateNearestMedStation (每 1s)
+>  │    │          EQS: Generator=ActorsOfClass(MedStation) + Test=Distance → 写入 BB "MedStation"
+>  │    ├── [Task] MoveTo (Target: MedStation position)  ← 到达 Claim 范围
+>  │    └── [Task] BTTask_UseSmartObject (SlotHandle from SmartObjectSubsystem)
+>  │              └── AbortTask: 如果受到攻击 → SOSubsystem->Release(SlotHandle) → BT abort
+>  └── [Selector] Combat / Patrol / ...
+> ```
+>
+> **3. 竞争条件处理**：
+>
+> 当多个 AI 同时需要医疗站但只有一个 Slot：
+> - `SmartObjectSubsystem::Claim()` 是原子操作——只有一个 AI 能成功 Claim。失败返回 InvalidHandle
+> - 失败 AI 的 `BTTask_UseSmartObject` 返回 Failure → BT 回退到 Selector 的下一个分支
+> - 失败 AI 应执行 fallback 行为：等待 N 秒后重新查询/Claim，或使用次优治疗方式（如使用携带的治疗物品 `GA_AI_Heal`），或撤退到安全距离等待
+> - **优先级方案**：可在 Claim 前通过 BB 比较——如果多个 AI 的 Health 不同，最低血量的 AI 优先 Claim（通过 EQS Test 中增加 Health 权重）。但这引入了额外的协调复杂度。简化方案：先到先得 + fallback 重试
+>
+> **4. 治疗被攻击——Abort vs Continue**：
+>
+> | 选择 | 适合游戏类型 | 理由 |
+> |------|-------------|------|
+> | Abort 治疗 | 快节奏射击 (DOOM, CoD) | 战斗中治疗不可行——立即中断并反击/撤退更合理。玩家的预期是"敌人在战斗中不会停下来治疗" |
+> | Continue 治疗 | 战术/回合制 (XCOM, Darkest Dungeon) | 治疗是战略性决策——中断治疗意味着前功尽弃。玩家预期"AI 会赌一把治疗能否在被打死前完成" |
+>
+> 推荐混合方案：伤害低于阈值（< 10% MaxHealth）→ Continue；伤害高于阈值 → Abort。这提供了"AI 在轻微骚扰下坚持治疗，但重击下果断放弃"的真实感。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **标签层级设计**：
+>
+> ```
+> 角色标签 (Role.*):
+>   AI.Role.Flanker      ← 侧翼包抄——以玩家为中心 90°-150° 方向的侧翼位置
+>   AI.Role.Sniper       ← 远程压制——高地 + 远距离
+>   AI.Role.Heavy        ← 正面压制——高频率近/中距离攻击
+>   AI.Role.Medic        ← 治疗优先——只在无治疗需求时攻击
+>
+> 状态标签 (State.*):
+>   AI.State.Idle        ← 非战斗状态的父标签
+>   AI.State.Alert       ← 察觉异常（看到尸体、听到声音）
+>   AI.State.Combat      ← 战斗中
+>   AI.State.Retreating  ← 撤退中（低血量/Tag）
+>   AI.State.Dead        ← 最大优先级——覆盖所有其他行为
+>
+> 能力标签 (Ability.*):
+>   AI.Ability.MeleeAttack     ← 近战攻击
+>   AI.Ability.RangedAttack    ← 远程攻击
+>   AI.Ability.Heal            ← 治疗能力（Medic 专属）
+>   AI.Ability.Suppress        ← 压制火力（Heavy 专属——高频率 + 大量弹药消耗）
+>   AI.Ability.Cooldown.*      ← 冷却子标签 (MeleeAttack, RangedAttack, Heal, Suppress)
+> ```
+>
+> **统一 BT 结构**（通过标签驱动角色差异）：
+>
+> ```
+> [Selector] Root (Observer Abort: State.Dead → PlayDeath)
+>  │
+>  ├── [Sequence] Retreat
+>  │    [Decorator] HasTag: State.Retreating → Abort=Both
+>  │    [Task] FleeFromPlayer + [Task] FindCover
+>  │
+>  ├── [Selector] CombatBehavior
+>  │    [Decorator] HasTag: State.Combat
+>  │    │
+>  │    ├── [Sequence] Medic_Heal
+>  │    │    [Decorator] HasTag: AI.Role.Medic        ← 只有 Medic 进入
+>  │    │    [Decorator] Blackboard: AllyHealth < 50%  ← 有治疗需求
+>  │    │    [Task] MoveToAlly → [Task] ActivateAbility(Heal)
+>  │    │
+>  │    ├── [Sequence] Sniper_Position
+>  │    │    [Decorator] HasTag: AI.Role.Sniper
+>  │    │    [Service] EQS_FindBestSniperPos (每 2s) → BB "BestPos"
+>  │    │    [Task] MoveTo(BestPos) → [Task] ActivateAbility(RangedAttack)
+>  │    │
+>  │    ├── [Sequence] Flanker_Flank
+>  │    │    [Decorator] HasTag: AI.Role.Flanker
+>  │    │    [Service] EQS_FindFlankPos (侧翼位置) → BB "FlankPos"
+>  │    │    [Task] MoveTo(FlankPos) → [Task] ActivateAbility(MeleeAttack)
+>  │    │
+>  │    └── [Sequence] Heavy_Suppress
+>  │         [Decorator] HasTag: AI.Role.Heavy
+>  │         [Task] MoveTo(正面位置) → [Task] ActivateAbility(Suppress)
+>  │
+>  ├── [Sequence] Alert
+>  │    [Decorator] HasTag: State.Alert
+>  │    [Task] InvestigateSound / InvestigateLastKnownPosition
+>  │
+>  └── [Sequence] Idle
+>       [Decorator] HasTag: State.Idle
+>       [Task] Patrol / Wander
+> ```
+>
+> **标签驱动区分的关键**：每种角色行为通过 `HasTag(Role.X)` Decorator 隔离——同棵树的不同分支。设计师通过给 AI 分配 Role Tag 来切换角色，不需要程序员写不同的 BT 资产。新增角色只需添加新分支 + 新 Role Tag ——不影响现有逻辑。
+>
+> **EQS 集成细节**：
+> - Sniper 的 `FindBestSniperPos`：Generator=SimpleGrid(以目标为中心, 30-50m 环), Test=Height+Trace+Distance（练习 1 的变体）
+> - Flanker 的 `FindFlankPos`：Generator=SimpleGrid(以目标为中心, 15-25m 环), Test=Dot(目标前方)-(目标→候选点方向) 求 90°-150° 偏离
+> - Heavy 的正面位置：EQS 不需要——直接使用"玩家前方 10-15m"作为 `MoveTarget`
 ## 4. 扩展阅读
 
 - **Unreal Engine EQS 官方文档**：[Environment Query System](https://docs.unrealengine.com/5.4/en-US/environment-query-system-in-unreal-engine/) — UE 官方的 EQS 参考，涵盖内置 Node 的详细参数说明和蓝图集成。

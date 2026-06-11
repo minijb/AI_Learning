@@ -569,6 +569,188 @@ g++ -O3 -march=native -S -o native.s add.cpp   # 针对本机 CPU
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **编译器自动向量化分析：**
+>
+> 对于 `void add_arrays(const float* a, const float* b, float* c, size_t n)`：
+>
+> **`g++ -O2 -S`（不显式向量化）：**
+> - 通常生成标量 `movss`/`addss` 指令序列
+> - GCC 在 `-O2` 默认不开启 `-ftree-vectorize`
+>
+> **`g++ -O2 -ftree-vectorize -S`：**
+> - 如果循环简单且无别名问题，生成 `movaps`/`addps` (SSE) 或 `vmovaps`/`vaddps` (AVX)
+> - 通常生成带 peel + remainder 的向量化循环（处理非对齐头部和尾部余量）
+>
+> **`g++ -O3 -march=native -S`：**
+> - `-O3` 自动启用 `-ftree-vectorize`
+> - `-march=native` 启用本机 CPU 支持的最宽 SIMD（如 AVX2 → `vaddps ymm`，AVX-512 → `vaddps zmm`）
+> - 可能生成 `vaddps ymm0, ymm1, ymm2`（8 个 float 同时加）
+>
+> **编译器不自动向量化的常见原因：**
+> 1. **指针别名**：编译器无法证明 `a`、`b`、`c` 不重叠 → 加 `__restrict` 关键字
+> 2. **循环次数未知**：`size_t n` 在编译时不可知 → 加 `#pragma GCC ivdep` 或 `if (n >= 16)` guard
+> 3. **非平凡循环体**：循环内有函数调用、分支、间接访问 → 简化循环体或手动展开
+> 4. **数据未对齐**：`float*` 不保证 16/32 字节对齐 → 使用 `__builtin_assume_aligned(ptr, 16)`
+>
+> **改进版（引导编译器向量化）：**
+> ```cpp
+> void add_arrays(const float* __restrict a, const float* __restrict b,
+>                 float* __restrict c, size_t n) {
+>     #pragma GCC ivdep  // 忽略循环间依赖
+>     for (size_t i = 0; i < n; ++i) c[i] = a[i] + b[i];
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **AABB 变换的 SSE 实现：**
+>
+> ```cpp
+> struct AABB { Vec3 min, max; };
+>
+> // 标量版
+> AABB TransformAABB_Scalar(const AABB& aabb, const Mat4& m) {
+>     // 构造 8 个顶点: 每个分量取 min 或 max 的组合
+>     Vec3 corners[8] = {
+>         {aabb.min.x, aabb.min.y, aabb.min.z},
+>         {aabb.max.x, aabb.min.y, aabb.min.z},
+>         {aabb.min.x, aabb.max.y, aabb.min.z},
+>         {aabb.max.x, aabb.max.y, aabb.min.z},
+>         {aabb.min.x, aabb.min.y, aabb.max.z},
+>         {aabb.max.x, aabb.min.y, aabb.max.z},
+>         {aabb.min.x, aabb.max.y, aabb.max.z},
+>         {aabb.max.x, aabb.max.y, aabb.max.z},
+>     };
+>     AABB result;
+>     result.min = {FLT_MAX, FLT_MAX, FLT_MAX};
+>     result.max = {-FLT_MAX, -FLT_MAX, -FLT_MAX};
+>     for (int i = 0; i < 8; ++i) {
+>         Vec3 t = TransformPoint(m, corners[i]);
+>         result.min.x = std::min(result.min.x, t.x);
+>         result.min.y = std::min(result.min.y, t.y);
+>         result.min.z = std::min(result.min.z, t.z);
+>         result.max.x = std::max(result.max.x, t.x);
+>         result.max.y = std::max(result.max.y, t.y);
+>         result.max.z = std::max(result.max.z, t.z);
+>     }
+>     return result;
+> }
+>
+> // SSE 版 — 同时处理所有 8 个顶点
+> AABB TransformAABB_SSE(const AABB& aabb, const Mat4& m) {
+>     // 加载矩阵的 4 行到 SSE 寄存器
+>     __m128 m0 = _mm_load_ps(&m.col[0].x); // 第 0 行
+>     __m128 m1 = _mm_load_ps(&m.col[1].x);
+>     __m128 m2 = _mm_load_ps(&m.col[2].x);
+>     __m128 m3 = _mm_load_ps(&m.col[3].x);
+>
+>     // 广播 aabb.min 和 aabb.max 的各分量
+>     __m128 min_x = _mm_set1_ps(aabb.min.x);
+>     __m128 min_y = _mm_set1_ps(aabb.min.y);
+>     __m128 min_z = _mm_set1_ps(aabb.min.z);
+>     __m128 max_x = _mm_set1_ps(aabb.max.x);
+>     __m128 max_y = _mm_set1_ps(aabb.max.y);
+>     __m128 max_z = _mm_set1_ps(aabb.max.z);
+>
+>     // 起始: result_min = result_max = m * (min.x, min.y, min.z, 1) 即 m3（平移分量）
+>     // 因为 w=1 时 result = m0*x + m1*y + m2*z + m3
+>     // 实际使用: 对每个分量组合计算 min/max
+>
+>     // 对 X 分量:
+>     // result_x = m0.x*x + m1.x*y + m2.x*z + m3.x
+>     // 遍历 x∈{min,max}, y∈{min,max}, z∈{min,max}
+>     // 使用 SSE 逐分量并行: 构建 4 组 (x, x, x, x) 对应不同 min/max 组合
+>
+>     // 精简实现 — 利用 AABB 变换的数学性质:
+>     // transform(m, aabb) = 以 m3(平移)为中心 + m0,m1,m2 列向量选择 min/max 方向
+>     __m128 center = m3;  // 平移分量
+>     __m128 extent_x = _mm_mul_ps(m0, max_x); // m0 * aabb.max.x 方向贡献
+>     __m128 extent_x_min = _mm_mul_ps(m0, min_x);
+>     __m128 extent_y = _mm_mul_ps(m1, max_y);
+>     __m128 extent_y_min = _mm_mul_ps(m1, min_y);
+>     __m128 extent_z = _mm_mul_ps(m2, max_z);
+>     __m128 extent_z_min = _mm_mul_ps(m2, min_z);
+>
+>     // 每个分量: result = center + Σ sign(extent_i) * |extent_i|
+>     // 用 min/max 合并:
+>     __m128 new_min = _mm_add_ps(center,
+>         _mm_add_ps(_mm_min_ps(extent_x, extent_x_min),
+>         _mm_add_ps(_mm_min_ps(extent_y, extent_y_min),
+>                    _mm_min_ps(extent_z, extent_z_min))));
+>     __m128 new_max = _mm_add_ps(center,
+>         _mm_add_ps(_mm_max_ps(extent_x, extent_x_min),
+>         _mm_add_ps(_mm_max_ps(extent_y, extent_y_min),
+>                    _mm_max_ps(extent_z, extent_z_min))));
+>
+>     AABB result;
+>     _mm_store_ps(&result.min.x, new_min);
+>     _mm_store_ps(&result.max.x, new_max);
+>     return result;
+> }
+> ```
+>
+> **Benchmark 预期（100K AABB, -O2 -msse2）：**
+> - 标量版: ~3-5ms（8 顶点 × 16 乘加 = 128 次浮点操作/AABB）
+> - SSE 版: ~1-1.5ms（4 分量并行，仅需 ~30 条 SIMD 指令/AABB）
+> - **加速比约 3-4×**
+
+> [!tip]- 练习 3 参考答案
+> **AVX 8 路并行粒子更新：**
+>
+> ```cpp
+> #include <immintrin.h>  // AVX
+>
+> // SSE 版（4 路）
+> void update_particles_SSE(float* pos_x, const float* vel_x, float dt, size_t count) {
+>     __m128 dt4 = _mm_set1_ps(dt);
+>     size_t i = 0;
+>     for (; i + 3 < count; i += 4) {
+>         __m128 px = _mm_loadu_ps(&pos_x[i]);
+>         __m128 vx = _mm_loadu_ps(&vel_x[i]);
+>         px = _mm_add_ps(px, _mm_mul_ps(vx, dt4));
+>         _mm_storeu_ps(&pos_x[i], px);
+>     }
+>     for (; i < count; ++i) pos_x[i] += vel_x[i] * dt;
+> }
+>
+> // AVX 版（8 路）
+> void update_particles_AVX(float* pos_x, const float* vel_x, float dt, size_t count) {
+>     __m256 dt8 = _mm256_set1_ps(dt);
+>     size_t i = 0;
+>     for (; i + 7 < count; i += 8) {
+>         __m256 px = _mm256_loadu_ps(&pos_x[i]);
+>         __m256 vx = _mm256_loadu_ps(&vel_x[i]);
+>         px = _mm256_add_ps(px, _mm256_mul_ps(vx, dt8));
+>         _mm256_storeu_ps(&pos_x[i], px);
+>     }
+>     for (; i < count; ++i) pos_x[i] += vel_x[i] * dt;
+> }
+>
+> // 使用 FMA (Fused Multiply-Add) 的 AVX2 版: 1 条指令完成 mul+add
+> void update_particles_AVX2_FMA(float* pos_x, const float* vel_x, float dt, size_t count) {
+>     __m256 dt8 = _mm256_set1_ps(dt);
+>     size_t i = 0;
+>     for (; i + 7 < count; i += 8) {
+>         __m256 px = _mm256_loadu_ps(&pos_x[i]);
+>         __m256 vx = _mm256_loadu_ps(&vel_x[i]);
+>         px = _mm256_fmadd_ps(vx, dt8, px);  // px = vx*dt + px，单条指令
+>         _mm256_storeu_ps(&pos_x[i], px);
+>     }
+>     for (; i < count; ++i) pos_x[i] += vel_x[i] * dt;
+> }
+> ```
+>
+> **Benchmark 预期（10M 粒子，-O2 -mavx2）：**
+> - SSE 版: 基础，4 元素/指令。对于 10M 粒子 = 2.5M 次 SSE 迭代。
+> - AVX 版: 8 元素/指令。对于 10M 粒子 = 1.25M 次 AVX 迭代。**理论加速比 2×**。
+> - AVX2 FMA 版: 融合乘加减少指令数，**实际加速比约 1.5-1.8×**（受限于内存带宽而非计算）。
+> - **关键瓶颈**：当计算密度很低时（pos += vel * dt 只有 2 次 FP 操作/元素），瓶颈在内存带宽而非 SIMD 宽度。SoA 布局 + AVX 配合才能充分发挥。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 | 资源 | 说明 |

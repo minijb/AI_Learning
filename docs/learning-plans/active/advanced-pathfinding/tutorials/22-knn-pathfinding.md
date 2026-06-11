@@ -759,6 +759,243 @@ public class SimpleKDTree2D
 
 **目标**: 对于 agent 每帧移动 < 1 格的情况，将 KNN 开销降低 80% 以上。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 实现 `count_agents_in_radius`：利用 KD-Tree 的范围查询语义，递归遍历时用轴距平方做剪枝——如果当前节点在切分轴上到查询点的距离的平方已超过 `radius²`，则对应的子树不可能包含半径内的点。
+>
+> ```cpp
+> // 方法一：基于 KD-Tree 范围查询的半径计数（推荐——利用剪枝）
+> int count_agents_in_radius(const SimpleKDTree& tree, const Point2D& center, float radius) {
+>     float r2 = radius * radius;
+>     int count = 0;
+>     // 需要访问 tree 的私有 root_——可添加友元函数或 public wrapper
+>     // 这里展示递归实现（假设可访问 root_，或作为 SimpleKDTree 的成员函数）
+>     // 实际做法：在 SimpleKDTree 类中添加以下 public 方法
+>     (void)tree; (void)center; (void)r2; (void)count;
+>     return count;
+> }
+>
+> // 推荐：将 count_in_radius 作为 SimpleKDTree 的成员函数
+> // 在 SimpleKDTree 类中添加：
+> public:
+>     int count_in_radius(const Point2D& center, float radius) const {
+>         float r2 = radius * radius;
+>         int count = 0;
+>         count_in_radius_rec(root_, center, 0, r2, count);
+>         return count;
+>     }
+>
+> private:
+>     static void count_in_radius_rec(KDNode* node, const Point2D& center,
+>                                      int depth, float r2, int& count) {
+>         if (!node) return;
+>         // 检查当前节点是否在半径内
+>         if (sqr_dist(center, node->p) <= r2) ++count;
+>
+>         int axis = depth % 2;
+>         float diff = center[axis] - node->p[axis];
+>
+>         // 先走 query 所在的一侧
+>         KDNode* first  = (diff <= 0) ? node->left : node->right;
+>         KDNode* second = (diff <= 0) ? node->right : node->left;
+>
+>         count_in_radius_rec(first, center, depth + 1, r2, count);
+>
+>         // 剪枝：如果轴距平方 > r2，另一侧不可能有半径内的点
+>         if (diff * diff <= r2)
+>             count_in_radius_rec(second, center, depth + 1, r2, count);
+>     }
+> ```
+>
+> ```cpp
+> // 方法二：用 KNN 取足够大的 K 再过滤（简单但效率较低）
+> int count_agents_in_radius_knn(const SimpleKDTree& tree, const Point2D& center,
+>                                 float radius, int max_k = 200) {
+>     float r2 = radius * radius;
+>     auto knn_results = tree.knn(center, max_k);
+>     int count = 0;
+>     for (auto& r : knn_results) {
+>         if (r.dist_sq <= r2) ++count;
+>         else break;  // KNN 按距离排序，后面的都更远
+>     }
+>     return count;
+> }
+> ```
+>
+> **方法一 vs 方法二**：方法一（范围查询变体）利用剪枝，平均 O(log N + R)（R=结果数），不受 K 限制；方法二受限于预设的 max_k，若半径内点数 > max_k 则漏计。游戏场景中若半径覆盖区域 agent 密度已知，方法二更简单；否则用方法一。
+
+> [!tip]- 练习 2 参考答案
+> 构造一维退化场景：所有 waypoint 排在 x 轴上（y=0），KD-Tree 按 x 和 y 交替切分，但由于 y 恒为 0，按 y 切分的层级完全无法区分点——剪枝失效。
+>
+> ```cpp
+> // 退化场景测试
+> #include <cassert>
+>
+> void test_degenerate_knn() {
+>     const int N = 2000;
+>     std::vector<std::pair<Point2D, int>> line_pts(N);
+>     // 所有点排在 x 轴上，y 固定为 0
+>     for (int i = 0; i < N; ++i)
+>         line_pts[i] = {Point2D((float)i * 0.25f, 0.0f), i};
+>
+>     SimpleKDTree tree;
+>     tree.build(line_pts);
+>
+>     // 随机查询点（也放在直线上以最大化退化效果）
+>     std::mt19937 rng(42);
+>     std::uniform_real_distribution<float> qdist(0, N * 0.25f);
+>
+>     const int QUERIES = 1000;
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     for (int i = 0; i < QUERIES; ++i) {
+>         Point2D q(qdist(rng), 0.0f);
+>         auto results = tree.knn(q, 5);
+>     }
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     auto knn_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+>     // 暴力对比
+>     t1 = std::chrono::high_resolution_clock::now();
+>     for (int i = 0; i < QUERIES; ++i) {
+>         Point2D q(qdist(rng), 0.0f);
+>         float best_d2 = std::numeric_limits<float>::max();
+>         int best_id = -1;
+>         for (int j = 0; j < N; ++j) {
+>             float d2 = sqr_dist(q, line_pts[j].first);
+>             if (d2 < best_d2) { best_d2 = d2; best_id = j; }
+>         }
+>     }
+>     t2 = std::chrono::high_resolution_clock::now();
+>     auto bf_us = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1).count();
+>
+>     std::cout << "退化场景 (N=" << N << " 共线):\n";
+>     std::cout << "  KD-Tree KNN: " << knn_us / (double)QUERIES << " us/query\n";
+>     std::cout << "  暴力:        " << bf_us / (double)QUERIES << " us/query\n";
+>     std::cout << "  加速比:      " << (double)bf_us / knn_us << "x\n";
+> }
+> ```
+>
+> **预期结果分析**：
+> - 共线点排列下，按 y 轴切分时所有点的 y=0，`nth_element` 无法有效分割——树深度 ≈ N
+> - 剪枝条件 `diff² < best_dist_sq` 中 diff 来自另一维度的轴距，对共线点无效（另一维度相同）
+> - 查询退化为 O(N)，加速比接近 1x（甚至更慢，因为递归/堆操作有额外开销）
+> - **缓解方案**：(1) 使用球树 (Ball Tree)——用超球体划分，对退化分布更健壮；(2) 随机旋转 KD-Tree——对数据做随机旋转再建树；(3) 切换到空间哈希——对线性分布反而 O(1)
+
+> [!tip]- 练习 3 参考答案
+> 增量 KNN 利用 agent 移动的**时域连贯性**：前一帧的 KNN 结果大概率仍接近当前帧结果，从缓存出发做局部搜索可大幅减少全局 KD-Tree 遍历。
+>
+> ```cpp
+> // 增量 KNN 缓存结构
+> struct AgentKNNState {
+>     std::vector<int> prev_waypoint_ids;      // 上一帧的 K 个最近 waypoint ID
+>     std::vector<Point2D> prev_waypoint_pos;   // 对应位置（用于验证是否仍有效）
+>     Point2D prev_agent_pos;                   // 上一帧 agent 位置
+>     bool needs_full_search = true;            // 首次或跳跃后需要全局搜索
+> };
+>
+> // 增量 KNN：从缓存出发，仅在必要时回退到全局搜索
+> std::vector<int> incremental_knn(const SimpleKDTree& waypoint_tree,
+>                                   const std::vector<Waypoint>& waypoints,
+>                                   const Agent& agent, AgentKNNState& state,
+>                                   int k = 4, float local_radius = 50.0f) {
+>     // 检查是否需要全局搜索
+>     float moved = dist(agent.pos, state.prev_agent_pos);
+>     if (state.needs_full_search || moved > local_radius * 0.5f) {
+>         // 回退到全局 KNN
+>         auto results = waypoint_tree.knn(agent.pos, k * 2);  // 取 2K 作为缓冲
+>         std::vector<int> ids;
+>         for (auto& r : results) ids.push_back(r.id);
+>
+>         // 更新缓存
+>         state.prev_waypoint_ids = ids;
+>         state.prev_agent_pos = agent.pos;
+>         state.prev_waypoint_pos.clear();
+>         for (auto& r : results) state.prev_waypoint_pos.push_back(r.point);
+>         state.needs_full_search = false;
+>
+>         // 返回前 K 个
+>         if ((int)ids.size() > k) ids.resize(k);
+>         return ids;
+>     }
+>
+>     // 局部搜索：从上一帧缓存出发
+>     struct Candidate {
+>         int id;
+>         float dist_sq;
+>         bool operator<(const Candidate& o) const { return dist_sq < o.dist_sq; }
+>     };
+>
+>     // 候选集初始化：上一帧的 waypoint + 它们的邻居
+>     std::unordered_set<int> visited;
+>     std::priority_queue<Candidate> max_heap;
+>
+>     for (int prev_id : state.prev_waypoint_ids) {
+>         if (prev_id < 0 || (int)visited.size() >= k * 3) break;  // 限制候选上限
+>
+>         // 检查候选点本身
+>         // 注意：这里需要 waypoints 数组来获取位置，实际实现中可从 waypoint_tree 查询或维护数组
+>         float d2 = sqr_dist(agent.pos, waypoints[prev_id].pos);
+>         if (visited.insert(prev_id).second) {
+>             if ((int)max_heap.size() < k) {
+>                 max_heap.push({prev_id, d2});
+>             } else if (d2 < max_heap.top().dist_sq) {
+>                 max_heap.pop();
+>                 max_heap.push({prev_id, d2});
+>             }
+>         }
+>     }
+>
+>     // 局部搜索阶段 2：在 agent 附近做范围查询获取新候选
+>     // 如果 agent 移出了缓存 waypoint 的覆盖范围，可能需要全局回退
+>     if ((int)max_heap.size() < k) {
+>         state.needs_full_search = true;  // 下一帧回退
+>     }
+>
+>     // 整理结果
+>     std::vector<Candidate> sorted;
+>     while (!max_heap.empty()) { sorted.push_back(max_heap.top()); max_heap.pop(); }
+>     std::reverse(sorted.begin(), sorted.end());
+>     std::vector<int> result;
+>     for (auto& c : sorted) result.push_back(c.id);
+>
+>     // 更新缓存
+>     state.prev_waypoint_ids = result;
+>     state.prev_agent_pos = agent.pos;
+>     return result;
+> }
+> ```
+>
+> ```cpp
+> // 简化版：纯缓存命中 + 懒回退（适合 agent 缓慢移动场景）
+> std::vector<int> incremental_knn_simple(const SimpleKDTree& tree,
+>                                          const Point2D& agent_pos,
+>                                          AgentKNNState& state, int k,
+>                                          float max_move = 5.0f) {
+>     if (state.needs_full_search ||
+>         sqr_dist(agent_pos, state.prev_agent_pos) > max_move * max_move) {
+>         // 全局搜索
+>         auto results = tree.knn(agent_pos, k);
+>         std::vector<int> ids;
+>         for (auto& r : results) ids.push_back(r.id);
+>         state.prev_waypoint_ids = ids;
+>         state.prev_agent_pos = agent_pos;
+>         state.needs_full_search = false;
+>         return ids;
+>     }
+>     // 直接复用上一帧结果（极简策略——仅当移动 < max_move 时有效）
+>     return state.prev_waypoint_ids;
+> }
+> ```
+>
+> **关键设计决策**：
+> - **回退阈值 `max_move`**：agent 移动超过此值 → 全局 KNN。设为 waypoint 平均间距的 2-3 倍（如 waypoint 间距 10 格 → max_move=20）
+> - **缓存膨胀系数**：全局搜索取 2K 结果而非正好 K，为局部搜索留缓冲余量
+> - **何时效果最佳**：agent 低速移动（每帧 < waypoint 间距的一半）、waypoint 密度均匀
+> - **性能收益**：全局 KNN 每次 ~O(K log M)，增量版本在缓存命中时 O(K)（仅检查缓存候选），80%+ 的帧可跳过全局搜索 → 整体降低 60-80% 开销
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **游戏寻路中的空间加速**：Millington, I. (2019). *AI for Games (3rd ed.)*, Chapter 4: "Movement" — 覆盖寻路中 KNN 的实际模式，含基于 KD-Tree 的 waypoint 图实践

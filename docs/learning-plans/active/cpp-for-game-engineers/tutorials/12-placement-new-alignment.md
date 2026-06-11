@@ -641,6 +641,401 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> > // fixed_pool.cpp — FixedPool<T, N> 固定大小对象池
+> > #include <cstddef>
+> > #include <new>
+> > #include <memory>
+> > #include <type_traits>
+> > #include <cassert>
+> > #include <iostream>
+> > #include <bitset>
+> > 
+> > template <typename T, size_t N>
+> > class FixedPool {
+> >     static_assert(N > 0, "Pool size must be positive");
+> > 
+> >     // 底层存储：对齐的原始字节 + 位图
+> >     alignas(T) char m_storage[N * sizeof(T)];
+> >     std::bitset<N> m_occupied;
+> > 
+> > public:
+> >     FixedPool() = default;
+> >     ~FixedPool() { destroy_all(); }
+> > 
+> >     FixedPool(const FixedPool&) = delete;
+> >     FixedPool& operator=(const FixedPool&) = delete;
+> > 
+> >     // 从池中分配一个 T
+> >     template <typename... Args>
+> >     T* create(Args&&... args) {
+> >         for (size_t i = 0; i < N; ++i) {
+> >             if (!m_occupied[i]) {
+> >                 m_occupied[i] = true;
+> >                 T* obj = std::construct_at(
+> >                     reinterpret_cast<T*>(&m_storage[i * sizeof(T)]),
+> >                     std::forward<Args>(args)...
+> >                 );
+> >                 return obj;
+> >             }
+> >         }
+> >         return nullptr;  // 池满
+> >     }
+> > 
+> >     // 销毁对象并归还槽位
+> >     void destroy(T* ptr) {
+> >         for (size_t i = 0; i < N; ++i) {
+> >             T* candidate = reinterpret_cast<T*>(&m_storage[i * sizeof(T)]);
+> >             if (candidate == ptr && m_occupied[i]) {
+> >                 std::destroy_at(ptr);
+> >                 m_occupied[i] = false;
+> >                 return;
+> >             }
+> >         }
+> >     }
+> > 
+> >     // 批量销毁所有活跃对象
+> >     void destroy_all() {
+> >         for (size_t i = 0; i < N; ++i) {
+> >             if (m_occupied[i]) {
+> >                 std::destroy_at(reinterpret_cast<T*>(&m_storage[i * sizeof(T)]));
+> >                 m_occupied[i] = false;
+> >             }
+> >         }
+> >     }
+> > 
+> >     size_t active() const { return m_occupied.count(); }
+> >     size_t capacity() const { return N; }
+> > };
+> > 
+> > // ============================================================
+> > // 测试：创建 → 销毁 → 复用
+> > // ============================================================
+> > struct Widget {
+> >     int id;
+> >     static int live_count;
+> > 
+> >     Widget(int i) : id(i) {
+> >         ++live_count;
+> >         std::cout << "  Widget(" << id << ") created, live=" << live_count << "\n";
+> >     }
+> >     ~Widget() {
+> >         --live_count;
+> >         std::cout << "  ~Widget(" << id << ") destroyed, live=" << live_count << "\n";
+> >     }
+> > };
+> > int Widget::live_count = 0;
+> > 
+> > int main() {
+> >     FixedPool<Widget, 6> pool;
+> > 
+> >     std::cout << "=== 初始分配 ===\n";
+> >     Widget* w1 = pool.create(1);
+> >     Widget* w2 = pool.create(2);
+> >     Widget* w3 = pool.create(3);
+> >     std::cout << "Active: " << pool.active() << "/" << pool.capacity() << "\n\n";
+> > 
+> >     std::cout << "=== 交错销毁与重建 ===\n";
+> >     pool.destroy(w2);  // 释放槽位
+> >     Widget* w4 = pool.create(4);  // 应复用 w2 的槽位
+> >     std::cout << "Active: " << pool.active() << "/" << pool.capacity() << "\n";
+> >     // 验证：w4 复用了 w2 的槽位（地址应相同）
+> >     std::cout << "w2 addr: " << w2 << ", w4 addr: " << w4
+> >               << (w2 == w4 ? " → 槽位复用 ✓" : "") << "\n\n";
+> > 
+> >     std::cout << "=== 批量销毁 ===\n";
+> >     pool.destroy_all();
+> >     std::cout << "Active: " << pool.active() << "/" << pool.capacity() << "\n";
+> >     assert(Widget::live_count == 0);
+> >     std::cout << "所有对象正确析构 ✓\n";
+> > 
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > // simd_vec4.cpp — SIMD 安全对齐的 Vec4 数学向量库
+> > // 编译: g++ -std=c++20 -msse -O2 simd_vec4.cpp -o simd_vec4
+> > #include <x86intrin.h>
+> > #include <cstddef>
+> > #include <cassert>
+> > #include <iostream>
+> > #include <cmath>
+> > 
+> > // ─── Vec4: 16 字节对齐 ───
+> > struct alignas(16) Vec4 {
+> >     float x, y, z, w;
+> > 
+> >     Vec4() : x(0), y(0), z(0), w(0) {}
+> >     Vec4(float a, float b, float c, float d) : x(a), y(b), z(c), w(d) {}
+> > 
+> >     // 使用 SSE 加速加法
+> >     Vec4 operator+(const Vec4& rhs) const {
+> >         __m128 a = _mm_load_ps(&x);
+> >         __m128 b = _mm_load_ps(&rhs.x);
+> >         __m128 c = _mm_add_ps(a, b);
+> >         Vec4 result;
+> >         _mm_store_ps(&result.x, c);
+> >         return result;
+> >     }
+> > 
+> >     // 点积 (dot product)
+> >     float dot(const Vec4& rhs) const {
+> >         __m128 a = _mm_load_ps(&x);
+> >         __m128 b = _mm_load_ps(&rhs.x);
+> >         __m128 mul = _mm_mul_ps(a, b);
+> >         // _mm_dp_ps: SSE4.1 点积指令
+> >         __m128 dp = _mm_dp_ps(mul, mul, 0xFF);
+> >         return _mm_cvtss_f32(dp);
+> >     }
+> > 
+> >     // 叉积 (仅 xyz 分量)
+> >     Vec4 cross(const Vec4& rhs) const {
+> >         // cross(a,b) = (ay*bz-az*by, az*bx-ax*bz, ax*by-ay*bx)
+> >         __m128 a = _mm_load_ps(&x);
+> >         __m128 b = _mm_load_ps(&rhs.x);
+> > 
+> >         // _MM_SHUFFLE(z,y,x,w)
+> >         __m128 a_yzx = _mm_shuffle_ps(a, a, _MM_SHUFFLE(3, 0, 2, 1));
+> >         __m128 b_yzx = _mm_shuffle_ps(b, b, _MM_SHUFFLE(3, 0, 2, 1));
+> >         __m128 c0 = _mm_sub_ps(_mm_mul_ps(a, b_yzx), _mm_mul_ps(b, a_yzx));
+> >         __m128 c1 = _mm_shuffle_ps(c0, c0, _MM_SHUFFLE(3, 0, 2, 1));
+> > 
+> >         Vec4 result;
+> >         _mm_store_ps(&result.x, c1);
+> >         result.w = 0.0f;
+> >         return result;
+> >     }
+> > };
+> > 
+> > static_assert(alignof(Vec4) == 16, "Vec4 must be 16-byte aligned for SSE");
+> > 
+> > // ─── 批量变换（SSE 加速）───
+> > void transform_batch(Vec4* positions, const float* matrix, size_t count) {
+> >     // matrix 是列主序 4x4（16 个 float）
+> >     __m128 m0 = _mm_load_ps(matrix + 0);
+> >     __m128 m1 = _mm_load_ps(matrix + 4);
+> >     __m128 m2 = _mm_load_ps(matrix + 8);
+> >     __m128 m3 = _mm_load_ps(matrix + 12);
+> > 
+> >     for (size_t i = 0; i < count; ++i) {
+> >         __m128 p = _mm_load_ps(&positions[i].x);
+> > 
+> >         // 广播每个分量
+> >         __m128 px = _mm_shuffle_ps(p, p, _MM_SHUFFLE(0, 0, 0, 0));
+> >         __m128 py = _mm_shuffle_ps(p, p, _MM_SHUFFLE(1, 1, 1, 1));
+> >         __m128 pz = _mm_shuffle_ps(p, p, _MM_SHUFFLE(2, 2, 2, 2));
+> >         __m128 pw = _mm_shuffle_ps(p, p, _MM_SHUFFLE(3, 3, 3, 3));
+> > 
+> >         __m128 r = _mm_add_ps(
+> >             _mm_add_ps(_mm_mul_ps(m0, px), _mm_mul_ps(m1, py)),
+> >             _mm_add_ps(_mm_mul_ps(m2, pz), _mm_mul_ps(m3, pw))
+> >         );
+> > 
+> >         _mm_store_ps(&positions[i].x, r);
+> >     }
+> > }
+> > 
+> > // ============================================================
+> > // 演示与验证
+> > // ============================================================
+> > int main() {
+> >     std::cout << "Vec4 alignment: " << alignof(Vec4) << " bytes";
+> >     if (alignof(Vec4) == 16) std::cout << " ✓\n";
+> >     else std::cout << " ✗\n";
+> > 
+> >     // 基本操作
+> >     Vec4 a(1, 2, 3, 1);
+> >     Vec4 b(4, 5, 6, 1);
+> >     Vec4 c = a + b;
+> >     std::cout << "a + b = (" << c.x << ", " << c.y << ", " << c.z << ", " << c.w << ")\n";
+> >     std::cout << "a · b = " << a.dot(b) << "\n";
+> > 
+> >     Vec4 d = a.cross(b);
+> >     std::cout << "a × b = (" << d.x << ", " << d.y << ", " << d.z << ", " << d.w << ")\n";
+> > 
+> >     // 批量变换
+> >     // 单位矩阵 + 平移 (1,0,0)
+> >     alignas(16) float matrix[16] = {
+> >         1, 0, 0, 0,
+> >         0, 1, 0, 0,
+> >         0, 0, 1, 0,
+> >         1, 0, 0, 1   // tx=1 在列主序的位置
+> >     };
+> >     alignas(16) Vec4 positions[4] = {
+> >         {0, 0, 0, 1}, {1, 0, 0, 1}, {0, 1, 0, 1}, {0, 0, 1, 1}
+> >     };
+> >     transform_batch(positions, matrix, 4);
+> >     std::cout << "\nAfter transform:\n";
+> >     for (int i = 0; i < 4; ++i)
+> >         std::cout << "  [" << i << "] = (" << positions[i].x << ", " << positions[i].y
+> >                   << ", " << positions[i].z << ")\n";
+> > 
+> >     // ─── 对齐验证 ───
+> >     std::cout << "\n--- 对齐行为分析 ---\n";
+> >     // x86: _mm_load_ps 在未对齐地址上不崩溃，但会触发性能惩罚
+> >     // ARM: 未对齐的 SIMD load 直接 SIGBUS
+> >     std::cout << "x86: _mm_load_ps 支持未对齐加载但性能严重下降（~2x 慢于对齐）\n";
+> >     std::cout << "ARM: vld1q_f32 要求 16 字节对齐，否则触发 alignment fault\n";
+> >     std::cout << "结论: 始终确保 SIMD 数据对齐到 16 字节边界\n";
+> > 
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案（选做·挑战）
+> ```cpp
+> > // general_aligned_allocator.cpp — 对齐感知通用分配器
+> > #include <cstdlib>
+> > #include <new>
+> > #include <vector>
+> > #include <cstdint>
+> > #include <cassert>
+> > #include <cstdio>
+> > #include <algorithm>
+> > #include <random>
+> > 
+> > // ============================================================
+> > // GeneralAlignedAllocator — C++17 对齐分配 + 归还追踪
+> > // ============================================================
+> > class GeneralAlignedAllocator {
+> >     struct Record {
+> >         void*  base;        // operator new 返回的原始地址
+> >         size_t alignment;   // 对齐要求
+> >     };
+> >     std::vector<Record> m_records;
+> >     size_t m_total = 0;
+> > 
+> > public:
+> >     ~GeneralAlignedAllocator() {
+> >         // 清理所有未归还的分配
+> >         for (auto& r : m_records) {
+> >             ::operator delete(r.base, std::align_val_t{r.alignment});
+> >         }
+> >     }
+> > 
+> >     // C++17: align_val_t 对齐分配
+> >     void* allocate(size_t size, size_t alignment) {
+> >         assert((alignment & (alignment - 1)) == 0 && "must be power of 2");
+> >         void* p = ::operator new(size, std::align_val_t{alignment});
+> >         m_records.push_back({p, alignment});
+> >         m_total += size;
+> >         return p;
+> >     }
+> > 
+> >     // 对齐归还：记录查找 + 正确释放
+> >     void deallocate(void* ptr) {
+> >         auto it = std::find_if(m_records.begin(), m_records.end(),
+> >             [ptr](const Record& r) { return r.base == ptr; });
+> >         if (it != m_records.end()) {
+> >             ::operator delete(it->base, std::align_val_t{it->alignment});
+> >             m_records.erase(it);
+> >         }
+> >     }
+> > 
+> >     size_t total_allocated() const { return m_total; }
+> >     size_t active_count()  const { return m_records.size(); }
+> > };
+> > 
+> > // ============================================================
+> > // 碎片化测量
+> > // ============================================================
+> > struct FragResult {
+> >     size_t total_requested;  // 用户请求的总字节
+> >     size_t total_allocated;  // 实际分配的（含对齐浪费）
+> >     double internal_frag;    // 内部碎片率 = (alloc - request) / alloc
+> > };
+> > 
+> > FragResult measure_aligned_allocator() {
+> >     GeneralAlignedAllocator alloc;
+> >     const size_t alignments[] = {8, 16, 32, 64};
+> >     std::mt19937 rng(42);
+> >     std::uniform_int_distribution<size_t> size_dist(16, 256);
+> >     std::uniform_int_distribution<size_t> align_dist(0, 3);
+> > 
+> >     size_t requested = 0;
+> >     std::vector<void*> ptrs;
+> > 
+> >     for (int i = 0; i < 1000; ++i) {
+> >         size_t sz  = size_dist(rng);
+> >         size_t align = alignments[align_dist(rng)];
+> >         // 实际分配大小：sz 向上取整到 align 的倍数
+> >         size_t aligned_sz = (sz + align - 1) & ~(align - 1);
+> >         void* p = alloc.allocate(sz, align);
+> >         ptrs.push_back(p);
+> >         requested += sz;
+> >     }
+> > 
+> >     // 释放一半
+> >     std::shuffle(ptrs.begin(), ptrs.end(), rng);
+> >     for (size_t i = 0; i < ptrs.size() / 2; ++i) {
+> >         alloc.deallocate(ptrs[i]);
+> >     }
+> > 
+> >     FragResult r;
+> >     r.total_requested = requested;
+> >     r.total_allocated = alloc.total_allocated();
+> >     r.internal_frag = (r.total_allocated > 0)
+> >         ? 1.0 - static_cast<double>(r.total_requested) / r.total_allocated
+> >         : 0.0;
+> >     return r;
+> > }
+> > 
+> > FragResult measure_malloc() {
+> >     std::mt19937 rng(42);
+> >     std::uniform_int_distribution<size_t> size_dist(16, 256);
+> > 
+> >     size_t requested = 0;
+> >     std::vector<void*> ptrs;
+> > 
+> >     for (int i = 0; i < 1000; ++i) {
+> >         size_t sz = size_dist(rng);
+> >         void* p = std::malloc(sz);
+> >         ptrs.push_back(p);
+> >         requested += sz;
+> >     }
+> > 
+> >     std::shuffle(ptrs.begin(), ptrs.end(), rng);
+> >     for (size_t i = 0; i < ptrs.size() / 2; ++i) {
+> >         std::free(ptrs[i]);
+> >     }
+> >     for (size_t i = ptrs.size() / 2; i < ptrs.size(); ++i) {
+> >         std::free(ptrs[i]);
+> >     }
+> > 
+> >     FragResult r;
+> >     r.total_requested = requested;
+> >     r.total_allocated = requested;  // malloc 不记录实际内部分配
+> >     r.internal_frag = 0.0;          // 无对齐信息
+> >     return r;
+> > }
+> > 
+> > int main() {
+> >     auto aligned = measure_aligned_allocator();
+> >     auto raw     = measure_malloc();
+> > 
+> >     printf("===== 内部碎片率对比 =====\n\n");
+> >     printf("--- GeneralAlignedAllocator ---\n");
+> >     printf("  用户请求:   %zu bytes\n", aligned.total_requested);
+> >     printf("  实际分配:   %zu bytes\n", aligned.total_allocated);
+> >     printf("  内部碎片率: %.2f%%\n\n", aligned.internal_frag * 100);
+> > 
+> >     printf("--- malloc ---\n");
+> >     printf("  用户请求:   %zu bytes\n", raw.total_requested);
+> >     printf("  malloc 通常也做对齐填充（~16-32 bytes overhead per block）\n");
+> >     printf("  C++17 operator new(align_val_t) 更透明地暴露对齐开销\n");
+> > 
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **cppreference: Placement new**：[new expression](https://en.cppreference.com/w/cpp/language/new)

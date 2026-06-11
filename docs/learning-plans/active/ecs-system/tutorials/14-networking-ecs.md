@@ -442,6 +442,178 @@ g++ -std=c++17 -O2 network_ecs.cpp -o network_ecs && ./network_ecs
 ### 练习 3: 带宽自适应（挑战）
 实现一个简单的带宽估算器和自适应快照频率：当可用带宽低于阈值时，降低快照频率（30fps → 10fps），但增加插值时间窗口以保持视觉平滑。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // ========== 增量快照编码器 ==========
+> struct WorldEncoder {
+>     // 记录上一帧每个 netId 对应组件的哈希值
+>     unordered_map<NetId, size_t> prevPosHash;
+>     unordered_map<NetId, size_t> prevHpHash;
+>
+>     // 简单字段哈希（也可用 memcmp 逐字节对比）
+>     size_t hashPos(const Pos& p) {
+>         return hash<float>{}(p.x) ^ (hash<float>{}(p.y) << 1);
+>     }
+>     size_t hashHealth(const Health& h) {
+>         return hash<int>{}(h.hp);
+>     }
+>
+>     Snapshot encode(World& w, uint32_t frame, float time) {
+>         Snapshot snap;
+>         snap.frame = frame;
+>         snap.serverTime = time;
+>
+>         auto& ents = w.net.ents();
+>         for (Entity e : ents) {
+>             auto* net = w.net.get(e);
+>             if (!net) continue;
+>
+>             // ========== 增量策略：只序列化变化的组件 ==========
+>             if (auto* p = w.pos.get(e)) {
+>                 size_t h = hashPos(*p);
+>                 if (!prevPosHash.count(net->netId) || prevPosHash[net->netId] != h) {
+>                     snap.components.push_back({net->netId, SnapComponent::T_Pos, {}});
+>                     snap.components.back().pos = *p;
+>                     prevPosHash[net->netId] = h;
+>                 }
+>             }
+>             if (auto* hp = w.hp.get(e)) {
+>                 size_t h = hashHealth(*hp);
+>                 if (!prevHpHash.count(net->netId) || prevHpHash[net->netId] != h) {
+>                     snap.components.push_back({net->netId, SnapComponent::T_Health, {}});
+>                     snap.components.back().hp = *hp;
+>                     prevHpHash[net->netId] = h;
+>                 }
+>             }
+>         }
+>         return snap;
+>     }
+> };
+> ```
+>
+> **字节数对比（估算）：**
+> - 100 实体全量：~100 × (4+8+4) = 1600 bytes/帧（含 netId+pos+hp）
+> - 100 实体增量（~10% 变化）：~10 × 16 = 160 bytes/帧 → **节省 90%**
+> - 1000 实体全量：~16KB/帧；增量（~5% 变化）：~800 bytes → **节省 95%**
+> - **代价：** 服务端需维护每个 netId 的上帧哈希表；客户端需能处理"缺省值"（未在快照中的组件保持上次值）
+> - **memcmp 方案：** 直接 `memcmp(&oldPos[netId], &newPos, sizeof(Pos))` 比哈希更精确（无碰撞），但需要存储完整上帧数据
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> struct ClientPredictionSystem {
+>     struct InputCmd { float dx, dy; bool jump; uint32_t inputId; };
+>
+>     // 输入缓冲：保留最近 256 个输入
+>     static const int MAX_INPUTS = 256;
+>     InputCmd inputBuffer[MAX_INPUTS];
+>     int head = 0, tail = 0;           // 环形队列
+>     uint32_t nextInputId = 0;
+>     uint32_t lastAckedInputId = 0;    // 服务器确认的最后一个 inputId
+>
+>     void pushInput(const InputCmd& cmd) {
+>         inputBuffer[head % MAX_INPUTS] = cmd;
+>         head++;
+>     }
+>
+>     // 服务器确认了哪些输入（快照中携带 ackedInputId）
+>     void onServerAck(World& w, Entity localPlayer, uint32_t ackedInputId,
+>                      Pos serverPos) {
+>         if (ackedInputId <= lastAckedInputId) return; // 旧确认，忽略
+>
+>         // 重置到服务器位置
+>         auto* p = w.pos.get(localPlayer);
+>         auto* pred = w.pred.get(localPlayer);
+>         if (!p || !pred) return;
+>         *p = serverPos;
+>         pred->predX = serverPos.x;
+>         pred->predY = serverPos.y;
+>
+>         // ========== 回滚重放 ==========
+>         // 从 ackedInputId+1 到最新的输入，重新应用到当前位置
+>         for (uint32_t id = ackedInputId + 1; id < nextInputId; id++) {
+>             int idx = (head - (nextInputId - id) + MAX_INPUTS) % MAX_INPUTS;
+>             // 注意：需要正确的环形队列索引计算
+>             InputCmd& cmd = inputBuffer[idx];
+>             // 重新应用输入（dt 需保存或使用固定步长）
+>             float speed = 200.0f;
+>             p->x += cmd.dx * speed * (1.0f/60.0f);
+>             p->y += cmd.dy * speed * (1.0f/60.0f);
+>         }
+>
+>         pred->predX = p->x;
+>         pred->predY = p->y;
+>         lastAckedInputId = ackedInputId;
+>
+>         // 清理已确认的输入
+>         while (tail <= ackedInputId && tail < head) tail++;
+>     }
+> };
+> ```
+>
+> **GGPO 风格回滚的核心思想：**
+> 1. 客户端每帧发送输入并本地预测执行
+> 2. 输入存入环形缓冲（携带递增的 inputId）
+> 3. 服务器快照到达时：
+>    a. 将本地状态重置到服务器确认的位置
+>    b. 从确认点之后的所有输入重新播放（replay）
+>    c. 这就是"回滚"——状态回到过去，沿着相同输入序列重新向前推进
+> 4. 输入缓冲大小决定了最大可接受的服务端延迟
+
+> [!tip]- 练习 3 参考答案（可选）
+> **自适应快照频率的设计方案：**
+>
+> ```cpp
+> struct AdaptiveSyncConfig {
+>     uint32_t baseSnapRate  = 30;   // 基准：每秒 30 个快照
+>     uint32_t minSnapRate   = 10;   // 最低：每秒 10 个
+>     float    bandwidthLimitBytesPerSec = 5000; // 5KB/s 限制
+>
+>     // 平滑估计：指数移动平均
+>     float estimatedBps = 0;
+>     float smoothingFactor = 0.1f;
+>
+>     uint32_t currentSnapRate = baseSnapRate;
+>     float    interpolationWindow = 0.100f; // 基准 100ms
+> };
+>
+> // 在 SnapshotSystem 中调用
+> uint32_t AdaptiveSnapshotSystem(AdaptiveSyncConfig& cfg, size_t lastSnapBytes) {
+>     // 更新带宽估计
+>     float instantBps = lastSnapBytes * cfg.baseSnapRate;
+>     cfg.estimatedBps = cfg.smoothingFactor * instantBps
+>                      + (1 - cfg.smoothingFactor) * cfg.estimatedBps;
+>
+>     if (cfg.estimatedBps > cfg.bandwidthLimitBytesPerSec) {
+>         // 带宽紧张 → 降低快照频率
+>         cfg.currentSnapRate = max(cfg.minSnapRate,
+>             uint32_t(cfg.baseSnapRate * cfg.bandwidthLimitBytesPerSec / cfg.estimatedBps));
+>         // 增加插值窗口保持视觉平滑
+>         cfg.interpolationWindow = 0.100f * float(cfg.baseSnapRate) / cfg.currentSnapRate;
+>     } else {
+>         // 带宽充足 → 恢复基准频率
+>         cfg.currentSnapRate = min(cfg.baseSnapRate, cfg.currentSnapRate + 1);
+>         cfg.interpolationWindow = 0.100f;
+>     }
+>     return cfg.currentSnapRate;
+> }
+>
+> // 插值系统需根据 interpolationWindow 调整 renderTime：
+> // void InterpolationSystem::receiveSnapshot(const Snapshot& snap) {
+> //     // ...
+> //     renderTime = max(renderTime, nextTime - interpolationWindow);
+> // }
+> ```
+>
+> **关键权衡：**
+> - 降低快照频率 = 节省带宽，但增加输入延迟（玩家看到的状态更"旧"）
+> - 增加插值窗口 = 视觉平滑，但延迟更高
+> - 生产级实现还需：优先级队列（玩家实体快照频率 > 远处 NPC）、AOI（只同步视野内实体）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

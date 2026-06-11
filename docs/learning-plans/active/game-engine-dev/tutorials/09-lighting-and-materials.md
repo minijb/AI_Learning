@@ -1788,6 +1788,268 @@ float intensity = clamp((theta - outerCutoff) / epsilon, 0.0, 1.0);
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```glsl
+> // 聚光灯（Spot Light）—— 片段着色器实现
+> // 在现有光照代码的基础上添加
+>
+> // ==== GLSL 结构体定义（在片段着色器中） ====
+> struct SpotLight {
+>     vec3  position;
+>     vec3  direction;    // 聚光灯朝向
+>     vec3  color;
+>     float intensity;
+>     float innerCutoff;  // 内锥角余弦值（cos(innerAngle)）
+>     float outerCutoff;  // 外锥角余弦值（cos(outerAngle)）
+> };
+>
+> uniform SpotLight uSpotLight;
+>
+> // ==== 聚光灯计算函数 ====
+> vec3 calcSpotLight(SpotLight light, vec3 worldPos, vec3 normal, vec3 viewDir,
+>                    vec3 albedo, float shininess) {
+>     // 1. 基本光照向量
+>     vec3 L = normalize(light.position - worldPos);
+>     float distance = length(light.position - worldPos);
+>
+>     // 2. 聚光因子：光源方向与到片元方向的夹角
+>     float theta = dot(L, normalize(-light.direction));
+>     //    注意：-light.direction 是光源的"朝向"，L 是"指向光源"
+>     //    dot(L, -dir) 越大 → 片元越靠近光锥中心
+>
+>     // 3. 边缘柔化（smoothstep 实现内外锥之间的平滑过渡）
+>     float epsilon = light.innerCutoff - light.outerCutoff;
+>     float intensity = clamp((theta - light.outerCutoff) / epsilon, 0.0, 1.0);
+>
+>     if (intensity <= 0.0) return vec3(0.0); // 完全在外锥之外，无光照
+>
+>     // 4. 衰减（距离平方修正衰减）
+>     float att = 1.0 / (1.0 + 0.09 * distance + 0.032 * distance * distance);
+>
+>     // 5. 漫反射 + 高光（Blinn-Phong）
+>     float NdotL = max(dot(normal, L), 0.0);
+>     vec3 H = normalize(L + viewDir);
+>     float NdotH = max(dot(normal, H), 0.0);
+>     float specular = pow(NdotH, shininess);
+>
+>     vec3 diffuse = albedo * light.color * NdotL;
+>     vec3 spec = vec3(0.5) * light.color * specular;
+>
+>     return (diffuse + spec) * att * intensity * light.intensity;
+> }
+> ```
+>
+> ```cpp
+> // ==== C++ 端调用：手电筒跟随相机 ====
+> // 在渲染循环中设置 SpotLight uniform：
+> shader.setVec3("uSpotLight.position", cameraPos);
+> shader.setVec3("uSpotLight.direction", cameraFront);       // 相机朝向 = 聚光灯方向
+> shader.setVec3("uSpotLight.color", glm::vec3(1.0f, 0.95f, 0.8f)); // 暖光
+> shader.setFloat("uSpotLight.intensity", 1.5f);
+> shader.setFloat("uSpotLight.innerCutoff", glm::cos(glm::radians(12.5f)));  // 内锥 12.5°
+> shader.setFloat("uSpotLight.outerCutoff", glm::cos(glm::radians(20.0f)));  // 外锥 20.0°
+> ```
+>
+> **smoothstep vs clamp：** 这里用 `clamp` 替代 `smoothstep` 是故意的——`clamp` 提供线性过渡，计算开销更小。如果追求更柔和的边缘，可用 `smoothstep(light.outerCutoff, light.innerCutoff, theta)`（注意参数顺序：smoothstep(edge0, edge1, x) 在 x<edge0 返回 0，x>edge1 返回 1）。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // PCF 软阴影实现 —— 完整流程
+>
+> // ==== 第一步：Shadow Pass（渲染深度贴图） ====
+> // 从方向光视角渲染场景到 FBO
+> GLuint depthMapFBO, depthMap;
+> const unsigned int SHADOW_WIDTH = 2048, SHADOW_HEIGHT = 2048;
+>
+> glGenFramebuffers(1, &depthMapFBO);
+> glGenTextures(1, &depthMap);
+> glBindTexture(GL_TEXTURE_2D, depthMap);
+> glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, SHADOW_WIDTH, SHADOW_HEIGHT,
+>              0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+> glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+> glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+> // 超出 shadow map 范围的区域设为 1.0（无阴影）
+> glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+> glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+> float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+> glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+>
+> glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
+> glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, depthMap, 0);
+> glDrawBuffer(GL_NONE); glReadBuffer(GL_NONE);  // 不需要颜色输出
+>
+> // 渲染深度贴图：
+> // glViewport(0, 0, SHADOW_WIDTH, SHADOW_HEIGHT);
+> // glBindFramebuffer(GL_FRAMEBUFFER, depthMapFBO);
+> // glClear(GL_DEPTH_BUFFER_BIT);
+> // // 使用简单深度着色器渲染所有物体
+> // glUseProgram(simpleDepthShader);
+> // // 设置 lightSpaceMatrix = ortho * lightView
+> // // 渲染所有物体...
+> // glBindFramebuffer(GL_FRAMEBUFFER, 0);
+> ```
+>
+> ```glsl
+> // ==== 第二步：片段着色器中的阴影计算 ====
+> // 在主渲染 Pass 的片段着色器中添加：
+>
+> uniform sampler2DShadow uShadowMap;  // ★ 使用 sampler2DShadow 类型
+> uniform mat4 uLightSpaceMatrix;      // 光源的 view_projection 矩阵
+>
+> float calcShadowPCF(vec4 fragPosLightSpace, vec3 normal, vec3 lightDir) {
+>     // 1. 透视除法 → NDC [-1,1] → 纹理坐标 [0,1]
+>     vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
+>     projCoords = projCoords * 0.5 + 0.5;
+>
+>     // 2. 超出 shadow map 范围则无阴影
+>     if (projCoords.z > 1.0) return 0.0;
+>
+>     // 3. Slope-scale bias：减少 Shadow Acne
+>     float bias = max(0.05 * (1.0 - dot(normal, lightDir)), 0.005);
+>
+>     // 4. PCF：3x3 采样取平均
+>     float shadow = 0.0;
+>     vec2 texelSize = 1.0 / textureSize(uShadowMap, 0);
+>     for (int x = -1; x <= 1; ++x) {
+>         for (int y = -1; y <= 1; ++y) {
+>             // sampler2DShadow 自动做深度比较，返回 0.0 或 1.0
+>             float pcfDepth = texture(uShadowMap,
+>                 projCoords.xy + vec2(x, y) * texelSize,
+>                 projCoords.z - bias);  // ★ 第三个参数是 reference depth
+>             shadow += pcfDepth;
+>         }
+>     }
+>     shadow /= 9.0;  // 9 个采样取平均 → 软阴影
+>
+>     return 1.0 - shadow;  // 返回阴影因子：0.0 = 全阴影, 1.0 = 无阴影
+> }
+>
+> // 在 main() 中使用：
+> void main() {
+>     // ... 光照计算 ...
+>     vec4 fragPosLight = uLightSpaceMatrix * vec4(worldPos, 1.0);
+>     float shadow = calcShadowPCF(fragPosLight, normal, lightDir);
+>     // 环境光不受阴影影响，仅漫反射和高光受阴影影响
+>     vec3 finalColor = ambient + (diffuse + specular) * shadow;
+> }
+> ```
+>
+> **Bias 调参指南：** Shadow Acne 和 Peter-Panning 是一对矛盾——bias 太小产生 Shadow Acne（表面自身被判定为在阴影中），bias 太大产生 Peter-Panning（阴影与物体分离）。`max(0.05 * (1.0 - dot(N, L)), 0.005)` 是一个经验公式：当表面法线与光源方向夹角大（掠射角）时增大 bias，当法线正对光源时减小 bias。这是 Slope-Scale Depth Bias 的简化版本，UE4 使用更复杂的 `GetShadowDepthBias` 函数。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```glsl
+> // PBR 片段着色器核心：Cook-Torrance BRDF
+> // 参考：UE4 "Real Shading in Unreal Engine 4" (Karis 2013)
+>
+> uniform samplerCube uIrradianceMap;      // 漫反射 IBL（预卷积环境贴图）
+> uniform samplerCube uPrefilterMap;       // 镜面反射 IBL（预过滤环境贴图）
+> uniform sampler2D   uBRDFLUT;            // BRDF 积分查找表
+>
+> uniform float uRoughness;
+> uniform float uMetallic;
+> uniform vec3  uAlbedo;
+>
+> // ---- PBR 函数 ----
+> const float PI = 3.14159265359;
+>
+> // Trowbridge-Reitz GGX 法线分布函数
+> float DistributionGGX(vec3 N, vec3 H, float roughness) {
+>     float a = roughness * roughness;
+>     float a2 = a * a;
+>     float NdotH = max(dot(N, H), 0.0);
+>     float NdotH2 = NdotH * NdotH;
+>     float denom = NdotH2 * (a2 - 1.0) + 1.0;
+>     return a2 / (PI * denom * denom);
+> }
+>
+> // Schlick-GGX 几何函数
+> float GeometrySchlickGGX(float NdotV, float roughness) {
+>     float k = (roughness + 1.0) * (roughness + 1.0) / 8.0; // 直接光照的 k
+>     return NdotV / (NdotV * (1.0 - k) + k);
+> }
+>
+> float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
+>     return GeometrySchlickGGX(max(dot(N, V), 0.0), roughness) *
+>            GeometrySchlickGGX(max(dot(N, L), 0.0), roughness);
+> }
+>
+> // Schlick Fresnel
+> vec3 FresnelSchlick(float cosTheta, vec3 F0) {
+>     return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+> }
+>
+> // ---- 主光照计算 ----
+> void main() {
+>     vec3 N = normalize(vNormal);
+>     vec3 V = normalize(uCameraPos - vWorldPos);
+>
+>     // Fresnel at normal incidence (F0)
+>     vec3 F0 = mix(vec3(0.04), uAlbedo, uMetallic);
+>     // 对于非金属，F0 = 0.04；金属，F0 = Albedo
+>
+>     // ==== Cook-Torrance BRDF ====
+>     vec3 Lo = vec3(0.0);
+>     for (int i = 0; i < MAX_LIGHTS; ++i) {
+>         vec3 L = normalize(lights[i].position - vWorldPos);
+>         vec3 H = normalize(V + L);
+>         float NdotL = max(dot(N, L), 0.0);
+>         if (NdotL <= 0.0) continue;
+>
+>         // radiance
+>         float dist = length(lights[i].position - vWorldPos);
+>         float att = 1.0 / (dist * dist);
+>         vec3 radiance = lights[i].color * att;
+>
+>         // Cook-Torrance BRDF
+>         float NDF = DistributionGGX(N, H, uRoughness);
+>         float G   = GeometrySmith(N, V, L, uRoughness);
+>         vec3  F   = FresnelSchlick(max(dot(H, V), 0.0), F0);
+>
+>         vec3 numerator = NDF * G * F;
+>         float denominator = 4.0 * max(dot(N, V), 0.0) * NdotL + 0.0001;
+>         vec3 specular = numerator / denominator;
+>
+>         vec3 kS = F;
+>         vec3 kD = (vec3(1.0) - kS) * (1.0 - uMetallic);
+>         Lo += (kD * uAlbedo / PI + specular) * radiance * NdotL;
+>     }
+>
+>     // ==== IBL（Image-Based Lighting）====
+>     // 漫反射 IBL
+>     vec3 kS = FresnelSchlick(max(dot(N, V), 0.0), F0);
+>     vec3 kD = (1.0 - kS) * (1.0 - uMetallic);
+>     vec3 irradiance = texture(uIrradianceMap, N).rgb;
+>     vec3 diffuseIBL = kD * uAlbedo * irradiance;
+>
+>     // 镜面反射 IBL（Split-Sum Approximation）
+>     const float MAX_REFLECTION_LOD = 4.0;
+>     vec3 R = reflect(-V, N);
+>     vec3 prefilteredColor = textureLod(uPrefilterMap, R, uRoughness * MAX_REFLECTION_LOD).rgb;
+>     vec2 envBRDF = texture(uBRDFLUT, vec2(max(dot(N, V), 0.0), uRoughness)).rg;
+>     vec3 specularIBL = prefilteredColor * (kS * envBRDF.x + envBRDF.y);
+>
+>     vec3 ambient = diffuseIBL + specularIBL;
+>     vec3 color = ambient + Lo;
+>
+>     // HDR Tone Mapping (Reinhard)
+>     color = color / (color + vec3(1.0));
+>     // Gamma 校正
+>     color = pow(color, vec3(1.0 / 2.2));
+>
+>     fragColor = vec4(color, 1.0);
+> }
+> ```
+>
+> **关键设计决策：**  
+> - **F0 的计算：** 非金属的 F0 约为 0.04（4% 反射率），金属的 F0 等于其颜色（如金 = 橙色）。`mix(vec3(0.04), albedo, metallic)` 是 UE4 的标准做法。  
+> - **IBL Split-Sum Approximation**（Karis 2013）：镜面反射的 IBL 通过预过滤环境贴图（mipmap 链，每级对应不同粗糙度）+ 2D BRDF LUT 近似，避免了运行时对完整 BRDF 的数值积分。  
+> - **能量守恒：** `kD = (1.0 - kS) * (1.0 - metallic)` 确保漫反射 + 镜面反射能量不会超过入射光。金属没有漫反射，所以 `(1.0 - metallic)` 因子消除了金属的漫反射分量。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 经典论文

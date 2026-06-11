@@ -567,6 +567,200 @@ g++ -std=c++17 -O2 frame_analyzer.cpp -o frame_analyzer
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // variable_load_simulator.cpp — 可变负载帧分析器
+> // 编译: g++ -std=c++17 variable_load_simulator.cpp -o var_load && ./var_load
+> #include <iostream>
+> #include <iomanip>
+> #include <vector>
+> #include <functional>
+>
+> // 可变负载配置：使用函数对象而非固定值
+> struct DynamicFrameConfig {
+>     std::function<double(int)> cpu_input;   // 帧号 → 输入耗时
+>     std::function<double(int)> cpu_update;  // 帧号 → 更新耗时
+>     std::function<double(int)> cpu_render;  // 帧号 → 渲染提交耗时
+>     std::function<double(int)> gpu_exec;    // 帧号 → GPU 耗时
+>     double display_hz = 60.0;
+>     int buffer_mode = 2;
+>     size_t sim_frames = 200;
+> };
+>
+> struct BottleneckEvent {
+>     size_t frame;
+>     const char* from;
+>     const char* to;
+> };
+>
+> struct AnalysisResult {
+>     std::vector<double> frame_intervals;
+>     std::vector<BottleneckEvent> bottleneck_shifts;
+>     int cpu_bound_count = 0;
+>     int gpu_bound_count = 0;
+>     int detection_accuracy_pct = 0;
+> };
+>
+> // 瓶颈判定：比较 CPU 总耗时与 GPU 耗时
+> const char* DetectBottleneck(double cpu_ms, double gpu_ms) {
+>     if (cpu_ms > gpu_ms * 1.1)  return "CPU";
+>     if (gpu_ms > cpu_ms * 1.1)  return "GPU";
+>     return "Balanced";
+> }
+>
+> AnalysisResult SimulateDynamic(const DynamicFrameConfig& cfg,
+>                                 const char* expected_bottleneck_fn(int)) {
+>     AnalysisResult r;
+>     double gpu_complete = 0, last_display = 0;
+>     double refresh = 1000.0 / cfg.display_hz;
+>     const char* prev_bottleneck = nullptr;
+>
+>     int correct_detections = 0;
+>
+>     for (size_t i = 0; i < cfg.sim_frames; i++) {
+>         double cpu_in = cfg.cpu_input(i);
+>         double cpu_up = cfg.cpu_update(i);
+>         double cpu_re = cfg.cpu_render(i);
+>         double gpu_ex = cfg.gpu_exec(i);
+>         double cpu_total = cpu_in + cpu_up + cpu_re;
+>
+>         // 简化的帧时间模型
+>         double gpu_start = std::max(cpu_in + cpu_up, gpu_complete);
+>         double gpu_end = gpu_start + gpu_ex;
+>         gpu_complete = gpu_end;
+>         double frame_ready = std::max(cpu_total, gpu_end);
+>         double display = std::ceil(std::max(frame_ready, last_display + 0.001) / refresh) * refresh;
+>         r.frame_intervals.push_back(display - last_display);
+>         last_display = display;
+>
+>         // 瓶颈检测
+>         const char* detected = DetectBottleneck(cpu_total, gpu_ex);
+>         const char* expected = expected_bottleneck_fn((int)i);
+>         if (strcmp(detected, expected) == 0) correct_detections++;
+>
+>         if (strcmp(detected, "CPU") == 0) r.cpu_bound_count++;
+>         else if (strcmp(detected, "GPU") == 0) r.gpu_bound_count++;
+>
+>         // 瓶颈转移检测
+>         if (prev_bottleneck && strcmp(detected, prev_bottleneck) != 0) {
+>             std::cout << "⚠️  第 " << i << " 帧: 瓶颈从 "
+>                       << prev_bottleneck << " 转移到 " << detected << "\n";
+>             r.bottleneck_shifts.push_back({i, prev_bottleneck, detected});
+>         }
+>         prev_bottleneck = detected;
+>     }
+>
+>     r.detection_accuracy_pct = cfg.sim_frames > 0
+>         ? correct_detections * 100 / (int)cfg.sim_frames : 100;
+>     return r;
+> }
+>
+> int main() {
+>     // 测试: CPU 从 12ms 渐变到 4ms（模拟持续优化），GPU 保持 8ms
+>     DynamicFrameConfig cfg;
+>     cfg.display_hz = 60.0;
+>     cfg.buffer_mode = 2;
+>     cfg.sim_frames = 200;
+>
+>     // 固定值
+>     cfg.cpu_input  = [](int) { return 0.5; };
+>     cfg.cpu_render = [](int) { return 2.0; };
+>     cfg.gpu_exec   = [](int) { return 8.0; };
+>
+>     // 渐变 CPU: 从 12ms 线性降到 4ms
+>     cfg.cpu_update = [](int frame) {
+>         return 9.5 - (9.5 - 1.5) * frame / 199.0; // 总 CPU = 0.5+更新+2.0
+>     };
+>
+>     auto expected = [](int frame) {
+>         double cpu = 0.5 + (9.5 - (9.5-1.5)*frame/199.0) + 2.0;
+>         return cpu > 8.0 * 1.1 ? "CPU" : (8.0 > cpu * 1.1 ? "GPU" : "Balanced");
+>     };
+>
+>     std::cout << "========== 瓶颈转移模拟 ==========\n"
+>               << "CPU 从 ~12ms 渐变到 ~4ms, GPU 固定 8ms\n\n";
+>
+>     auto result = SimulateDynamic(cfg, expected);
+>
+>     std::cout << "\n========== 统计 ==========\n"
+>               << "检测准确率: " << result.detection_accuracy_pct << "%\n"
+>               << "CPU Bound 帧: " << result.cpu_bound_count << "\n"
+>               << "GPU Bound 帧: " << result.gpu_bound_count << "\n"
+>               << "瓶颈转移次数: " << result.bottleneck_shifts.size() << "\n\n"
+>               << "关键结论:\n"
+>               << "  前半段: CPU > GPU → CPU Bound (优化 GPU 无意义)\n"
+>               << "  后半段: CPU < GPU → GPU Bound (瓶颈转移!)\n"
+>               << "  转折点: 当 CPU ~= GPU 时 (~8ms 处)\n";
+>     return 0;
+> }
+> ```
+>
+> **设计要点：**
+> - 使用 `std::function<double(int)>` 替代固定值，支持任意负载模式
+> - 瓶颈转移检测：比较当前帧与上一帧的瓶颈类型
+> - 准确率计算：将检测结果与期望值对比（基于配置的理论瓶颈）
+> - 渐变负载模拟持续优化的效果，观察 CPU→GPU 的瓶颈转移点
+
+> [!tip]- 练习 2 参考答案
+> **分析方法（步骤指南）：**
+>
+> 1. **准备工具**：同时打开 RenderDoc（或 PIX/NSight）和任务管理器（Performance 标签页）
+>
+> 2. **在任务管理器中观察 GPU 使用率**：
+>    - GPU 使用率持续 > 95% → 初步判断 GPU 在满负荷工作
+>    - GPU 使用率 < 80% 且 CPU 有核心接近 100% → 怀疑 CPU Bound
+>    - **注意**：GPU 使用率高不代表一定是 GPU Bound（可能是 Draw Call 太多导致 CPU 忙但 GPU 也在等）
+>
+> 3. **捕获一帧（RenderDoc 操作）**：
+>    - 在游戏内固定视角和场景，确保测量条件一致
+>    - 按 F12 捕获一帧
+>    - 在 Event Browser 中观察 GPU 时间线：
+>      - GPU 时间线中有明显的 **Idle 气泡**（空白间隙）→ **CPU Bound**（GPU 在等 CPU 提交下一帧的指令）
+>      - GPU 时间线**连续不断**（无间隙）→ **GPU Bound**（GPU 一直在处理）
+>
+> 4. **降低分辨率验证**：
+>    - 将游戏分辨率或渲染缩放从 1080p 降到 540p
+>    - 重新测量帧时间（或观察 FPS 计数器）
+>    - 帧时间下降超过 40% → **GPU Bound** 确认（像素 Shader 工作量大幅减少）
+>    - 帧时间几乎不变 → **CPU Bound** 确认（像素 Shader 不是瓶颈）
+>
+> 5. **报告模板**：
+>    ```
+>    游戏: [名称]
+>    测试场景: [场景描述]
+>    分辨率: 1920×1080
+>
+>    判定: [CPU/GPU] Bound
+>
+>    证据 1 (GPU 时间线): [描述 RenderDoc 中的 Idle 间隙或满载状态]
+>    证据 2 (降分辨率测试): 540p 下帧时间从 [X]ms 变为 [Y]ms (变化 [Z]%)
+>    证据 3 (任务管理器): GPU 使用率 [X]%, CPU 核心使用率 [分布]
+>    ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> **V-Sync 模式差异分析：**
+>
+> | 特性 | No V-Sync | Double Buffer | Triple Buffer | Adaptive |
+> |------|-----------|---------------|---------------|----------|
+> | 帧时间 | 最小（不等刷新） | 量化到 16.67ms 倍数 | 更平滑，可能非整数倍 | 预算内=VSync，超时=No VSync |
+> | 撕裂 | 有（部分帧显示到一半） | 无 | 无 | 超时时可能有 |
+> | 输入延迟 | 最低 | 1-2 帧 | 1-2 帧 | 预算内=1帧，超时=最低 |
+> | 帧时间方差 | 取决于负载 | 量化步进导致方差大 | 中等 | 动态切换 |
+> | 适用场景 | 竞技 FPS (CS:GO) | 一般游戏 | 3A 大作 | 性能不稳定的游戏 |
+>
+> **关键实现差异**：
+> - No V-Sync: `display_time = frame_ready` — 立即显示
+> - Double Buffer: `display_time = ceil(frame_ready / refresh) * refresh` — 等最近 VBlank
+> - Triple Buffer: 允许最多 2 帧在队列中，`display_time = max(ceil(frame_ready/refresh)*refresh, last_display + refresh)` 但有 2 个缓冲区
+> - Adaptive: `if (frame_ready <= budget) V-Sync else No V-Sync`
+>
+> **模拟显示**：No V-Sync 帧时间最小但方差最大；Double Buffer 帧时间是刷新率的整数倍（在 60Hz 下为 16.67/33.33/50ms）；Triple Buffer 缓解了 Double Buffer 的"一帧超时直接丢到下一个刷新周期"的问题。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - [Frame Timing and Pacing — Microsoft DirectX 开发中心](https://learn.microsoft.com/en-us/windows/win32/direct3dgetstarted/optimize-performance)

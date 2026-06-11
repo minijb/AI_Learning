@@ -196,6 +196,67 @@ require('luasnip').add_snippets('lua', {
 
 在 Lua 文件中输入 `fn` + `<C-y>`，观察 snippet 展开。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 验证各补全来源的步骤与预期结果：
+>
+> - **LSP 补全** (`'lsp'`)：输入 `vim.key` → 应弹出来自 lua_ls 的补全列表，每项带有类型标注和文档。LSP 补全的特点是包含函数签名、类型信息和来自语言服务器的精确建议。
+> - **路径补全** (`'path'`)：输入 `./` 或 `require('` → 应弹出文件系统路径的补全列表（目录和文件名）。路径补全触发于路径分隔符 `/` 或字符串上下文。
+> - **Snippet 补全** (`'snippets'`)：在 Lua 文件中输入 `for` → 补全弹出后按 `Tab`（或 `<C-n>` 选中 + `<C-y>` 确认），LuaSnip 应展开 `for` snippet 为完整的循环模板。snippet 条目在补全菜单中有特殊图标标记。
+> - **Buffer 补全** (`'buffer'`)：如果已将 `'buffer'` 加入 `sources.default`，输入当前文件已存在的变量名 → 应看到来自当前 buffer 的词条补全。注意 buffer 源会产生较多噪音（文件中所有词都成为候选），kickstart 默认不含它。
+>
+> **如何确认补全来源**：blink.cmp 在补全菜单中为不同来源显示不同图标——LSP 显示服务器图标，path 显示文件夹图标，snippet 显示剪刀图标。你也可以临时修改 `sources.default` 只保留一个来源来隔离测试。
+
+> [!tip]- 练习 2 参考答案
+> 三种 keymap 预设的行为差异：
+>
+> | 预设 | 确认补全 | 选择上一项/下一项 | 关闭菜单 | 换行行为 |
+> |------|---------|------------------|---------|---------|
+> | `'default'` | `<C-y>` | `<C-n>` / `<C-p>` | `<C-e>` | `<CR>` 正常换行，不确认补全 |
+> | `'super-tab'` | `<Tab>` | `<Tab>` / `<S-Tab>` | `<C-e>` | `<CR>` 正常换行 |
+> | `'enter'` | `<CR>` (Enter) | `<C-n>` / `<C-p>` | `<C-e>` | 无直接换行——需先 `<C-e>` 关闭菜单再按 Enter |
+>
+> **default 预设** 是最安全的选择——确认补全（`<C-y>`）和换行（`<CR>`）是独立按键，不会因为想换行而意外确认补全。
+>
+> **super-tab 预设** 适合从 VSCode 迁移的用户——Tab 既是导航也是确认，减少按键种类。代价是如果想在补全菜单中插入 Tab 字符（如在 Markdown 中）就不方便。
+>
+> **enter 预设** 最接近 IDE 体验但风险最大——如果你习惯看补全菜单的同时按 Enter 换行，你就意外确认了补全。只有当你确定自己习惯用其他方式换行（如 `<C-j>` mapped to `<CR>`）时才选择它。
+
+> [!tip]- 练习 3 参考答案
+> 完整可运行的 Lua function snippet 配置：
+>
+> ```lua
+> -- 在 init.lua 的 Autocomplete & Snippets section 中，
+> -- 在 require('luasnip').setup {} 之后添加：
+>
+> local ls = require 'luasnip'
+>
+> ls.add_snippets('lua', {
+>   ls.snippet('fn', {
+>     ls.text_node('function '),       -- 静态文本 "function "
+>     ls.insert_node(1, 'name'),       -- 第一个跳转位（函数名）
+>     ls.text_node('('),                -- 左括号
+>     ls.insert_node(2, 'args'),       -- 第二个跳转位（参数列表）
+>     ls.text_node({ ')', '' }),       -- 右括号 + 换行
+>     ls.insert_node(0, '  -- body'),  -- 第 0 个跳转位（函数体，0 = 最后一个）
+>     ls.text_node({ '', 'end' }),     -- 换行 + end
+>   }),
+> })
+> ```
+>
+> 使用方法：
+> 1. 在 Lua 文件中输入 `fn`（插入模式）
+> 2. blink.cmp 弹出补全菜单，snippet 条目显示 `fn` 带 snippet 图标
+> 3. 按 `<C-y>` 确认后，LuaSnip 展开为模板
+> 4. 光标首先在 `name` 位置（insert_node 1），输入函数名后按 `<Tab>` 跳到 `args`（insert_node 2）
+> 5. 输入参数后按 `<Tab>` 跳到 `-- body`（insert_node 0），编辑函数体后按 `<Tab>` 跳出 snippet
+>
+> **关键概念**：`insert_node(0)` 是"出口节点"——所有跳转最终结束于 0 号节点。`text_node` 是不可编辑的静态文本。`insert_node(N)` 按 N 升序跳转（1 → 2 → ... → 0）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

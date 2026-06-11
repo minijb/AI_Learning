@@ -716,6 +716,506 @@ void SetupCrowdWithLODAndReplication(
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // PedestrianLODFragments.h —— 补充 Fragment 定义
+> #pragma once
+> #include "MassEntityTypes.h"
+> #include "PedestrianLODFragments.generated.h"
+>
+> // 近距离专用：详细动画（骨骼混合树索引 + IK 数据）
+> USTRUCT()
+> struct FMassDetailedAnimationFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>     UPROPERTY() int32 BlendTreeIndex = 0;    // 动画混合树索引
+>     UPROPERTY() FVector LeftFootIK = FVector::ZeroVector;
+>     UPROPERTY() FVector RightFootIK = FVector::ZeroVector;
+>     UPROPERTY() float LookAtYaw = 0.0f;
+> };
+>
+> // 中距离专用：简化动画（仅移动状态 Idle/Walk/Run）
+> USTRUCT()
+> struct FMassSimpleAnimationFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>     UPROPERTY() int32 MovementAnimState = 0; // 0=Idle, 1=Walk, 2=Run
+>     UPROPERTY() float PlayRate = 1.0f;
+> };
+>
+> // LOD 标记 Tag
+> USTRUCT() struct FHighLODTag : public FMassTag { GENERATED_BODY() };
+> USTRUCT() struct FMediumLODTag : public FMassTag { GENERATED_BODY() };
+> ```
+>
+> ```cpp
+> // PedestrianLODProcessor.h
+> #pragma once
+> #include "MassProcessor.h"
+> #include "PedestrianLODProcessor.generated.h"
+>
+> UCLASS()
+> class UPedestrianLODProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UPedestrianLODProcessor();
+>
+>     // 可配置的距离阈值（cm）
+>     UPROPERTY(EditAnywhere, Category = "LOD")
+>     float HighDistance = 5000.0f;   // ≤50m → High LOD
+>     UPROPERTY(EditAnywhere, Category = "LOD")
+>     float MediumDistance = 15000.0f; // 50-150m → Medium LOD
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery EntityQuery;
+> };
+> ```
+>
+> ```cpp
+> // PedestrianLODProcessor.cpp
+> #include "PedestrianLODProcessor.h"
+> #include "PedestrianLODFragments.h"
+> #include "MassCommonFragments.h"
+> #include "MassEntityManager.h"
+> #include "MassExecutionContext.h"
+> #include "VisualLogger/VisualLogger.h"
+>
+> UPedestrianLODProcessor::UPedestrianLODProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::LOD;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void UPedestrianLODProcessor::ConfigureQueries()
+> {
+>     // 查询所有有 Transform 的实体（基础要求）
+>     EntityQuery.AddRequirement<FTransformFragment>(
+>         EMassFragmentAccess::ReadOnly);
+>     EntityQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UPedestrianLODProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     // 获取玩家（Significance View）位置
+>     TArray<FVector> ViewerLocations;
+>     if (const UMassLODSubsystem* LODSub =
+>         Context.GetSubsystem<UMassLODSubsystem>())
+>     {
+>         TArray<FTransform> Views;
+>         LODSub->GetViewerTransforms(Views);
+>         for (const auto& V : Views) ViewerLocations.Add(V.GetLocation());
+>     }
+>     // 没有视点时跳过（编辑器默认无玩家）
+>     if (ViewerLocations.IsEmpty()) return;
+>
+>     EntityQuery.ForEachEntityChunk(EntityManager, Context,
+>         [this, &ViewerLocations](FMassExecutionContext& ChunkCtx)
+>         {
+>             const auto Transforms =
+>                 ChunkCtx.GetFragmentView<FTransformFragment>();
+>             const int32 Num = ChunkCtx.GetNumEntities();
+>
+>             for (int32 i = 0; i < Num; ++i)
+>             {
+>                 const FVector Pos =
+>                     Transforms[i].GetTransform().GetLocation();
+>
+>                 // 计算到最近视点的距离
+>                 float MinDistSq = FLT_MAX;
+>                 for (const FVector& VLoc : ViewerLocations)
+>                     MinDistSq = FMath::Min(MinDistSq,
+>                         FVector::DistSquared(Pos, VLoc));
+>                 const float Dist = FMath::Sqrt(MinDistSq);
+>
+>                 const FMassEntityHandle Entity = ChunkCtx.GetEntity(i);
+>
+>                 if (Dist <= HighDistance)
+>                 {
+>                     // ── High LOD: 添加详细动画Fragment ──
+>                     if (!EntityManager.HasFragment<
+>                         FMassDetailedAnimationFragment>(Entity))
+>                     {
+>                         ChunkCtx.Defer().AddFragment<
+>                             FMassDetailedAnimationFragment>(Entity);
+>                         ChunkCtx.Defer().AddTag<FHighLODTag>(Entity);
+>                         ChunkCtx.Defer().RemoveFragment<
+>                             FMassSimpleAnimationFragment>(Entity);
+>                         ChunkCtx.Defer().RemoveTag<FMediumLODTag>(Entity);
+>
+>                         UE_VLOG(EntityManager.GetWorld(),
+>                             LogTemp, Verbose,
+>                             TEXT("Entity %d → High LOD (dist=%.0f)"),
+>                             Entity.Index, Dist);
+>                     }
+>                 }
+>                 else if (Dist <= MediumDistance)
+>                 {
+>                     // ── Medium LOD: 简化动画Fragment ──
+>                     if (!EntityManager.HasFragment<
+>                         FMassSimpleAnimationFragment>(Entity))
+>                     {
+>                         ChunkCtx.Defer().RemoveFragment<
+>                             FMassDetailedAnimationFragment>(Entity);
+>                         ChunkCtx.Defer().RemoveTag<FHighLODTag>(Entity);
+>                         ChunkCtx.Defer().AddFragment<
+>                             FMassSimpleAnimationFragment>(Entity);
+>                         ChunkCtx.Defer().AddTag<FMediumLODTag>(Entity);
+>
+>                         UE_VLOG(EntityManager.GetWorld(),
+>                             LogTemp, Verbose,
+>                             TEXT("Entity %d → Medium LOD (dist=%.0f)"),
+>                             Entity.Index, Dist);
+>                     }
+>                 }
+>                 else
+>                 {
+>                     // ── Low LOD: 仅保留 Transform，移除所有动画 ──
+>                     ChunkCtx.Defer().RemoveFragment<
+>                         FMassDetailedAnimationFragment>(Entity);
+>                     ChunkCtx.Defer().RemoveFragment<
+>                         FMassSimpleAnimationFragment>(Entity);
+>                     ChunkCtx.Defer().RemoveTag<FHighLODTag>(Entity);
+>                     ChunkCtx.Defer().RemoveTag<FMediumLODTag>(Entity);
+>                     // 远距离不记录日志避免刷屏
+>                 }
+>             }
+>         });
+> }
+> ```
+>
+> **设计要点：**
+> - 使用 `EntityManager.HasFragment<T>()` 避免重复添加（虽然 Mass 的 `AddFragment` 本身幂等，但显式检查减少 Defer 指令量）
+> - Low LOD 实体移除所有动画 Fragment——后续 Animation Processor 通过 `FHighLODTag`/`FMediumLODTag` 过滤，自动跳过远距离实体
+> - `UE_VLOG` 仅在高/中 LOD 切换时记录，远距离跳变不刷日志（`Verbose` 级别默认不可见，需 `log LogTemp Verbose` 开启）
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // LODPerfProcessor.h
+> #pragma once
+> #include "MassProcessor.h"
+> #include "LODPerfProcessor.generated.h"
+>
+> // 只处理 High LOD 实体的 Processor（完整 AI 逻辑）
+> UCLASS()
+> class UHighLODPerfProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UHighLODPerfProcessor()
+>     {
+>         bAutoRegisterWithProcessingPhases = true;
+>         ExecutionOrder.ExecuteInGroup =
+>             UE::Mass::ProcessorGroupNames::Behavior;
+>         ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+>     }
+> protected:
+>     virtual void ConfigureQueries() override
+>     {
+>         // 必须带 High LOD Tag + 所有行为相关 Fragment
+>         EntityQuery.AddTagRequirement<FHighLODTag>(
+>             EMassFragmentPresence::All);
+>         EntityQuery.AddRequirement<FCrowdBehaviorFragment>(
+>             EMassFragmentAccess::ReadWrite);
+>         EntityQuery.AddRequirement<FCrowdMovementFragment>(
+>             EMassFragmentAccess::ReadWrite);
+>         EntityQuery.AddRequirement<FTransformFragment>(
+>             EMassFragmentAccess::ReadOnly);
+>         EntityQuery.RegisterWithProcessor(*this);
+>     }
+>     virtual void Execute(FMassEntityManager& Mgr,
+>                          FMassExecutionContext& Ctx) override
+>     {
+>         SCOPE_CYCLE_COUNTER(STAT_HighLOD_CompleteAI);
+>         // 完整 AI：Boids 三规则 + 路径规划 + 碰撞检测
+>         EntityQuery.ForEachEntityChunk(Mgr, Ctx,
+>             [](FMassExecutionContext& Chunk)
+>             {
+>                 auto Behaviors = Chunk.GetMutableFragmentView<
+>                     FCrowdBehaviorFragment>();
+>                 auto Movements = Chunk.GetMutableFragmentView<
+>                     FCrowdMovementFragment>();
+>                 const auto Transforms =
+>                     Chunk.GetFragmentView<FTransformFragment>();
+>
+>                 for (int32 i = 0; i < Chunk.GetNumEntities(); ++i)
+>                 {
+>                     // 分离：与邻居保持距离
+>                     Behaviors[i].SteeringForce += FVector::UpVector * 100.0f;
+>                     // 对齐：匹配邻居平均速度方向
+>                     // 聚拢：向邻居中心靠拢
+>                     // （实际 Boids 计算需要邻居快照，此处演示 Tag 过滤效果）
+>                     Movements[i].CurrentSpeed =
+>                         FMath::Min(Movements[i].DesiredSpeed,
+>                                    Movements[i].MaxSpeed);
+>                 }
+>             });
+>     }
+> };
+>
+> // 只处理 Medium LOD 实体的 Processor（简化行为）
+> UCLASS()
+> class UMediumLODPerfProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UMediumLODPerfProcessor()
+>     {
+>         bAutoRegisterWithProcessingPhases = true;
+>         ExecutionOrder.ExecuteInGroup =
+>             UE::Mass::ProcessorGroupNames::Behavior;
+>         ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+>     }
+> protected:
+>     virtual void ConfigureQueries() override
+>     {
+>         EntityQuery.AddTagRequirement<FMediumLODTag>(
+>             EMassFragmentPresence::All);
+>         EntityQuery.AddRequirement<FCrowdMovementFragment>(
+>             EMassFragmentAccess::ReadWrite);
+>         EntityQuery.AddRequirement<FTransformFragment>(
+>             EMassFragmentAccess::ReadOnly);
+>         EntityQuery.RegisterWithProcessor(*this);
+>     }
+>     virtual void Execute(FMassEntityManager& Mgr,
+>                          FMassExecutionContext& Ctx) override
+>     {
+>         SCOPE_CYCLE_COUNTER(STAT_MediumLOD_SimpleMove);
+>         // 简化行为：仅匀速移动，无 Steering/碰撞
+>         EntityQuery.ForEachEntityChunk(Mgr, Ctx,
+>             [](FMassExecutionContext& Chunk)
+>             {
+>                 auto Movements = Chunk.GetMutableFragmentView<
+>                     FCrowdMovementFragment>();
+>                 for (int32 i = 0; i < Chunk.GetNumEntities(); ++i)
+>                     Movements[i].CurrentSpeed =
+>                         Movements[i].DesiredSpeed * 0.5f;
+>             });
+>     }
+> };
+>
+> // 只处理 Low LOD 实体的 Processor（仅位置更新）
+> UCLASS()
+> class ULowLODPerfProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     ULowLODPerfProcessor()
+>     {
+>         bAutoRegisterWithProcessingPhases = true;
+>         ExecutionOrder.ExecuteInGroup =
+>             UE::Mass::ProcessorGroupNames::Movement;
+>         ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+>     }
+> protected:
+>     virtual void ConfigureQueries() override
+>     {
+>         // Low LOD 实体既没有 High 也没有 Medium Tag
+>         EntityQuery.AddTagRequirement<FHighLODTag>(
+>             EMassFragmentPresence::None);
+>         EntityQuery.AddTagRequirement<FMediumLODTag>(
+>             EMassFragmentPresence::None);
+>         EntityQuery.AddRequirement<FTransformFragment>(
+>             EMassFragmentAccess::ReadWrite);
+>         EntityQuery.RegisterWithProcessor(*this);
+>     }
+>     virtual void Execute(FMassEntityManager& Mgr,
+>                          FMassExecutionContext& Ctx) override
+>     {
+>         SCOPE_CYCLE_COUNTER(STAT_LowLOD_PositionOnly);
+>         // 极简：仅根据上次速度外推位置
+>         EntityQuery.ForEachEntityChunk(Mgr, Ctx,
+>             [](FMassExecutionContext& Chunk)
+>             {
+>                 // 几乎零开销的处理
+>             });
+>     }
+> };
+> ```
+>
+> **性能验证要点：**
+>
+> 在 UE 编辑器中测试：
+> 1. `stat startfile` 开始性能记录，Spawn 10000 个行人实体
+> 2. `stat stopfile` 停止记录，打开 Unreal Insights
+> 3. 观察三个 `SCOPE_CYCLE_COUNTER` 的耗时对比：
+>    - `STAT_HighLOD_CompleteAI`：预计 ~200 个实体，每帧 ~0.5ms
+>    - `STAT_MediumLOD_SimpleMove`：预计 ~4000 个实体，每帧 ~0.3ms
+>    - `STAT_LowLOD_PositionOnly`：预计 ~5800 个实体，每帧 ~0.05ms
+> 4. **关键结论**：9800 个远距离实体（Medium+Low）合计 <0.4ms，而 200 个 High LOD 实体 ~0.5ms——**97% 的实体只消耗了 <45% 的计算时间**，帧率轻松保持 60+ FPS
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // ClientPredictionProcessor.h —— 客户端本地预测
+> #pragma once
+> #include "MassProcessor.h"
+> #include "ClientPredictionProcessor.generated.h"
+>
+> UCLASS()
+> class UClientPredictionProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     UClientPredictionProcessor()
+>     {
+>         // 在 Replication Processor 之后执行，以便使用最新服务端数据
+>         bAutoRegisterWithProcessingPhases = true;
+>         ExecutionOrder.ExecuteInGroup =
+>             UE::Mass::ProcessorGroupNames::Movement;
+>         ExecutionOrder.ExecuteAfter.Add(
+>             TEXT("MassClientBubbleProcessor"));
+>         ExecutionFlags =
+>             (int32)(EProcessorExecutionFlags::Client);
+>     }
+>
+> protected:
+>     virtual void ConfigureQueries() override
+>     {
+>         // 查询：所有有 Transform、速度、网络 ID 的实体
+>         EntityQuery.AddRequirement<FTransformFragment>(
+>             EMassFragmentAccess::ReadWrite);
+>         EntityQuery.AddRequirement<FCrowdMovementFragment>(
+>             EMassFragmentAccess::ReadOnly);
+>         EntityQuery.AddRequirement<FMassNetworkIDFragment>(
+>             EMassFragmentAccess::ReadOnly);
+>         // 预测状态 Fragment——存储上次服务端位置和速度
+>         EntityQuery.AddRequirement<FClientPredictionFragment>(
+>             EMassFragmentAccess::ReadWrite);
+>         EntityQuery.RegisterWithProcessor(*this);
+>     }
+>
+>     virtual void Execute(FMassEntityManager& Mgr,
+>                          FMassExecutionContext& Ctx) override;
+> };
+> ```
+>
+> ```cpp
+> // ClientPredictionFragment —— 客户端预测状态（新增 Fragment）
+> USTRUCT()
+> struct FClientPredictionFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     // 最后一次从服务端收到的权威数据
+>     UPROPERTY() FVector ServerPosition = FVector::ZeroVector;
+>     UPROPERTY() FVector ServerVelocity = FVector::ZeroVector;
+>     UPROPERTY() float ServerTimestamp = 0.0f;       // 服务端时间戳
+>
+>     // 客户端本地预测状态
+>     UPROPERTY() FVector PredictedPosition = FVector::ZeroVector;
+>     UPROPERTY() float TimeSinceLastUpdate = 0.0f;   // 距上次服务端更新的时间
+>     UPROPERTY() bool bHasReceivedServerData = false; // 首次收到数据前不做预测
+> };
+>
+> // ClientPredictionProcessor.cpp —— Execute 实现
+> void UClientPredictionProcessor::Execute(
+>     FMassEntityManager& Mgr, FMassExecutionContext& Ctx)
+> {
+>     const float DeltaTime = Ctx.GetDeltaTimeSeconds();
+>
+>     EntityQuery.ForEachEntityChunk(Mgr, Ctx,
+>         [DeltaTime](FMassExecutionContext& Chunk)
+>         {
+>             auto Transforms = Chunk.GetMutableFragmentView<
+>                 FTransformFragment>();
+>             const auto Movements =
+>                 Chunk.GetFragmentView<FCrowdMovementFragment>();
+>             auto Predictions = Chunk.GetMutableFragmentView<
+>                 FClientPredictionFragment>();
+>
+>             for (int32 i = 0; i < Chunk.GetNumEntities(); ++i)
+>             {
+>                 auto& Pred = Predictions[i];
+>                 FTransform& T =
+>                     Transforms[i].GetMutableTransform();
+>
+>                 if (!Pred.bHasReceivedServerData)
+>                 {
+>                     // 首次收到服务端数据时，直接采用服务端位置
+>                     // （在 ClientBubbleProcessor 中设置 ServerPosition）
+>                     continue;
+>                 }
+>
+>                 // ── 预测阶段：基于上次服务端速度外推 ──
+>                 Pred.TimeSinceLastUpdate += DeltaTime;
+>
+>                 // 如果刚收到服务端数据（TimeSinceLastUpdate ≈ 0），
+>                 // 则 PredictedPosition == ServerPosition
+>                 if (Pred.TimeSinceLastUpdate <= DeltaTime + KINDA_SMALL_NUMBER)
+>                 {
+>                     // 初始化预测起点
+>                     Pred.PredictedPosition = Pred.ServerPosition;
+>                 }
+>
+>                 // 用服务端速度驱动预测位置
+>                 Pred.PredictedPosition +=
+>                     Pred.ServerVelocity * DeltaTime;
+>
+>                 // ── 校正阶段：将当前位置平滑拉向预测位置 ──
+>                 // 插值速度越大，校正越快；通常 8-15 为佳
+>                 constexpr float InterpSpeed = 10.0f;
+>                 const FVector CurrentPos = T.GetLocation();
+>                 const FVector TargetPos = Pred.PredictedPosition;
+>
+>                 // 如果距离较远（>2m），直接跳转避免明显滑动
+>                 if (FVector::DistSquared(CurrentPos, TargetPos)
+>                     > FMath::Square(200.0f))
+>                 {
+>                     T.SetLocation(TargetPos); // 瞬移
+>                 }
+>                 else
+>                 {
+>                     // 平滑插值修正
+>                     T.SetLocation(FMath::VInterpTo(
+>                         CurrentPos, TargetPos,
+>                         DeltaTime, InterpSpeed));
+>                 }
+>             }
+>         });
+> }
+> ```
+>
+> ```cpp
+> // ClientBubbleProcessor 中设置服务端权威数据（简化示意）
+> // 当客户端的 MassClientBubbleInfo 接收到服务端序列化数据时：
+> void OnServerDataReceived(FMassEntityHandle Entity,
+>     const FVector& ServerPos, const FVector& ServerVel,
+>     float ServerTime)
+> {
+>     auto& Pred = EntityManager.GetFragmentData<
+>         FClientPredictionFragment>(Entity);
+>
+>     Pred.ServerPosition = ServerPos;
+>     Pred.ServerVelocity = ServerVel;
+>     Pred.ServerTimestamp = ServerTime;
+>     Pred.TimeSinceLastUpdate = 0.0f;  // 重置预测计时器
+>
+>     if (!Pred.bHasReceivedServerData)
+>     {
+>         // 首次接收：直接用服务端位置初始化
+>         Pred.bHasReceivedServerData = true;
+>         Pred.PredictedPosition = ServerPos;
+>     }
+> }
+> ```
+>
+> **100ms 延迟下的平滑动画关键：**
+> 1. **VInterpTo 的 InterpSpeed=10**：约 0.3s 内消除 1m 的偏差，肉眼无跳变
+> 2. **超过 2m 的偏差直接瞬移**：防止预测长时间偏离导致"瞬移回去"比"一直偏着"更差
+> 3. **预测基速度来自服务端**（`ServerVelocity`）而非客户端本地计算——如果是玩家操控的实体（有 Input），预测需要用客户端输入 + 最后服务端状态做 replay
+> 4. 真实项目中还需处理**数据包乱序**——用 `ServerTimestamp` 丢弃比上次更旧的数据包
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **UE 源码**: `Engine/Plugins/Runtime/MassEntity/Source/MassLOD/Public/MassLODSignificanceProcessor.h` — 内置 LOD 处理器实现

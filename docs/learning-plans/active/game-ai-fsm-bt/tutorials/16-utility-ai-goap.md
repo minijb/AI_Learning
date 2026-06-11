@@ -809,6 +809,192 @@ public class TakeCoverAction : GoapAction
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **扩展 Utility AI** — 基于示例 A 的 `UtilityAgent` 框架。
+>
+> **1. 新增 3 个动作及 Reason**：
+> ```csharp
+> // WatchTV 动作
+> var watchTV = new UtilityAction("WatchTV",
+>     new List<UtilityReason> {
+>         // 娱乐需求：中低时开始有吸引力，高时减弱
+>         new UtilityReason("EntertainmentNeed",
+>             new UtilityResponseCurve(Shape.Bell, 0.5f, 2.0f),
+>             () => 1f - GetNeed("Entertainment")),  // 需求越高（满足度越低）→ 分数越高
+>         // 能量门槛：至少 20% 才能看电视（否则直接排除）
+>         new UtilityReason("EnergyAvailable",
+>             new UtilityResponseCurve(Shape.Logistic, 0.2f, 20f, 0f, 1f),  // sharp cut at 0.2
+>             () => GetNeed("Energy"))
+>     });
+>
+> // GoShopping 动作
+> var goShopping = new UtilityAction("GoShopping",
+>     new List<UtilityReason> {
+>         new UtilityReason("WealthSufficient",
+>             new UtilityResponseCurve(Shape.Logistic, 0.3f, 10f),
+>             () => GetResource("Money")),
+>         new UtilityReason("SocialNeedLow",
+>             new UtilityResponseCurve(Shape.InverseBell, 0.5f, 3f),  // 社交需求中低时才逛街
+>             () => GetNeed("Social"))
+>     });
+>
+> // Exercise 动作
+> var exercise = new UtilityAction("Exercise",
+>     new List<UtilityReason> {
+>         new UtilityReason("EnergySurplus",
+>             new UtilityResponseCurve(Shape.Logistic, 0.7f, 15f, 0.2f, 1f),  // 能量 > 70% 才考虑
+>             () => GetNeed("Energy")),
+>         new UtilityReason("HealthConcern",
+>             new UtilityResponseCurve(Shape.Linear, 0f, 1f, 0.1f, 0.5f),
+>             () => GetNeed("Health"))
+>     });
+> ```
+>
+> **2. WatchTV vs Socialize 振荡场景与消除**：
+>
+> **振荡场景设计**：NPC 的 Entertainment 需求在 0.45-0.55 之间波动（每次看电视满足 0.05，每秒社交衰减 0.02）。如果两者的效用评分曲线斜率在 0.5 附近相近，就会出现交替领先：
+> ```
+> Frame N:   WatchTV=0.62, Socialize=0.61 → WatchTV
+> Frame N+1: WatchTV 满足 Entertainment→分数降为 0.52; Socialize=0.62 → Socialize
+> Frame N+2: Socialize 不满足 Entertainment→需求回升; WatchTV=0.63 → WatchTV (振荡!)
+> ```
+>
+> **消除振荡的调参策略**：
+> 1. **增加 Steepness**：将 WatchTV 的 Entertainment curve 的 steepness 从 2.0 提到 3.0 → 在边界区响应更快，一旦满足就更快退出 → 减少"刚好相等"的概率。
+> 2. **调整 Midpoint**：将 Socialize 的 midpoint 从 0.5 移到 0.6 → 使其在更高需求时才激活 → 与 WatchTV 的峰值错开。
+> 3. **加 Hysteresis**（代码级）：`if (currentAction == "WatchTV") currentScore += 0.05f;` → 当前动作有惯性加分，切换需要显著差异。
+> 4. **Cooldown**：动作切换后锁定最短 2 秒 → 物理上阻止高频切换。
+>
+> **3. 思考问题回答**：
+>
+> **Q: Utility AI 调参为什么比 BT 更难？**
+> BT 的调试是"这个条件为什么没触发？"——二元逻辑，检查一个 Decorator 的条件值即可。Utility AI 的调试是"这 6 个因素中哪一个的微小变化导致了当前分数的交叉？"——需要观察所有候选动作的分数随时间的变化曲线。这是从"离散调试"到"连续调试"的范式转换。另外 BT 的"优先级顺序"给设计师一个直观锚点（"A 在 B 左边所以 A 更重要"），而 Utility AI 没有这种一维排序——权重、曲线形状、乘法组合三者交互产生最终分数。
+>
+> **Q: IAUS 乘法组合何时会把所有分数拉低？**
+> 当所有动作都有一个"关键轴"的分数接近 0 时，乘法组合 `final = 1 - Π(1 - score_i)` 会把总分拉向 0。例如：NPC 极度饥饿(0.0)、极度疲惫(0.0)、极度孤单(0.0)——所有 Eat/Sleep/Socialize 都至少有一个 Reasons 分数为 0，导致 `(1-0)=1`，乘积中有一个 1 因子不变，但如果有 2+ 个 Reasons 接近 0（如 Eat 的 Hunger 轴 0.0 且 FoodAvailability 轴 0.1），`final = 1 - (1-0)(1-0.1) = 1 - 1*0.9 = 0.1`——即使 NPC 极度需要这个行为，总分也只有 0.1。
+>
+> **防止"所有分数拉低"的方案**：
+> - 为每个动作添加一个"基础吸引力"Reason（最小分数如 0.1），确保即使所有轴都低，仍有保底分数。
+> - 对于"致命因素"才用乘法组合，一般因素用加权和。例如：`SafeFromThreat` 轴用乘法（如果 NPC 正在被攻击，任何不包含"逃跑"的动作都应该被大幅拉低），而 `Entertainment` 和 `Social` 用加权和 → 混合评分模型。
+> - 使用 `Max(axisScore, 0.05)` 地板值，防止任何轴真正为 0。
+
+> [!tip]- 练习 2 参考答案
+> **扩展 GOAP 规划器** — 添加 HealAction 和 ThrowGrenadeAction。
+>
+> **1. 新动作定义**：
+> ```csharp
+> var healAction = new GoapAction("Heal",
+>     preconditions: new() { ["healthLessThan50"] = true },
+>     effects: new() { ["healthLessThan50"] = false, ["healthAt100"] = true },
+>     cost: 2);
+>
+> var throwGrenadeAction = new GoapAction("ThrowGrenade",
+>     preconditions: new() {
+>         ["hasGrenade"] = true,
+>         ["nearPlayer"] = true,
+>         ["behindCover"] = true
+>     },
+>     effects: new() { ["playerAlive"] = false },
+>     cost: 3);
+> ```
+>
+> **2. A\* 规划路径追踪**：
+>
+> **场景 A: 武器就绪，已近玩家**
+> - World State: `{hasWeapon=true, nearPlayer=true, hasGrenade=false, behindCover=false, healthLessThan50=false, playerAlive=true}`
+> - Goal: `{playerAlive=false}`
+> - A\* 展开（基于 cost 的 Dijkstra 搜索，h(n) = 未满足 goal 条件数）：
+>   - Action nodes: AttackPlayer(pre:{nearPlayer, hasWeapon}, eff:{playerAlive=false}, cost=1)
+>   - 直接可执行 → 规划结果: `[AttackPlayer]`, cost=1
+>
+> **场景 B: 无武器，血量 < 30**
+> - World State: `{hasWeapon=false, nearPlayer=false, healthLessThan50=true, playerAlive=true}`
+> - A\* 展开：
+>   - 可执行: MoveToPlayer(pre:{}, eff:{nearPlayer=true}, cost=1)
+>   - 可执行: PickupWeapon(pre:{hasWeapon=false}, eff:{hasWeapon=true}, cost=2)
+>   - 可执行: Heal(pre:{healthLessThan50}, eff:{healthLessThan50=false, healthAt100=true}, cost=2)
+>   - A\* g 值进展：
+>     - Path1: [PickupWeapon(cost=2), MoveToPlayer(cost=1), AttackPlayer(cost=1)] → total=4
+>     - Path2: [Heal(cost=2), PickupWeapon(cost=2), MoveToPlayer(cost=1), AttackPlayer(cost=1)] → total=6
+>     - Path3: [MoveToPlayer(cost=1), AttackPlayer(cost=1)] → 不可行（pre: hasWeapon=false）
+>   - **规划器选择 Path1**（cost=4，最短路径）。注意到 Heal 的 cost=2 与 PickupWeapon 相同，但如果两条路径都满足 goal 且 cost 相同，**先后顺序由 A\* 的节点扩展顺序决定**（非确定性）。通过调整 Heal 的 cost=1.5（使其略低于 PickupWeapon 的 2），规划器会倾向于先加血再捡武器。
+>
+> **场景 C: 有手雷在掩体后**
+> - World State: `{hasGrenade=true, behindCover=true, nearPlayer=true, hasWeapon=true}`
+> - 可用 Action:
+>   - AttackPlayer(cost=1): pre 满足 → path: [AttackPlayer], cost=1
+>   - ThrowGrenade(cost=3): pre 满足 → path: [ThrowGrenade], cost=3
+> - **规划器选择 AttackPlayer**（cost=1 vs cost=3）。因为 A\* 选最小总 cost。
+>
+> **3. 为什么 AttackPlayer 的 cost=1 而 ThrowGrenade=3？**
+> 成本差异反映了**资源消耗、风险暴露和技能珍贵程度**。AttackPlayer 是常规攻击，子弹可再生；ThrowGrenade 消耗有限道具（手雷是稀缺资源），且需要掩体条件。规划器在两种方式都可行时选择成本更低者 = 常规攻击。要让 AI 在"有手雷+有掩体"时优先用手雷，有两种方式：
+> - 降低 ThrowGrenade 的 cost（如 cost=0.5），但这不是好的语义——手雷确实更"贵"。
+> - 在 goal 层面区分："优先消灭玩家"可以用高优先级 goal（priority=10），但两个动作都满足同一 goal。真正的解法是给 ThrowGrenade 一个额外的 benefit（如 `effects: {playerAlive=false, playerDamagedArea=true}`）以及独立的 goal `DamageArea`。
+>
+> **4. 搜索空间增长与优化策略**：
+> 20 个动作 × 深度 5 → 分支因子约 20% 有可行前置条件 ≈ 4-5 → 搜索空间约 4^5~5^5 ≈ 1024-3125 个节点。虽然不大，但如果每 0.5s 为 100 个 AI 规划 → 最多 1,000,000 节点/秒。优化策略：
+> - **启发式改进**：将 h(n) 从"未满足 goal 条件数"改为"未满足 goal 条件数 + 资源代价估算" → 更快收敛到最优。
+> - **规划结果缓存**：`Dictionary<WorldState, Plan>` 缓存相同世界状态的规划结果。世界状态可以用位掩码或哈希表示。
+> - **增量重规划**：不每 0.5s 完全重新规划——如果世界状态只变了 1-2 个 key，从前一个计划开始检查"是否还有效"，只修复失效的步骤。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **同一场景 × 三种范式** — 敌人守卫。
+>
+> **场景**：巡逻 → 发现玩家 → 追击/攻击 → 血量低 → 找掩体/撤退。
+>
+> **1. BT 实现**（伪代码树结构）：
+> ```
+> Selector "GuardBehavior"
+> ├── Sequence "Flee"  [Decorator: HP < 30%]
+> │   ├── Action: FindCover()
+> │   └── Action: RetreatToCover()
+> ├── Sequence "Combat"  [Decorator: HasTarget]
+> │   ├── Selector "AttackOrChase"
+> │   │   ├── Sequence "Attack"  [Decorator: Dist < 5m]
+> │   │   │   └── Action: AttackPlayer()
+> │   │   └── Action: ChasePlayer()
+> │   └── [Repeater(forever)]  ← 保持战斗循环
+> └── Sequence "Patrol"
+>     ├── Action: PatrolWaypoints()
+>     └── [Repeater(forever)]
+> ```
+>
+> **2. GOAP 定义**：
+>
+> World State Keys: `{playerVisible, nearPlayer, hasWeapon, healthLow, behindCover, playerAlive}`
+>
+> Goal: `Survive(priority=10)` → target state: `{healthLow=false, behindCover=true}`
+> Goal: `KillPlayer(priority=8)` → target state: `{playerAlive=false}`
+>
+> Actions:
+> ```
+> Patrol:     pre:{},  eff:{playerVisible=true}, cost=1
+> Chase:      pre:{playerVisible=true}, eff:{nearPlayer=true}, cost=1
+> Attack:     pre:{nearPlayer=true, hasWeapon=true}, eff:{playerAlive=false}, cost=1
+> FindCover:  pre:{}, eff:{behindCover=true}, cost=2
+> Flee:       pre:{behindCover=true, healthLow=true}, eff:{healthLow=false}, cost=2
+> ```
+>
+> 规划器可能产生的计划：
+> - 默认(无玩家): `[Patrol]` → 1 步
+> - 发现玩家: `[Chase, Attack]` → 2 步（cost=2）
+> - 低血量: `[FindCover, Flee]` 或 `[FindCover]`（如果已在掩体后，只需 Flee）
+>
+> **3. 对比**：
+>
+> | 维度 | BT | GOAP |
+> |------|----|------|
+> | 编写/配置难度 | 中等：树结构直观，但需要理解 Selector/Sequence/Decorator 的语义 | 较高：定义 World State key、Action 的 pre/effect、goal 优先级、A\* heuristic 都是需要 AI 知识的领域 |
+> | 新增"投掷烟雾弹+侧翼攻击" | 在 Combat Selector 中插入一个 Sequence 子树（6 个节点），不影响其他分支 | 添加 `ThrowSmoke`(pre:{hasSmoke}, eff:{smokeActive}) 和 `FlankAttack`(pre:{smokeActive,nearPlayer,behindCover}, eff:{playerAlive=false}) 两个 Action，规划器自动组合 |
+> | 调试难度 | 中：路径高亮 + 条件状态标注即可理解"为什么选了 A" | 高：需要 A\* 的 open/closed set 追踪 + 成本计算，问"为什么不选 B"需要检查"B 的前置条件没满足还是在搜索中被更便宜路径剪枝了" |
+>
+> **面试要点**：对于本场景（7 种行为、少量条件），BT 是更务实的选择——配置工作量 < GOAP，调试可预测性 > GOAP。GOAP 的优势在行为数量 > 20 且组合性重要时才会显现。如果"投掷烟雾弹+侧翼攻击"是核心需求且类似战术组合有 10+ 种可能，GOAP 的长远维护优势才超过其初始配置成本。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **GOAP 原始论文**：Jeff Orkin, *"Applying Goal-Oriented Action Planning to Games"* (2003) — 首次系统描述 F.E.A.R. 中的 GOAP 架构，包含规划器细节和与 FSM 的对比。PDF 可在 GDC Vault 或 Jeff Orkin 个人主页找到。

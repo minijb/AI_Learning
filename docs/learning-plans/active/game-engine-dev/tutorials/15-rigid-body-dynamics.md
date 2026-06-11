@@ -1644,6 +1644,500 @@ Ball2: pos=(0.500, 1.500, 0.300) vel=(0.000, 0.000, 0.000) |v|=0.000
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 扩展 RigidBody 的惯性张量计算方法
+>
+> // 实心圆柱体：绕对称轴的 I = 1/2 mR^2，绕垂直轴 I = 1/12 m(3R^2 + h^2)
+> // axis: 0=X, 1=Y, 2=Z 指定圆柱体的对称轴方向
+> void RigidBody::setMassCylinder(float m, float radius,
+>                                  float height, int axis) {
+>     mass = m;
+>     if (mass < 1e-6f) { invMass = 0; return; }
+>     invMass = 1.0f / mass;
+>
+>     float i_axial = (1.0f / 2.0f) * mass * radius * radius;
+>     float i_radial = (1.0f / 12.0f) * mass
+>                    * (3.0f * radius * radius + height * height);
+>
+>     // 根据对称轴方向分配惯性分量
+>     float ix, iy, iz;
+>     if (axis == 0) {  // X轴为圆柱对称轴
+>         ix = i_axial;  iy = i_radial; iz = i_radial;
+>     } else if (axis == 1) {  // Y轴为圆柱对称轴
+>         ix = i_radial; iy = i_axial;  iz = i_radial;
+>     } else {  // Z轴为圆柱对称轴（默认）
+>         ix = i_radial; iy = i_radial; iz = i_axial;
+>     }
+>
+>     inertiaBody = Mat3::diagonal(ix, iy, iz);
+>     invInertiaBody = Mat3::diagonal(1.0f/ix, 1.0f/iy, 1.0f/iz);
+> }
+>
+> // 胶囊体 = 圆柱体 + 两个半球 → 实心球体的和质量的一半
+> // 胶囊体绕轴向 I = 圆柱轴向 + 2×半球轴向
+> // 半球的轴向转动惯量 = 2/5 m_hemisphere R^2
+> void RigidBody::setMassCapsule(float m, float radius,
+>                                 float height, int axis) {
+>     mass = m;
+>     if (mass < 1e-6f) { invMass = 0; return; }
+>     invMass = 1.0f / mass;
+>
+>     // 体积分解
+>     float volCylinder = 3.14159265f * radius * radius * height;
+>     float volHemisphere = (2.0f/3.0f) * 3.14159265f
+>                         * radius * radius * radius;
+>     float volTotal = volCylinder + 2.0f * volHemisphere;
+>
+>     float mCyl = m * (volCylinder / volTotal);  // 圆柱体质量
+>     float mHemi = (m - mCyl) / 2.0f;            // 每个半球质量
+>
+>     // 圆柱体轴向惯量
+>     float i_axial_cyl = (1.0f/2.0f) * mCyl * radius * radius;
+>     // 半球轴向惯量（每个半球绕其中心轴的惯量 + 平行轴定理偏移）
+>     float i_axial_hemi = (2.0f/5.0f) * mHemi * radius * radius;
+>     // 平行轴定理：半球质心在距离圆柱底 (3/8)R 处
+>     float d = height/2.0f + (3.0f/8.0f) * radius;
+>     i_axial_hemi += mHemi * d * d;
+>
+>     float i_axial = i_axial_cyl + 2.0f * i_axial_hemi;
+>
+>     // 径向惯量（更复杂的积分，简化为近似值）
+>     // 圆柱体径向惯量
+>     float i_radial_cyl = (1.0f/12.0f) * mCyl
+>                        * (3.0f * radius * radius + height * height);
+>     // 半球绕直径的惯量 = 2/5 m R^2 + 平行轴偏移
+>     float i_radial_hemi = (2.0f/5.0f) * mHemi * radius * radius
+>                         + mHemi * d * d;
+>     float i_radial = i_radial_cyl + 2.0f * i_radial_hemi;
+>
+>     float ix, iy, iz;
+>     if (axis == 0) {
+>         ix = i_axial;  iy = i_radial; iz = i_radial;
+>     } else if (axis == 1) {
+>         ix = i_radial; iy = i_axial;  iz = i_radial;
+>     } else {
+>         ix = i_radial; iy = i_radial; iz = i_axial;
+>     }
+>
+>     inertiaBody = Mat3::diagonal(ix, iy, iz);
+>     invInertiaBody = Mat3::diagonal(1.0f/ix, 1.0f/iy, 1.0f/iz);
+> }
+>
+> // 空心球壳：I = 2/3 mR^2（所有质量集中在表面）
+> void RigidBody::setMassHollowSphere(float m, float radius) {
+>     mass = m;
+>     if (mass < 1e-6f) { invMass = 0; return; }
+>     invMass = 1.0f / mass;
+>
+>     float i = (2.0f / 3.0f) * mass * radius * radius;
+>     inertiaBody = Mat3::diagonal(i, i, i);
+>     invInertiaBody = Mat3::diagonal(1.0f/i, 1.0f/i, 1.0f/i);
+> }
+>
+> // 斜面滚动测试
+> void TestRollingBehavior() {
+>     RigidBody solidSphere, cylinder, hollowSphere;
+>     solidSphere.setMassSphere(1.0f, 0.5f);
+>     cylinder.setMassCylinder(1.0f, 0.5f, 2.0f, 2);  // Z轴圆柱
+>     hollowSphere.setMassHollowSphere(1.0f, 0.5f);
+>
+>     // 在斜面上的加速度取决于 I/mR^2 比值
+>     // 斜面角30度，重力在斜面上的分量 = g*sin(30°) = 4.9 m/s²
+>     float slopeAccel = 9.81f * std::sin(3.14159f/6.0f);
+>
+>     // 滚动加速度 = slopeAccel / (1 + I/(mR^2))
+>     // I_solid_sphere/(mR^2) = 2/5 = 0.4
+>     // I_cylinder/(mR^2) = 1/2 = 0.5  (绕轴向)
+>     // I_hollow_sphere/(mR^2) = 2/3 ≈ 0.667
+>
+>     float a_solid  = slopeAccel / (1.0f + 0.4f);   // ~3.50
+>     float a_cyl    = slopeAccel / (1.0f + 0.5f);   // ~3.27
+>     float a_hollow = slopeAccel / (1.0f + 0.667f); // ~2.94
+>
+>     std::cout << "斜面滚动加速度 (m/s²):\n";
+>     std::cout << "  实心球: " << a_solid
+>               << " (最快——质量集中在中心)\n";
+>     std::cout << "  圆柱体: " << a_cyl << "\n";
+>     std::cout << "  空心球壳: " << a_hollow
+>               << " (最慢——质量集中在表面)\n";
+> }
+> ```
+>
+> **核心思路**：转动惯量反映了"角速度改变对扭矩的抵抗"。I/(mR²)比值越大，物体越难被滚动加速。实心球(I=2/5 mR²)质量集中在中心，比值最小→滚动最快；空心球壳(I=2/3 mR²)质量全在表面，比值最大→滚动最慢。胶囊体的惯性张量通过分解为圆柱体+两个半球并应用平行轴定理计算——半球质心不在胶囊体质心处，需要补偿偏移。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // HingeJoint.hpp —— 铰链关节实现
+>
+> class HingeJoint {
+> public:
+>     // 初始化铰链关节
+>     // bodyA, bodyB: 连接的两个刚体
+>     // anchorA, anchorB: 局部空间的锚点
+>     // hingeAxisA, hingeAxisB: 局部空间的铰链轴方向
+>     void Initialize(RigidBody* a, RigidBody* b,
+>                     const Vec3& anchorA, const Vec3& anchorB,
+>                     const Vec3& hingeAxisA,
+>                     const Vec3& hingeAxisB) {
+>         bodyA_ = a; bodyB_ = b;
+>         anchorA_ = anchorA;
+>         anchorB_ = anchorB;
+>         hingeAxisA_ = hingeAxisA.normalized();
+>         hingeAxisB_ = hingeAxisB.normalized();
+>     }
+>
+>     // 每帧准备（在求解循环前调用一次）
+>     void Prepare() {
+>         // 锚点在世界空间的位置
+>         Vec3 worldAnchorA = bodyA_->localToWorld(anchorA_);
+>         Vec3 worldAnchorB = bodyB_->localToWorld(anchorB_);
+>
+>         // 约束1-3：位置约束（3 DOF — 锚点重合）
+>         // 需要3个约束方程消除3维平移
+>         for (int i = 0; i < 3; ++i) {
+>             PreparePositionConstraint(i, worldAnchorA, worldAnchorB);
+>         }
+>
+>         // 约束4-5：旋转轴对齐约束（2 DOF）
+>         // 铰链轴在世界空间的方向
+>         Vec3 worldAxisA = bodyA_->orientation.rotate(hingeAxisA_);
+>         Vec3 worldAxisB = bodyB_->orientation.rotate(hingeAxisB_);
+>
+>         PrepareRotationConstraint(0, worldAxisA, worldAxisB);
+>         PrepareRotationConstraint(1, worldAxisA, worldAxisB);
+>     }
+>
+>     // 求解单次迭代（会被多次调用）
+>     void Solve(float dt) {
+>         // 依次求解5个约束方程
+>         for (int i = 0; i < 5; ++i) {
+>             SolveConstraint(i, dt);
+>         }
+>     }
+>
+>     // 铰链角度限制（可选——如门只能开90度）
+>     void SetAngleLimits(float minAngle, float maxAngle) {
+>         angleMin_ = minAngle;
+>         angleMax_ = maxAngle;
+>         hasLimits_ = true;
+>     }
+>
+> private:
+>     // 约束数据结构
+>     struct ConstraintData {
+>         Vec3 jacobianA_linear, jacobianA_angular;
+>         Vec3 jacobianB_linear, jacobianB_angular;
+>         float effectiveMass;     // 有效质量 = 1 / (J M^{-1} J^T)
+>         float bias;              // Baumgarte位置稳定化项
+>         float accumulatedImpulse; // 累积冲量（用于暖启动）
+>     };
+>
+>     void PreparePositionConstraint(int axis,
+>          const Vec3& worldAnchorA, const Vec3& worldAnchorB) {
+>         auto& c = constraints_[axis];
+>
+>         // 拉格朗日乘子方向：沿世界坐标轴
+>         Vec3 n(axis == 0 ? 1.0f : 0.0f,
+>                axis == 1 ? 1.0f : 0.0f,
+>                axis == 2 ? 1.0f : 0.0f);
+>
+>         // 雅可比项
+>         c.jacobianA_linear = -n;
+>         c.jacobianB_linear = n;
+>
+>         // 角雅可比：J_ω = r × n
+>         Vec3 rA = worldAnchorA - bodyA_->position;
+>         Vec3 rB = worldAnchorB - bodyB_->position;
+>         c.jacobianA_angular = -rA.cross(n);
+>         c.jacobianB_angular = rB.cross(n);
+>
+>         // 有效质量
+>         float invMassA = bodyA_->invMass;
+>         float invMassB = bodyB_->invMass;
+>         float invIA = Dot(
+>             bodyA_->invInertiaWorld * c.jacobianA_angular,
+>             c.jacobianA_angular);
+>         float invIB = Dot(
+>             bodyB_->invInertiaWorld * c.jacobianB_angular,
+>             c.jacobianB_angular);
+>         c.effectiveMass = 1.0f / (invMassA + invMassB + invIA + invIB);
+>
+>         // 位置误差（Baumgarte稳定化的bias项）
+>         float error = Dot(n, worldAnchorB - worldAnchorA);
+>         c.bias = error * 0.2f;  // beta = 0.2
+>         c.accumulatedImpulse = 0.0f;
+>     }
+>
+>     void PrepareRotationConstraint(int idx,
+>          const Vec3& axisA, const Vec3& axisB) {
+>         auto& c = constraints_[3 + idx];
+>
+>         // 约束方向：垂直于铰链轴的任意方向
+>         // 使用任意轴（与铰链轴正交）来约束旋转
+>         Vec3 n = (idx == 0) ?
+>             Vec3(0, 1, 0).cross(axisA).normalized() :
+>             axisA.cross(Vec3(0, 0, 1)).normalized();
+>         if (n.lengthSq() < 0.01f) n = Vec3(1, 0, 0);
+>
+>         c.jacobianA_linear = Vec3(0,0,0);
+>         c.jacobianB_linear = Vec3(0,0,0);
+>         c.jacobianA_angular = -n;
+>         c.jacobianB_angular = n;
+>
+>         float invIA = Dot(
+>             bodyA_->invInertiaWorld * n, n);
+>         float invIB = Dot(
+>             bodyB_->invInertiaWorld * n, n);
+>         c.effectiveMass = 1.0f / (invIA + invIB);
+>
+>         // 角度误差 = axisA 和 axisB 在约束方向上的差异
+>         float error = Dot(n, axisB - axisA);
+>         c.bias = error * 0.1f;
+>         c.accumulatedImpulse = 0.0f;
+>     }
+>
+>     void SolveConstraint(int idx, float dt) {
+>         auto& c = constraints_[idx];
+>         if (c.effectiveMass < 1e-12f) return;
+>
+>         // 计算约束速度（Jv = J * v）
+>         float jv = Dot(c.jacobianA_linear,
+>                        bodyA_->linearVelocity)
+>                  + Dot(c.jacobianA_angular,
+>                        bodyA_->angularVelocity)
+>                  + Dot(c.jacobianB_linear,
+>                        bodyB_->linearVelocity)
+>                  + Dot(c.jacobianB_angular,
+>                        bodyB_->angularVelocity);
+>
+>         // 拉格朗日乘子 = -(Jv + bias) / effectiveMass
+>         float lambda = -(jv + c.bias) * c.effectiveMass;
+>
+>         // 累积并钳制（暖启动用）
+>         float prev = c.accumulatedImpulse;
+>         c.accumulatedImpulse += lambda;
+>         lambda = c.accumulatedImpulse - prev;
+>
+>         // 应用冲量
+>         bodyA_->linearVelocity += c.jacobianA_linear
+>                                 * (lambda * bodyA_->invMass);
+>         bodyA_->angularVelocity +=
+>             bodyA_->invInertiaWorld * c.jacobianA_angular
+>             * lambda;
+>         bodyB_->linearVelocity += c.jacobianB_linear
+>                                 * (lambda * bodyB_->invMass);
+>         bodyB_->angularVelocity +=
+>             bodyB_->invInertiaWorld * c.jacobianB_angular
+>             * lambda;
+>     }
+>
+>     RigidBody* bodyA_ = nullptr;
+>     RigidBody* bodyB_ = nullptr;
+>     Vec3 anchorA_, anchorB_;
+>     Vec3 hingeAxisA_, hingeAxisB_;
+>     ConstraintData constraints_[5];  // 5个约束方程
+>     float angleMin_ = -3.14159f, angleMax_ = 3.14159f;
+>     bool hasLimits_ = false;
+> };
+>
+> // 测试：门摆动
+> void TestHingeJoint() {
+>     RigidBody ground, door;
+>     ground.type = BodyType::Static;
+>     door.setMassBox(10.0f, Vec3(0.5f, 1.0f, 0.05f)); // 扁平门
+>     door.position = Vec3(1.0f, 0, 0);
+>
+>     HingeJoint hinge;
+>     // 铰链轴 = Y轴（门绕Y旋转打开/关闭）
+>     hinge.Initialize(
+>         &ground, &door,
+>         Vec3(0, 0, 0),        // ground锚点 = 门铰链处
+>         Vec3(-0.5f, 0, 0),    // door锚点 = 门一侧边缘
+>         Vec3(0, 1, 0),        // ground铰链轴 = Y
+>         Vec3(0, 1, 0)         // door铰链轴 = Y (对齐)
+>     );
+>     hinge.SetAngleLimits(-1.57f, 1.57f);  // ±90度
+>
+>     // 施加外力模拟推门
+>     door.applyForceAtPoint(Vec3(0, 0, 50),
+>         door.localToWorld(Vec3(0.5f, 0, 0)));  // 门边缘推
+>
+>     // 模拟循环...
+>     hinge.Prepare();
+>     for (int iter = 0; iter < 10; ++iter) {
+>         hinge.Solve(1.0f/60.0f);
+>     }
+> }
+> ```
+>
+> **核心思路**：铰链关节需要5个约束方程：3个平移约束（锚点重合→消除3个平移自由度）+ 2个旋转约束（两个轴对齐→消除另外2个旋转自由度），只留下绕铰链轴的旋转。每个约束的本质是"拉格朗日乘子法"——通过计算雅可比矩阵和有效质量，找到刚好满足约束的速度修正冲量。Baumgarte稳定化参数(beta=0.2)通过引入位置误差反馈防止数值漂移导致的约束违反累积。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // ClothSimulation.hpp —— 布料模拟（Verlet积分 + 距离约束）
+>
+> #include <vector>
+> #include <cmath>
+>
+> struct ClothParticle {
+>     float x, y;          // 当前位置
+>     float oldX, oldY;    // 上一帧位置（Verlet用）
+>     float ax, ay;        // 加速度
+>     bool pinned;         // 是否固定
+> };
+>
+> struct DistanceConstraint {
+>     int pA, pB;          // 粒子索引
+>     float restLength;    // 静止长度
+>     float stiffness;     // 刚度 (0~1)
+> };
+>
+> class ClothSimulation {
+> public:
+>     ClothSimulation(int gridW, int gridH, float spacing)
+>         : gridW_(gridW), gridH_(gridH), spacing_(spacing)
+>     {
+>         // 创建粒子网格
+>         particles_.resize(gridW * gridH);
+>         for (int y = 0; y < gridH; ++y) {
+>             for (int x = 0; x < gridW; ++x) {
+>                 int idx = y * gridW + x;
+>                 particles_[idx].x = x * spacing;
+>                 particles_[idx].y = y * spacing;
+>                 particles_[idx].oldX = particles_[idx].x;
+>                 particles_[idx].oldY = particles_[idx].y;
+>                 particles_[idx].pinned = (y == 0);  // 顶行固定
+>             }
+>         }
+>
+>         // 创建结构性约束（垂直和水平弹簧）
+>         for (int y = 0; y < gridH; ++y) {
+>             for (int x = 0; x < gridW; ++x) {
+>                 int idx = y * gridW + x;
+>                 // 水平约束
+>                 if (x < gridW - 1) {
+>                     constraints_.push_back({
+>                         idx, idx + 1, spacing, 0.8f
+>                     });
+>                 }
+>                 // 垂直约束
+>                 if (y < gridH - 1) {
+>                     constraints_.push_back({
+>                         idx, idx + gridW, spacing, 0.8f
+>                     });
+>                 }
+>                 // 弯曲约束（间隔一个粒子，防止过度折叠）
+>                 if (x < gridW - 2) {
+>                     constraints_.push_back({
+>                         idx, idx + 2, spacing * 2.0f, 0.2f
+>                     });
+>                 }
+>                 if (y < gridH - 2) {
+>                     constraints_.push_back({
+>                         idx, idx + gridW * 2,
+>                         spacing * 2.0f, 0.2f
+>                     });
+>                 }
+>             }
+>         }
+>     }
+>
+>     // 单步模拟（dt为秒）
+>     void Step(float dt, int constraintIterations = 5) {
+>         // 1. Verlet积分（先更新位置）
+>         VerletIntegrate(dt);
+>
+>         // 2. 多次迭代求解距离约束
+>         for (int iter = 0; iter < constraintIterations; ++iter) {
+>             EnforceDistanceConstraints();
+>         }
+>     }
+>
+>     // 获取粒子状态
+>     const std::vector<ClothParticle>& Particles() const {
+>         return particles_;
+>     }
+>
+> private:
+>     void VerletIntegrate(float dt) {
+>         const float gravity = 9.81f;
+>         float dtSq = dt * dt;
+>
+>         for (auto& p : particles_) {
+>             if (p.pinned) continue;
+>
+>             // Verlet: x_{n+1} = 2x_n - x_{n-1} + a * dt^2
+>             float velX = p.x - p.oldX;  // 隐式速度
+>             float velY = p.y - p.oldY;
+>
+>             // 添加阻尼
+>             velX *= 0.99f;
+>             velY *= 0.99f;
+>
+>             p.oldX = p.x;
+>             p.oldY = p.y;
+>
+>             p.x += velX + p.ax * dtSq;
+>             p.y += velY + (p.ay - gravity) * dtSq;
+>
+>             p.ax = 0; p.ay = 0;  // 重置加速度
+>         }
+>     }
+>
+>     void EnforceDistanceConstraints() {
+>         for (auto& c : constraints_) {
+>             auto& a = particles_[c.pA];
+>             auto& b = particles_[c.pB];
+>
+>             float dx = b.x - a.x;
+>             float dy = b.y - a.y;
+>             float dist = std::sqrt(dx*dx + dy*dy);
+>             if (dist < 1e-6f) continue;
+>
+>             // 需要的修正量
+>             float correction = (dist - c.restLength)
+>                              / dist * c.stiffness * 0.5f;
+>
+>             float cx = dx * correction;
+>             float cy = dy * correction;
+>
+>             // 对两个粒子施加相反的修正（加权平均）
+>             if (!a.pinned) { a.x += cx; a.y += cy; }
+>             if (!b.pinned) { b.x -= cx; b.y -= cy; }
+>         }
+>     }
+>
+>     int gridW_, gridH_;
+>     float spacing_;
+>     std::vector<ClothParticle> particles_;
+>     std::vector<DistanceConstraint> constraints_;
+> };
+>
+> // Verlet vs 半隐式欧拉 对比
+> void CompareIntegrators() {
+>     // Verlet: 直接操作位置，不需要显式速度变量
+>     //     优点：速度由位置差分隐式得出，天然稳定
+>     //     缺点：无法直接施加与速度相关的力（如空气阻力）
+>     //
+>     // 半隐式欧拉: v_{n+1} = v_n + a*dt, x_{n+1} = x_n + v_{n+1}*dt
+>     //     优点：速度是显式变量，可以施加速度相关力
+>     //     缺点：对于高刚度弹簧容易不稳定（需满足 dt < 2/ω）
+>     //
+>     // 布料模拟选Verlet的原因：
+>     // 1. 高迭代次数的约束求解替代了弹簧力计算
+>     // 2. Verlet不需要显式速度变量，约束修正后自动更新速度
+>     // 3. 数值稳定性好，不容易爆炸
+> }
+> ```
+>
+> **核心思路**：Verlet积分的核心优势是"位置驱动"——`x_{n+1} = 2x_n - x_{n-1} + a*dt²`直接更新位置，速度由当前位置和上帧位置差分得到。这使得距离约束可以直接修正位置而不破坏速度一致性。结构性约束(相邻粒子)维持布料形状，弯曲约束(间隔粒子)防止过度折叠。多次迭代求解约束(通常5-10次)是PBD方法的关键——每次迭代逐步拉近所有被拉伸的弹簧，最终收敛到约束满足状态。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 经典书籍

@@ -570,6 +570,243 @@ public class GCPressureBenchmark : MonoBehaviour
 - 记录重构前后的代码差异和 Profiler 数据。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **GC Alloc 审计实操指南：**
+>
+> 1. **打开 Profiler**：`Window > Analysis > Profiler`（或 `Ctrl+7`），运行游戏。
+> 2. **定位 GC Alloc**：在 CPU Usage 区域，点击 `GC Alloc` 列的列头使其排序。
+> 3. **常见 Top-5 GC Alloc 热点及修复：**
+>
+> | 热点 | 典型 Alloc/帧 | 修复方案 |
+> |------|-------------|---------|
+> | `Debug.Log("...")` / 字符串拼接 | 2-5 KB | 用 `StringBuilder` 或条件编译 `#if UNITY_EDITOR` 包裹 |
+> | `Camera.main` (多次调用) | 500 B-2 KB | 缓存到 `_cachedCamera` 字段，`Start()` 中赋值一次 |
+> | `GetComponent<T>()` 在 `Update()` | 0 B (返回引用) | 但别在 Update 中调用——缓存结果 |
+> | `foreach (var x in IList<T>)` | 每次迭代 ~40 B 装箱 | 用 `for (int i = 0; ...)` 或 `foreach (var x in List<T>)`（值类型枚举器） |
+> | `Instantiate()` / `Destroy()` | 大量 | 用对象池替代 |
+> | LINQ (`.Where()`, `.Select()`) | 每次调用 ~100 B+ | 用于 editor tool，热路径用手动循环 |
+> | 协程 `new WaitForSeconds(1f)` | 20 B/帧 | 缓存 yield 对象：`WaitForSeconds _wait1s = new WaitForSeconds(1f);` |
+> | 闭包/Lambda (如 `OnClick.AddListener(()=>...)`) | ~100 B | 用成员方法替代或确保 lambda 不捕获变量 |
+> | `ToString()` 频繁调用 | 每次 ~50 B+ | 缓存字符串结果 |
+>
+> 4. **目标**：将 GC Alloc 从 ~50KB/帧 降到 ~5KB/帧 以下（减少 90%）。
+> 5. **验证**：修复后重新 Profiler，确认 GC Alloc 列数值显著下降。用 `GC.GetTotalMemory(false)` 验证堆大小不再持续增长。
+
+> [!tip]- 练习 2 参考答案
+> **C# 版 ObjectPool<T> 实现：**
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+>
+> public class ObjectPool<T> where T : class
+> {
+>     private readonly Stack<T> _inactive = new Stack<T>();
+>     private readonly HashSet<T> _active;    // 仅 collectionCheck=true 时使用
+>     private readonly Func<T> _createFunc;
+>     private readonly Action<T> _onGet;
+>     private readonly Action<T> _onRelease;
+>     private readonly Action<T> _onDestroy;
+>     private readonly bool _collectionCheck;
+>     private readonly int _maxSize;
+>
+>     public int CountInactive => _inactive.Count;
+>     public int CountActive => _active?.Count ?? 0;
+>
+>     public ObjectPool(
+>         Func<T> createFunc,
+>         Action<T> onGet = null,
+>         Action<T> onRelease = null,
+>         Action<T> onDestroy = null,
+>         bool collectionCheck = true,
+>         int defaultCapacity = 10,
+>         int maxSize = 10000)
+>     {
+>         _createFunc = createFunc ?? throw new ArgumentNullException(nameof(createFunc));
+>         _onGet = onGet;
+>         _onRelease = onRelease;
+>         _onDestroy = onDestroy;
+>         _collectionCheck = collectionCheck;
+>         _maxSize = maxSize;
+>
+>         if (collectionCheck)
+>             _active = new HashSet<T>();
+>
+>         // 预创建
+>         for (int i = 0; i < defaultCapacity; i++)
+>         {
+>             T obj = _createFunc();
+>             _inactive.Push(obj);
+>         }
+>     }
+>
+>     public T Get()
+>     {
+>         T obj;
+>         if (_inactive.Count == 0)
+>         {
+>             if (_maxSize > 0 && (_inactive.Count + CountActive) >= _maxSize)
+>                 return null;
+>             obj = _createFunc();
+>         }
+>         else
+>         {
+>             obj = _inactive.Pop();
+>         }
+>
+>         _onGet?.Invoke(obj);
+>         if (_collectionCheck)
+>             _active.Add(obj);
+>         return obj;
+>     }
+>
+>     public void Release(T obj)
+>     {
+>         if (obj == null) return;
+>
+>         if (_collectionCheck && !_active.Remove(obj))
+>             throw new InvalidOperationException("Object not tracked by this pool");
+>
+>         _onRelease?.Invoke(obj);
+>         _inactive.Push(obj);
+>     }
+>
+>     public void Clear()
+>     {
+>         if (_onDestroy != null)
+>         {
+>             while (_inactive.Count > 0)
+>                 _onDestroy(_inactive.Pop());
+>             if (_collectionCheck)
+>             {
+>                 foreach (var obj in _active)
+>                     _onDestroy(obj);
+>             }
+>         }
+>         _active?.Clear();
+>         _inactive.Clear();
+>     }
+> }
+> ```
+>
+> **与 `UnityEngine.Pool.ObjectPool<T>` 的对比：**
+> - Unity 版额外支持 `List<T>` 预分配、`maxSize` 硬限制时 `Get()` 抛出异常（可选）。
+> - 本实现用 `Stack<T>` 管理空闲对象（LIFO），Unity 也用类似策略。
+> - Unity 版的 `collectionCheck` 在 Release 时会检查对象是否已被归还（防止 double-release）。
+>
+> **GC Alloc 基准结果：**
+> - `new T()` 版（100K 次 Get/Release）：~4 MB GC Alloc（每次 `new` 分配 ~40 bytes + GC 开销）
+> - 池版（100K 次 Get/Release）：**0 bytes** — 因为 `Stack<T>.Push/Pop` 不分配堆内存
+> - 唯一可能产生的分配：`_active.Add/Remove` 的 `HashSet` 内部扩容。预设置 `HashSet` 容量可避免。
+
+> [!tip]- 练习 3 参考答案
+> **零分配热路径重构策略 — 以子弹管理器为例：**
+>
+> ```csharp
+> // ===== 重构前（GC Alloc ~12 KB/帧）=====
+> public class BulletManager_Before : MonoBehaviour
+> {
+>     private List<Bullet> _bullets = new List<Bullet>();
+>
+>     void Update()
+>     {
+>         // ❌ (1) 每帧 new 新 List — 最严重的分配
+>         var bulletsToRemove = new List<Bullet>();
+>
+>         foreach (var bullet in _bullets) {
+>             bullet.Update(Time.deltaTime);
+>             if (bullet.IsDead) {
+>                 bulletsToRemove.Add(bullet);
+>                 // ❌ (2) Destroy + Instantiate — 大量分配
+>                 Destroy(bullet.gameObject);
+>             }
+>         }
+>
+>         // ❌ (3) LINQ — 每次迭代创建闭包
+>         var activeCount = _bullets.Where(b => !b.IsDead).Count();
+>         Debug.Log("Active bullets: " + activeCount); // ❌ (4) 字符串拼接
+>     }
+> }
+>
+> // ===== 重构后（GC Alloc = 0 bytes/帧）=====
+> public class BulletManager_After : MonoBehaviour
+> {
+>     // ✅ 值类型子弹数据结构（struct，栈分配）
+>     private struct BulletData
+>     {
+>         public Vector3 position;
+>         public Vector3 velocity;
+>         public float lifetime;
+>         public bool isActive;
+>     }
+>
+>     // ✅ 预分配固定数组（非托管容器更优——用 NativeArray 配合 Jobs）
+>     private BulletData[] _bullets;
+>     private int _activeCount;
+>     private StringBuilder _logBuilder;  // ✅ 预分配 StringBuilder
+>
+>     void Start()
+>     {
+>         _bullets = new BulletData[2000]; // ✅ struct 数组，一次性分配
+>         _logBuilder = new StringBuilder(64);
+>     }
+>
+>     void Update()
+>     {
+>         float dt = Time.deltaTime;
+>         int aliveCount = 0;
+>
+>         // ✅ for 循环替代 foreach — 零分配
+>         for (int i = 0; i < _activeCount; i++)
+>         {
+>             ref var bullet = ref _bullets[i];
+>             bullet.position += bullet.velocity * dt;
+>             bullet.lifetime -= dt;
+>
+>             if (bullet.lifetime > 0)
+>             {
+>                 // ✅ swap-with-last 压缩死对象
+>                 if (aliveCount != i)
+>                     _bullets[aliveCount] = bullet;
+>                 aliveCount++;
+>             }
+>         }
+>         _activeCount = aliveCount;
+>
+>         // ✅ StringBuilder 替代字符串拼接
+>         _logBuilder.Clear();
+>         _logBuilder.Append("Active bullets: ");
+>         _logBuilder.Append(_activeCount);
+>         Debug.Log(_logBuilder); // 注意：.ToString() 会分配！用 StringBuilder 直接传给接受 object 的 API
+>     }
+>
+>     public void Fire(Vector3 pos, Vector3 dir, float speed, float lifetime)
+>     {
+>         if (_activeCount >= _bullets.Length) return;
+>         _bullets[_activeCount] = new BulletData {
+>             position = pos, velocity = dir * speed,
+>             lifetime = lifetime, isActive = true
+>         };
+>         _activeCount++;
+>     }
+> }
+> ```
+>
+> **重构要点清单：**
+> 1. **值类型替代引用类型**：`BulletData` 是 `struct` → 数组元素在托管堆上连续分配一次，之后访问无 GC Alloc。
+> 2. **预分配固定数组**：用 `new BulletData[2000]` 一次性分配，替代动态 `List<Bullet>`。
+> 3. **Swap-with-last 压缩**：替代 `List.Remove` + 重新分配新 List。
+> 4. **for 替代 foreach**：避免枚举器分配（虽然 `List<T>.Enumerator` 是 struct，但接口版本会装箱）。
+> 5. **StringBuilder 缓存**：`Clear()` + 复用，避免每帧创建新 string。
+> 6. **无 Instantiate/Destroy**：子弹是纯数据 struct，没有 `GameObject`，渲染通过 Instancing 或 GPU particle 完成。
+>
+> **Profiler 验证：** 重构后 `GC Alloc` 列应为 **0 B**。如果还有分配，检查 `Debug.Log(StringBuilder)` 是否调用了 `.ToString()`——可用 `Debug.Log(_logBuilder)` 直接传 `StringBuilder`（Unity 的 `Debug.Log` 接受 `object`，会自动调用 `ToString()`，但 `StringBuilder` 的 `ToString()` 仍会分配。完美方案是只在 `#if UNITY_EDITOR` 块中打 log）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Unity 官方 — Understanding Automatic Memory Management**: https://docs.unity3d.com/Manual/UnderstandingAutomaticMemoryManagement.html — Unity 内 GC 的工作原理和优化建议。

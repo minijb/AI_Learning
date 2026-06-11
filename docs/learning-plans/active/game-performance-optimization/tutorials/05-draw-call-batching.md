@@ -698,6 +698,178 @@ std::vector<TextureRemap> BuildAtlas(
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Unity 中测量 Instancing 效果的步骤：**
+>
+> 1. **创建测试场景**：
+>    - 新建空场景，添加 1000 个 Cube（使用脚本批量 Instantiate）
+>    - 所有 Cube 使用同一个 Material（默认 Lit 或 URP Lit）
+>    - 确保 Material 上 **未** 勾选 "Enable GPU Instancing"
+>
+> 2. **测量无 Instancing 的 Draw Call**：
+>    - 运行游戏，打开 Game 窗口 → Stats 面板
+>    - 记录 Batches（Saved by batching）的数量
+>    - 预期：Batches ≈ 1000（每个 Cube 一个 Draw Call）
+>    - 同时用 Profiler 记录 Rendering 部分的 CPU 时间
+>
+> 3. **启用 GPU Instancing**：
+>    - 选中 Material → Inspector → 勾选 "Enable GPU Instancing"
+>    - 重新运行游戏
+>
+> 4. **重新测量**：
+>    - Stats 面板：Batches 应该降到 **1-10**（取决于是否有其他打断合批的因素）
+>    - Profiler：CPU 渲染提交时间大幅下降
+>
+> 5. **对比结论**：
+>    ```
+>                Draw Calls   CPU 提交时间   帧率
+>    无 Instancing    ~1000        ~30ms       ~25fps
+>    有 Instancing     ~1-10        ~0.1ms      ~60fps
+>    ```
+>
+> **⚠️ 常见问题排查**：
+> - Instancing 要求所有物体使用**完全相同的 Material**（不能有 MaterialPropertyBlock 改变 Shader keywords）
+> - 在 URP/HDRP 中，SRP Batcher 优先级高于 Instancing；如果需要强制测试 Instancing，可以在 Material 中禁用 SRP Batcher
+> - Draw Call 未降到 1 的原因：可能有其他不同 Material 的物体打断了合批、或者渲染顺序导致了批次分割
+
+> [!tip]- 练习 2 参考答案
+> ```python
+> # texture_atlas_builder.py — 简易纹理图集构建器
+> # 运行: python texture_atlas_builder.py
+>
+> import math
+> from dataclasses import dataclass
+> from typing import List, Tuple
+>
+> @dataclass
+> class TextureRemap:
+>     original_name: str
+>     u0: float  # 在图集中的左下角 U (0-1)
+>     v0: float  # 在图集中的左下角 V (0-1)
+>     u1: float  # 在图集中的右上角 U (0-1)
+>     v1: float  # 在图集中的右上角 V (0-1)
+>     pixel_x: int  # 图集中的像素起始 X
+>     pixel_y: int  # 图集中的像素起始 Y
+>
+>
+> def build_atlas(
+>     texture_paths: List[str],
+>     atlas_size: int = 2048,
+>     tile_size: int = 256
+> ) -> List[TextureRemap]:
+>     """
+>     将 tile_size × tile_size 的纹理打包到 atlas_size × atlas_size 的图集中。
+>     使用简单的行列网格布局。
+>
+>     返回每个原始纹理在图集中的 UV 重映射信息。
+>     """
+>     tiles_per_row = atlas_size // tile_size
+>     max_tiles = tiles_per_row * tiles_per_row
+>
+>     if len(texture_paths) > max_tiles:
+>         raise ValueError(
+>             f"纹理数量 ({len(texture_paths)}) 超过图集容量 ({max_tiles})"
+>         )
+>
+>     remaps = []
+>     for i, path in enumerate(texture_paths):
+>         row = i // tiles_per_row
+>         col = i % tiles_per_row
+>
+>         pixel_x = col * tile_size
+>         pixel_y = row * tile_size
+>
+>         # 归一化 UV 坐标 (0-1)，考虑半像素偏移避免边缘采样问题
+>         u0 = (pixel_x + 0.5) / atlas_size
+>         v0 = (pixel_y + 0.5) / atlas_size
+>         u1 = (pixel_x + tile_size - 0.5) / atlas_size
+>         v1 = (pixel_y + tile_size - 0.5) / atlas_size
+>
+>         remaps.append(TextureRemap(
+>             original_name=path,
+>             u0=u0, v0=v0,
+>             u1=u1, v1=v1,
+>             pixel_x=pixel_x, pixel_y=pixel_y
+>         ))
+>
+>     return remaps
+>
+>
+> def print_uv_table(remaps: List[TextureRemap], atlas_size: int):
+>     """打印 UV 重映射表"""
+>     print(f"\n纹理图集 UV 重映射表 (图集大小: {atlas_size}×{atlas_size})")
+>     print(f"{'原始纹理':<20} {'位置 (px)':<15} {'u0,v0':<15} {'u1,v1':<15}")
+>     print("-" * 65)
+>     for r in remaps:
+>         print(f"{r.original_name:<20} ({r.pixel_x:4d},{r.pixel_y:4d})     "
+>               f"({r.u0:.4f},{r.v0:.4f})     ({r.u1:.4f},{r.v1:.4f})")
+>
+>     # 显示 Shader 中使用的方法
+>     print(f"\n--- 在 Shader 中使用示例 ---")
+>     print(f"// 假设原始 UV 为 (u, v)，图集大小为 {atlas_size}×{atlas_size}")
+>     print(f"// 第 0 号纹理在图集的 tile (0,0):")
+>     print(f"float2 atlasUV = float2({remaps[0].u0:.4f}, {remaps[0].v0:.4f})")
+>     print(f"                 + float2({remaps[0].u1-remaps[0].u0:.4f}, "
+>           f"{remaps[0].v1-remaps[0].v0:.4f}) * originalUV;")
+>
+>
+> # ====== 测试 ======
+> if __name__ == "__main__":
+>     # 模拟 16 个 256×256 纹理
+>     textures = [f"texture_{i:02d}.png" for i in range(16)]
+>
+>     remaps = build_atlas(textures, atlas_size=2048, tile_size=256)
+>     print_uv_table(remaps, atlas_size=2048)
+>
+>     # 验证：第 0 个纹理应在图集左上角
+>     assert remaps[0].pixel_x == 0 and remaps[0].pixel_y == 0
+>     # 验证：第 8 个纹理应在第二行第一列 (8 tiles per row)
+>     assert remaps[8].pixel_x == 0 and remaps[8].pixel_y == 256
+>     print(f"\n✅ 所有验证通过！16 个纹理成功打包到 2048×2048 图集中")
+> ```
+>
+> **设计要点：**
+> - 使用行列网格布局（最简单但有效的 Bin Packing）
+> - UV 坐标加入半像素偏移（`+0.5`）防止边缘采样到相邻纹理
+> - 输出 Shader 代码示例，展示如何在 Shader 中使用图集 UV
+> - 可扩展为 First Fit Decreasing Height 算法支持不同大小纹理
+
+> [!tip]- 练习 3 参考答案（可选）
+> **内存成本计算：**
+>
+> 假设每个顶点 32 字节（position 12B + normal 12B + uv 8B），每个索引 4B（uint32）。
+> 每个物体 500 个三角形 ≈ 500×3 = 1500 个顶点（非共享），1500 个索引。
+>
+> ```
+> 单个 Mesh 顶点数据: 1500 × 32B = 48,000 B  = 46.875 KB
+> 单个 Mesh 索引数据: 1500 × 4B  = 6,000 B   = 5.86 KB
+> 单个 Mesh 合计:     ≈ 52.7 KB
+>
+> 合批前 (1000 个独立 Mesh):
+>   顶点: 1000 × 48,000 B  = 48,000,000 B  ≈ 45.78 MB
+>   索引: 1000 × 6,000 B   =  6,000,000 B  ≈  5.72 MB
+>   合计: ≈ 51.5 MB
+>
+> 合批后额外内存 (合并后的大 Mesh):
+>   顶点: 48,000,000 B   (相同数量，但合并到一份 Buffer)
+>   索引:  6,000,000 B
+>   合计: ≈ 51.5 MB (额外)
+>
+> 合批后总内存: 51.5 MB (原始) + 51.5 MB (合并) = 103 MB
+> 内存翻倍率: 2.0×
+> ```
+>
+> **是否值得？** 这取决于场景：
+> - 如果合批能将 Draw Call 从 1000 降到 1，且 CPU 是瓶颈 → **绝对值得**（CPU 提交时间从 ~30ms 降到 ~0.1ms）
+> - 如果场景有大量其他内容需要显存，且已经接近显存上限 → 需要权衡
+> - 注意：原始 Mesh 可能仍需保留用于碰撞检测（如果碰撞系统使用 Mesh Collider），但如果用简化的碰撞体（Box/Sphere/Capsule），原始 Mesh 可以释放
+> - 更好的替代方案：**GPU Instancing** 完全不需要额外内存
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - [OpenGL Wiki: Vertex Rendering — Instancing](https://www.khronos.org/opengl/wiki/Vertex_Rendering#Instancing) — glDrawElementsInstanced 的官方文档

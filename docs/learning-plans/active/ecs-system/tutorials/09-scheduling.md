@@ -604,6 +604,279 @@ Rend    ∥   ×   ×   ×   ∥   -
 
 为每个 System 添加执行时间统计（执行 100 帧的平均耗时）。当某个 System 耗时远超其他 System 时（负载不均），调度器应该如何调整？设计一种策略将"重"System 的工作拆分为更小的 Job。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **显式依赖 API + 冲突检测**：
+>
+> ```cpp
+> class DependencyGraph {
+>     // ... existing members ...
+>
+>     // 显式依赖边
+>     struct ExplicitEdge { size_t from; size_t to; };
+>     std::vector<ExplicitEdge> explicit_edges;
+>
+> public:
+>     // API：声明 A 必须在 B 之前
+>     void explicit_before(const std::string& a, const std::string& b) {
+>         size_t ai = find_system(a), bi = find_system(b);
+>         if (ai == size_t(-1) || bi == size_t(-1)) return;
+>         explicit_edges.push_back({ai, bi});
+>     }
+>
+>     void explicit_after(const std::string& a, const std::string& b) {
+>         explicit_before(b, a);  // "A after B" = "B before A"
+>     }
+>
+>     // 冲突检测：显式依赖 vs 自动推导
+>     std::vector<std::string> detect_conflicts() {
+>         std::vector<std::string> warnings;
+>         for (auto& edge : explicit_edges) {
+>             // 自动推导认为 edge.to → edge.from（即自动顺序与显式相反）
+>             if (has_conflict(systems[edge.to], systems[edge.from])) {
+>                 // 自动推导：B 写 X，A 读 X → B 必须在 A 之前
+>                 // 显式声明：A before B → 矛盾！
+>                 warnings.push_back(
+>                     "冲突: 自动推导要求 '" + systems[edge.to].name +
+>                     "' 在 '" + systems[edge.from].name + "' 之前，"
+>                     "但显式声明相反");
+>             }
+>         }
+>         return warnings;
+>     }
+>
+>     // 改进的拓扑排序：显式边优先，自动推导填充剩余
+>     std::vector<std::vector<size_t>> parallel_groups() const {
+>         size_t n = systems.size();
+>         std::vector<std::vector<size_t>> adj(n);
+>         std::vector<int> in_degree(n, 0);
+>
+>         // Step 1：构建自动依赖（基于读写冲突）
+>         for (size_t i = 0; i < n; i++) {
+>             for (size_t j = i + 1; j < n; j++) {
+>                 if (has_conflict(systems[i], systems[j])) {
+>                     // 按声明顺序：先声明先执行
+>                     adj[i].push_back(j);
+>                     in_degree[j]++;
+>                 }
+>             }
+>         }
+>
+>         // Step 2：叠加显式依赖边
+>         for (auto& edge : explicit_edges) {
+>             adj[edge.from].push_back(edge.to);
+>             in_degree[edge.to]++;
+>         }
+>
+>         // Step 3：拓扑分层（Kahn 算法）
+>         std::vector<std::vector<size_t>> groups;
+>         std::vector<size_t> current_level;
+>         for (size_t i = 0; i < n; i++)
+>             if (in_degree[i] == 0) current_level.push_back(i);
+>
+>         while (!current_level.empty()) {
+>             groups.push_back(current_level);
+>             std::vector<size_t> next_level;
+>             for (size_t u : current_level)
+>                 for (size_t v : adj[u])
+>                     if (--in_degree[v] == 0) next_level.push_back(v);
+>             current_level = std::move(next_level);
+>         }
+>         return groups;
+>     }
+> };
+> ```
+>
+> **使用示例**：
+> ```cpp
+> scheduler.add_system(decl_AISystem);
+> scheduler.add_system(decl_MovementSystem);
+> // 显式覆盖：MovementSystem 在 AISystem 之前（如物理先更新再用新位置做 AI 决策）
+> scheduler.explicit_before("MovementSystem", "AISystem");
+>
+> auto conflicts = scheduler.detect_conflicts();
+> for (auto& w : conflicts) std::cerr << "WARNING: " << w << "\n";
+> ```
+>
+> **冲突检测原理**：自动推导基于"冲突 → 先声明先执行"。如果显式声明与自动推导方向相反，说明存在读写冲突但开发者要反转顺序——这可能导致数据竞争或读到旧数据，需要警告。
+
+> [!tip]- 练习 2 参考答案
+> **基于 `std::atomic` 的 MPSC 无锁队列**（Dmitry Vyukov 经典实现）：
+>
+> ```cpp
+> #include <atomic>
+> #include <memory>
+>
+> template<typename T>
+> class MPSCQueue {
+>     struct Node {
+>         T data;
+>         std::atomic<Node*> next{nullptr};
+>     };
+>
+>     // head_ 是消费者端（单消费者），tail_ 是生产者端（多生产者）
+>     std::atomic<Node*> head_{nullptr};  // 消费者从这里取
+>     std::atomic<Node*> tail_{nullptr};  // 生产者往这里接
+>
+>     // 哨兵节点：避免 head 为 null 的边界情况
+>     Node* sentinel_;
+>
+> public:
+>     MPSCQueue() {
+>         sentinel_ = new Node{};
+>         head_.store(sentinel_, std::memory_order_relaxed);
+>         tail_.store(sentinel_, std::memory_order_relaxed);
+>     }
+>
+>     ~MPSCQueue() {
+>         // 消费所有剩余
+>         while (T val; try_dequeue(val)) {}
+>         delete sentinel_;
+>     }
+>
+>     // 多生产者安全入队（lock-free）
+>     void enqueue(T value) {
+>         Node* node = new Node{std::move(value), nullptr};
+>
+>         // 原子地交换 tail_ 并链接
+>         Node* prev = tail_.exchange(node, std::memory_order_acq_rel);
+>         prev->next.store(node, std::memory_order_release);
+>         // ↑ release 保证 node 的初始化对消费者可见
+>     }
+>
+>     // 单消费者出队（非阻塞）
+>     bool try_dequeue(T& result) {
+>         Node* h = head_.load(std::memory_order_relaxed);
+>         Node* next = h->next.load(std::memory_order_acquire);
+>         // ↑ acquire 与 enqueue 的 release 配对
+>
+>         if (next == nullptr) return false;  // 队列空
+>
+>         result = std::move(next->data);
+>         head_.store(next, std::memory_order_release);
+>         delete h;  // 删除旧哨兵
+>         return true;
+>     }
+> };
+> ```
+>
+> **集成到 JobSystem**：
+> ```cpp
+> class LockFreeJobSystem {
+>     MPSCQueue<std::function<void()>> queue_;  // 替代 mutex+vector
+>     // ...
+>
+>     void submit(std::function<void()> job) {
+>         pending_.fetch_add(1, std::memory_order_relaxed);
+>         queue_.enqueue(std::move(job));  // 无锁入队
+>         cv_.notify_one();               // 仍需 cv 唤醒 worker
+>     }
+>
+>     void worker_loop(size_t id) {
+>         while (!stop_) {
+>             std::function<void()> job;
+>             if (queue_.try_dequeue(job)) {
+>                 job();
+>                 if (pending_.fetch_sub(1) == 1)
+>                     cv_done_.notify_all();
+>             } else {
+>                 // 空转等待：可加短暂 yield 或条件变量
+>                 std::this_thread::yield();
+>             }
+>         }
+>     }
+> };
+> ```
+>
+> **性能对比**：
+> - mutex 版：高竞争下 ~30% 时间花在锁上
+> - 无锁版：入队只需一次 atomic exchange + store，几乎无竞争开销
+> - **注意**：consumer 端仍需要某种等待机制（cv/yield），否则忙等浪费 CPU
+
+> [!tip]- 练习 3 参考答案（可选）
+> **执行时间统计与负载均衡策略**：
+>
+> ```cpp
+> struct SystemTiming {
+>     std::string name;
+>     std::vector<double> frame_times;  // 最近 N 帧耗时（环形缓冲区）
+>     size_t ring_pos = 0;
+>     static constexpr size_t WINDOW = 100;
+>
+>     void record(double ms) {
+>         if (frame_times.size() < WINDOW)
+>             frame_times.push_back(ms);
+>         else
+>             frame_times[ring_pos] = ms;
+>         ring_pos = (ring_pos + 1) % WINDOW;
+>     }
+>
+>     double avg_ms() const {
+>         if (frame_times.empty()) return 0;
+>         double sum = 0;
+>         for (auto t : frame_times) sum += t;
+>         return sum / frame_times.size();
+>     }
+> };
+>
+> // 在 ECSScheduler::run_all 中记录时间
+> void run_all(float dt) {
+>     auto groups = parallel_groups();
+>     for (size_t layer = 0; layer < groups.size(); layer++) {
+>         for (size_t idx : groups[layer]) {
+>             job_system_.submit([&sys = systems[idx], &timing = timings_[idx], dt]() {
+>                 auto t0 = Clock::now();
+>                 sys.execute(dt);
+>                 auto t1 = Clock::now();
+>                 timing.record(std::chrono::duration<double, std::milli>(t1 - t0).count());
+>             });
+>         }
+>         job_system_.wait_all();
+>     }
+> }
+> ```
+>
+> **负载均衡策略——拆分量大 System 为更小 Job**：
+>
+> ```cpp
+> // 策略：如果 System 平均耗时 > 阈值，将工作拆分为多个 Job
+> void run_all_adaptive(float dt) {
+>     static constexpr double HEAVY_THRESHOLD_MS = 2.0;  // 超过 2ms 视为"重"
+>
+>     auto groups = parallel_groups();
+>     for (auto& layer : groups) {
+>         for (size_t idx : layer) {
+>             auto& sys = systems[idx];
+>             double avg = timings_[idx].avg_ms();
+>
+>             if (avg > HEAVY_THRESHOLD_MS && sys.can_split) {
+>                 // 拆分为 range_count 个子 Job
+>                 size_t total = sys.entity_count();
+>                 size_t range_count = job_system_.worker_count() * 4;
+>                 size_t batch_size = (total + range_count - 1) / range_count;
+>
+>                 for (size_t start = 0; start < total; start += batch_size) {
+>                     size_t end = std::min(start + batch_size, total);
+>                     job_system_.submit([&sys, start, end, dt]() {
+>                         sys.execute_range(start, end, dt);  // 扩展 API
+>                     });
+>                 }
+>             } else {
+>                 // 轻量 System：作为单个 Job 提交
+>                 job_system_.submit([&sys, dt]() { sys.execute(dt); });
+>             }
+>         }
+>         job_system_.wait_all();
+>     }
+> }
+> ```
+>
+> **关键设计**：
+> - System 需要提供 `can_split`（是否可拆分）+ `entity_count()` + `execute_range(start, end, dt)`
+> - `batch_size` 的选择：约 Worker 数 × 4 → 既能负载均衡，又不因 Job 过细而调度开销过大
+> - 监测窗口 `WINDOW=100` 帧可平滑偶发尖峰（避免因一次 GC spike 而误判为"重"）
+> - Unity DOTS 的 `IJobParallelFor` 就是这套策略的生产级实现
 ---
 
 ## 4. 扩展阅读

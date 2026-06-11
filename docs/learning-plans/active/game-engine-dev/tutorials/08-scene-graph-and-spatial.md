@@ -1868,6 +1868,230 @@ std::vector<T> queryRay(const Vec3& origin, const Vec3& direction, float maxDist
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 在 SceneNode 类中添加以下方法：
+>
+> // 1. 获取世界旋转（从世界矩阵中提取——假设均匀缩放）
+> Vec3 getWorldRotation() const {
+>     const Mat4& wm = getWorldMatrix();
+>     // 从旋转子矩阵提取欧拉角（Y → X → Z 顺序，对应教程中的 Rz*Ry*Rx）
+>     // 假设均匀缩放，取旋转部分的列向量长度归一化
+>     Vec3 col0(wm(0,0), wm(1,0), wm(2,0)); // 第一列
+>     Vec3 col1(wm(0,1), wm(1,1), wm(2,1)); // 第二列
+>     Vec3 col2(wm(0,2), wm(1,2), wm(2,2)); // 第三列
+>
+>     float sx = col0.length();
+>     // 归一化以排除缩放影响
+>     col0 = col0 / sx;
+>     col1 = col1 / col1.length();
+>     col2 = col2 / col2.length();
+>
+>     // 提取欧拉角（注意万向节锁问题——实际应用中使用四元数）
+>     float pitch = std::asin(-col0.y);
+>     float yaw   = std::atan2(col0.x, col0.z);
+>     float roll  = std::atan2(col1.y, col2.y);
+>     return Vec3(pitch, yaw, roll);
+> }
+>
+> // 2. 获取世界缩放（从旋转子矩阵列长度推断）
+> Vec3 getWorldScale() const {
+>     const Mat4& wm = getWorldMatrix();
+>     return Vec3(
+>         Vec3(wm(0,0), wm(1,0), wm(2,0)).length(), // X 轴缩放
+>         Vec3(wm(0,1), wm(1,1), wm(2,1)).length(), // Y 轴缩放
+>         Vec3(wm(0,2), wm(1,2), wm(2,2)).length()  // Z 轴缩放
+>     );
+> }
+>
+> // 3. 按名称查找节点（深度优先搜索）
+> std::shared_ptr<SceneNode> findNodeByName(const std::string& name) {
+>     if (this->name == name) return shared_from_this();
+>     for (auto& child : children) {
+>         auto found = child->findNodeByName(name);
+>         if (found) return found;
+>     }
+>     return nullptr;
+> }
+>
+> // 4. 安全移除子节点
+> void removeChild(std::shared_ptr<SceneNode> child) {
+>     auto it = std::find(children.begin(), children.end(), child);
+>     if (it == children.end()) return;
+>     // 清除子节点的父引用
+>     child->parent.reset();
+>     // 从 children 容器中移除
+>     children.erase(it);
+> }
+> ```
+>
+> **getWorldRotation 的局限性：** 上述实现从矩阵列向量提取欧拉角，但存在两个问题——(1) 万向节锁（Gimbal Lock）导致某些角度组合无法忠实地用欧拉角表示，(2) 非均匀缩放会破坏旋转矩阵的正交性，使提取的欧拉角失真。工业级引擎（如 UE、Unity）内部使用四元数（Quaternion）存储旋转，在需要欧拉角显示时才转换，避免了这些陷阱。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 在 Octree 类中添加射线查询方法
+> // 使用 Slab Method（也称 Kay-Kajiya 算法）测试射线与 AABB 的相交
+>
+> template<typename T>
+> std::vector<T> Octree<T>::queryRay(const Vec3& origin, const Vec3& direction,
+>                                     float maxDistance) const {
+>     std::vector<T> results;
+>     Vec3 dir = direction.normalized();
+>     queryRayNode(root.get(), origin, dir, maxDistance, results);
+>     // 按距离排序（可选，用于最近命中）
+>     // 如果需要按距离排序，results 中需存储 (T, float distance) 对
+>     return results;
+> }
+>
+> template<typename T>
+> void Octree<T>::queryRayNode(OctreeNode* node, const Vec3& origin,
+>                               const Vec3& dir, float maxDist,
+>                               std::vector<T>& results) const {
+>     if (!node) return;
+>
+>     // Slab Method: 对每个轴计算 tmin 和 tmax
+>     float tmin = 0.0f, tmax = maxDist;
+>
+>     // 对 X 轴
+>     if (std::abs(dir.x) > 1e-8f) {
+>         float t1 = (node->bounds.min.x - origin.x) / dir.x;
+>         float t2 = (node->bounds.max.x - origin.x) / dir.x;
+>         tmin = std::max(tmin, std::min(t1, t2));
+>         tmax = std::min(tmax, std::max(t1, t2));
+>     } else {
+>         // 射线与 X 轴平行，检查起始点是否在区间内
+>         if (origin.x < node->bounds.min.x || origin.x > node->bounds.max.x)
+>             return;
+>     }
+>
+>     // 对 Y 轴
+>     if (std::abs(dir.y) > 1e-8f) {
+>         float t1 = (node->bounds.min.y - origin.y) / dir.y;
+>         float t2 = (node->bounds.max.y - origin.y) / dir.y;
+>         tmin = std::max(tmin, std::min(t1, t2));
+>         tmax = std::min(tmax, std::max(t1, t2));
+>     } else {
+>         if (origin.y < node->bounds.min.y || origin.y > node->bounds.max.y)
+>             return;
+>     }
+>
+>     // 对 Z 轴
+>     if (std::abs(dir.z) > 1e-8f) {
+>         float t1 = (node->bounds.min.z - origin.z) / dir.z;
+>         float t2 = (node->bounds.max.z - origin.z) / dir.z;
+>         tmin = std::max(tmin, std::min(t1, t2));
+>         tmax = std::min(tmax, std::max(t1, t2));
+>     } else {
+>         if (origin.z < node->bounds.min.z || origin.z > node->bounds.max.z)
+>             return;
+>     }
+>
+>     // 如果 tmin > tmax，射线未命中此节点
+>     if (tmin > tmax) return;
+>
+>     // 命中：检查叶节点中的物体
+>     if (node->isLeaf) {
+>         for (const auto& [aabb, obj] : node->objects) {
+>             // 对物体 AABB 再做一次 Slab Method（精细测试）
+>             // 简化：假设物体包围盒足够小，直接加入结果
+>             results.push_back(obj);
+>         }
+>     }
+>
+>     // 递归搜索子节点
+>     for (int i = 0; i < 8; ++i) {
+>         if (node->children[i]) {
+>             queryRayNode(node->children[i].get(), origin, dir, maxDist, results);
+>         }
+>     }
+> }
+> ```
+>
+> **Slab Method 核心原理：** 将 3D AABB 视为三对平行平面（slab）的交集。对每对 slab 计算射线进入和离开的参数 t，取所有进入 t 的最大值（`tmin`）和所有离开 t 的最小值（`tmax`）。若 `tmin ≤ tmax`，则射线命中 AABB。这个算法的优势是——可以提前退出（当某轴 `tmin > tmax` 时立即 return），且每一步只需除法和比较，无需分支预测密集的三角函数。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // 动态 BVH：支持物体移动后自底向上更新
+> // 核心假设：叶节点移动幅度较小，无需完全重建——增量更新更优
+>
+> class DynamicBVH {
+> public:
+>     struct Node {
+>         AABB bounds;
+>         bool isLeaf;
+>         int parentIdx = -1;
+>         int leftChild = -1;
+>         int rightChild = -1;
+>         T* object = nullptr;  // 仅叶节点有
+>         int objectIdx = -1;
+>         bool dirty = false;   // 标记是否需要 refit
+>     };
+>
+>     // 当物体移动后，更新其包围盒并自底向上重构祖先
+>     void updateObject(int leafIdx, const AABB& newBounds) {
+>         Node& leaf = nodes_[leafIdx];
+>         leaf.bounds = newBounds;
+>         leaf.dirty = true;
+>
+>         // 自底向上逐级更新祖先的 AABB
+>         int current = leaf.parentIdx;
+>         while (current != -1) {
+>             Node& node = nodes_[current];
+>             Node& left = nodes_[node.leftChild];
+>             Node& right = nodes_[node.rightChild];
+>
+>             AABB newAABB = left.bounds;
+>             newAABB.expand(right.bounds);
+>
+>             // 检查是否需要局部重建
+>             // 条件：子节点 AABB 合并后面积增长超过阈值
+>             float oldSA = node.bounds.surfaceArea();
+>             float newSA = newAABB.surfaceArea();
+>             float growth = (oldSA > 0) ? (newSA / oldSA) : 2.0f;
+>
+>             if (growth > REFIT_THRESHOLD) {
+>                 // 局部重建该子树
+>                 rebuildSubtree(current);
+>                 break;  // 重建后祖先已全部更新完毕
+>             }
+>
+>             node.bounds = newAABB;
+>             node.dirty = false;
+>             current = node.parentIdx;
+>         }
+>     }
+>
+>     // 完全重建 BVH（当太多节点需要重建时调用）
+>     void fullRebuild(const std::vector<T*>& allObjects) {
+>         // 收集所有叶节点的当前包围盒
+>         // 使用自顶向下 SAH 构建新 BVH
+>         nodes_.clear();
+>         for (auto* obj : allObjects) {
+>             Node leaf;
+>             leaf.isLeaf = true;
+>             leaf.object = obj;
+>             leaf.bounds = obj->getAABB();
+>             nodes_.push_back(leaf);
+>         }
+>         buildSAH(0, nodes_.size());  // 递归 SAH 构建
+>     }
+>
+> private:
+>     static constexpr float REFIT_THRESHOLD = 1.5f; // 面积增长 > 1.5x 触发重建
+>     std::vector<Node> nodes_;
+> };
+> ```
+>
+> **思考题答案：**  
+> - **完全重建 BVH 的代价：** O(n log n)（使用 SAH），在 ~10K 物体时约 1-5ms（CPU），对光线追踪来说这可以忽略（RT 的 BVH 构建本身就在 GPU 上快速完成），但对游戏引擎的每帧剔除来说不可接受——一帧只有 16.67ms。  
+> - **增量更新在什么条件下更优：** 当物体移动幅度较小时（叶子 AABB 面积增长 < 1.5x），refit 只更新祖先 AABB，O(log n) 代价；当大量物体剧烈移动时，累积的 AABB 膨胀使得 BVH 失去过滤效率，此时完全重建更优。实际做法（如 Intel Embree）是——大多数帧做 refit，每 N 帧或当 SAH 效率下降超过阈值时触发完全重建。  
+> - **NVIDIA OptiX / Intel Embree 策略：** 使用两阶段 BVH——TLAS（Top-Level Acceleration Structure）存储实例的变换矩阵，BLAS（Bottom-Level）存储实际几何体。物体移动时只需更新 TLAS 中的变换（4x4 矩阵），无需重建 BLAS。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 书籍

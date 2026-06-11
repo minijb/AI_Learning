@@ -729,6 +729,391 @@ g++ -std=c++17 -O2 -Wall -o dynamic_navmesh dynamic_navmesh.cpp
 3. 实现 Detour 的 `dtTileCache` 管理瓦片生命周期
 4. 对比纯几何 NavMesh vs 网格简化的寻路质量和性能
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 修改 `print_map`，用数字标注不同的连通分量：
+>
+> ```cpp
+> // 新增函数：打印带连通分量 ID 的地图
+> void print_map_with_components(const TileMap& map) {
+>     auto ids = map.connected_component_ids();
+>
+>     std::cout << "  ";
+>     for (int x = 0; x < map.world_cells_x; ++x) std::cout << x % 10;
+>     std::cout << "\n";
+>
+>     for (int y = 0; y < map.world_cells_y; ++y) {
+>         std::cout << std::setw(2) << y;
+>         for (int x = 0; x < map.world_cells_x; ++x) {
+>             if (!map.is_walkable(x, y))
+>                 std::cout << "#";          // 障碍
+>             else {
+>                 int id = ids[y][x];
+>                 if (id >= 0)
+>                     std::cout << (char)('A' + (id % 26)); // A-Z 循环
+>                 else
+>                     std::cout << "?";       // 不应该出现
+>             }
+>         }
+>         std::cout << "\n";
+>     }
+>     std::cout << "  图例: # = 障碍, A/B/C... = 不同连通分量\n";
+> }
+> ```
+>
+> **测试代码**（放在 main 的阶段 3 之后）：
+>
+> ```cpp
+> // 验证：障碍将地图分割为两个连通分量
+> std::cout << "【连通分量测试】\n";
+> TileMap test_map(30, 20);
+> // 设置一道横贯全屏的障碍墙，只留上方一个小口
+> for (int x = 5; x <= 25; ++x) {
+>     for (int y = 5; y <= 14; ++y) {
+>         test_map.set_static_obstacle(x, y, true);
+>     }
+> }
+> // 障碍完全切断 y=9 的通路——左右两侧被隔离
+> // 确认有两个分量
+> print_map_with_components(test_map);
+> auto ids = test_map.connected_component_ids();
+> std::set<int> unique_ids;
+> for (int y = 0; y < test_map.world_cells_y; ++y)
+>     for (int x = 0; x < test_map.world_cells_x; ++x)
+>         if (ids[y][x] >= 0) unique_ids.insert(ids[y][x]);
+> std::cout << "  检测到 " << unique_ids.size() << " 个连通分量\n";
+> assert(unique_ids.size() >= 2 && "应该有至少 2 个连通分量（障碍左侧和右侧）");
+> ```
+>
+> **关键点**：`connected_component_ids()` 使用跨 tile 的 flood fill，所以即使一个分量跨越多个 tile，也能正确识别为同一分量。验证时确保障碍确实切断了地图（AABB 覆盖整个宽度），否则可能仍是一个分量。
+
+> [!tip]- 练习 2 参考答案
+> 在 TileMap 上集成 A\* 寻路 + 增量重规划：
+>
+> ```cpp
+> // ============================================================
+> // A* 寻路器
+> // ============================================================
+> struct AStarNode {
+>     Point2i pos;
+>     double g, h;
+>     Point2i parent;
+>     bool in_open;
+>
+>     double f() const { return g + h; }
+> };
+>
+> double heuristic(Point2i a, Point2i b) {
+>     return std::sqrt((a.x-b.x)*(a.x-b.x) + (a.y-b.y)*(a.y-b.y));
+> }
+>
+> std::vector<Point2i> astar(const TileMap& map, Point2i start, Point2i goal) {
+>     int W = map.world_cells_x, H = map.world_cells_y;
+>     if (!map.is_walkable(start.x, start.y) || !map.is_walkable(goal.x, goal.y))
+>         return {};
+>
+>     // 用二维 vector 模拟哈希表（地图不大时可行）
+>     std::vector<std::vector<AStarNode>> nodes(H,
+>         std::vector<AStarNode>(W, {{0,0}, INFINITY, 0, {-1,-1}, false}));
+>
+>     auto cmp = [&](Point2i a, Point2i b) {
+>         return nodes[a.y][a.x].f() > nodes[b.y][b.x].f();
+>     };
+>     std::priority_queue<Point2i, std::vector<Point2i>, decltype(cmp)> open(cmp);
+>
+>     nodes[start.y][start.x] = {start, 0, heuristic(start, goal), {-1,-1}, true};
+>     open.push(start);
+>     int nodes_expanded = 0;
+>
+>     const int dx[] = {1,-1,0,0,1,1,-1,-1};
+>     const int dy[] = {0,0,1,-1,1,-1,1,-1};
+>
+>     while (!open.empty()) {
+>         Point2i cur = open.top(); open.pop();
+>         if (cur.x == goal.x && cur.y == goal.y) break;
+>         nodes_expanded++;
+>
+>         for (int d = 0; d < 8; ++d) {
+>             int nx = cur.x + dx[d], ny = cur.y + dy[d];
+>             if (nx < 0 || nx >= W || ny < 0 || ny >= H) continue;
+>             if (!map.is_walkable(nx, ny)) continue;
+>
+>             double step_cost = (d < 4) ? 1.0 : 1.414; // 对角
+>             double new_g = nodes[cur.y][cur.x].g + step_cost;
+>             if (new_g < nodes[ny][nx].g) {
+>                 nodes[ny][nx].g = new_g;
+>                 nodes[ny][nx].h = heuristic({nx,ny}, goal);
+>                 nodes[ny][nx].parent = cur;
+>                 if (!nodes[ny][nx].in_open) {
+>                     nodes[ny][nx].in_open = true;
+>                     open.push({nx, ny});
+>                 }
+>             }
+>         }
+>     }
+>
+>     // 回溯路径
+>     std::vector<Point2i> path;
+>     if (nodes[goal.y][goal.x].g == INFINITY) return {}; // 无路径
+>     for (Point2i p = goal; p.x != -1; p = nodes[p.y][p.x].parent)
+>         path.push_back(p);
+>     std::reverse(path.begin(), path.end());
+>
+>     std::cout << "  [A*] 扩展节点: " << nodes_expanded
+>               << "  路径长度: " << path.size() << "\n";
+>     return path;
+> }
+>
+> // ============================================================
+> // 增量重规划
+> // ============================================================
+> // 返回路径上每个点所在的 tile (tx, ty)
+> std::vector<std::pair<int,int>> path_tiles(const std::vector<Point2i>& path) {
+>     std::vector<std::pair<int,int>> result;
+>     for (auto p : path)
+>         result.push_back({p.x / TILE_SIZE, p.y / TILE_SIZE});
+>     return result;
+> }
+>
+> // 找出路径中穿过 dirty tile 的连续段
+> struct PathSegment {
+>     Point2i entry;   // 进入脏区前的最后一个节点
+>     Point2i exit;    // 离开脏区后的第一个节点
+> };
+>
+> PathSegment find_dirty_segment(const std::vector<Point2i>& path,
+>                                 const std::set<std::pair<int,int>>& dirty) {
+>     PathSegment seg = {{-1,-1}, {-1,-1}};
+>     auto tiles = path_tiles(path);
+>
+>     // 找第一个进入 dirty tile 的节点
+>     size_t dirty_start = path.size();
+>     for (size_t i = 0; i < path.size(); ++i) {
+>         if (dirty.count(tiles[i])) { dirty_start = i; break; }
+>     }
+>     if (dirty_start == path.size()) return seg;  // 路径不经过脏区
+>
+>     // entry：进入脏区前的最后一个 clean 节点
+>     seg.entry = (dirty_start > 0) ? path[dirty_start - 1] : path[0];
+>
+>     // 找最后一个离开 dirty tile 的节点
+>     size_t dirty_end = dirty_start;
+>     while (dirty_end < path.size() && dirty.count(tiles[dirty_end]))
+>         dirty_end++;
+>     seg.exit = (dirty_end < path.size()) ? path[dirty_end] : path.back();
+>
+>     return seg;
+> }
+>
+> // 增量搜索：仅重搜索脏区段
+> std::vector<Point2i> incremental_replan(const TileMap& map,
+>                                          const std::vector<Point2i>& old_path,
+>                                          const std::set<std::pair<int,int>>& dirty) {
+>     auto seg = find_dirty_segment(old_path, dirty);
+>     if (seg.entry.x == -1) return old_path;  // 不经过脏区，无需重规划
+>
+>     // 仅重搜索 entry → exit 之间的路径
+>     std::cout << "  [增量] 脏区段: (" << seg.entry.x << "," << seg.entry.y
+>               << ") → (" << seg.exit.x << "," << seg.exit.y << ")\n";
+>
+>     auto subpath = astar(map, seg.entry, seg.exit);
+>     if (subpath.empty()) {
+>         std::cout << "  [增量] 脏区不可通行，回退到全量搜索\n";
+>         return astar(map, old_path.front(), old_path.back());
+>     }
+>
+>     // 拼接：旧路径前半段 + 新子路径 + 旧路径后半段
+>     std::vector<Point2i> new_path;
+>     // 前半段：从 old_path 开头到 entry（不含 entry）
+>     for (auto& p : old_path) {
+>         if (p.x == seg.entry.x && p.y == seg.entry.y) break;
+>         new_path.push_back(p);
+>     }
+>     // 新子路径
+>     for (auto& p : subpath) new_path.push_back(p);
+>     // 后半段：从 exit 之后到 old_path 末尾（不含 exit）
+>     bool past_exit = false;
+>     for (auto& p : old_path) {
+>         if (p.x == seg.exit.x && p.y == seg.exit.y) { past_exit = true; continue; }
+>         if (past_exit) new_path.push_back(p);
+>     }
+>     return new_path;
+> }
+> ```
+>
+> **比较测试**（放在 main 的阶段 2 之后）：
+>
+> ```cpp
+> // 先计算一条初始路径
+> auto path_full = astar(map, {2, 9}, {28, 9});
+> std::cout << "初始全量搜索完成\n";
+>
+> // 修改一个 tile 内的障碍（模拟运行时变化）
+> // … 在阶段 2 已经添加了障碍并调用了 bake_dirty_tiles()
+>
+> // 对比：全量重搜索 vs 增量搜索
+> std::cout << "--- 全量重搜索 ---\n";
+> auto new_path_full = astar(map, path_full.front(), path_full.back());
+>
+> std::cout << "--- 增量搜索（仅搜索 dirty tile 段）---\n";
+> auto new_path_incr = incremental_replan(map, path_full, map.dirty_tiles);
+> // dirty_tiles 在 bake_dirty_tiles() 之后已清空，所以在增量搜索前需要保留副本
+> ```
+>
+> **关键点**：增量搜索的优势在于只重新搜索路径中实际穿越脏区的段落。当路径长（数百个节点）而脏区只覆盖少数 tile（1-2 个）时，增量搜索的节点扩展数远小于全量搜索。代价是需要正确找出 entry/exit 点并拼接路径。如果脏区将路径完全切断（子路径搜索失败），则回退到全量搜索。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **基于 Recast 的真实 Tile Cache 集成步骤：**
+>
+> **1. 集成 Recast 库**
+>
+> ```bash
+> # 克隆 Recast
+> git clone https://github.com/recastnavigation/recastnavigation.git
+> cd recastnavigation/RecastDemo
+> # 构建后，将 Recast/ 和 Detour/ 目录的 .cpp 文件加入你的 CMakeLists.txt
+> ```
+>
+> **2. 替换 bake_tile 为 Recast 调用**
+>
+> ```cpp
+> #include "Recast.h"
+> #include "DetourNavMesh.h"
+> #include "DetourNavMeshBuilder.h"
+>
+> // 替换原来的 bake_tile
+> bool bake_tile_recast(int tx, int ty,
+>                       const rcConfig& cfg,
+>                       const std::vector<float>& input_verts,
+>                       const std::vector<int>& input_tris,
+>                       dtNavMesh* navMesh) {
+>     // Recast 烘焙参数 (cfg) 替代简化版的 tile 设定
+>     // cfg.tileSize = TILE_SIZE * CELL_SIZE (世界单位)
+>
+>     rcContext ctx;
+>
+>     // 1. 体素化 (rasterize)
+>     rcHeightfield* hf = rcAllocHeightfield();
+>     rcCreateHeightfield(&ctx, *hf, cfg.width, cfg.height,
+>                         cfg.bmin, cfg.bmax, cfg.cs, cfg.ch);
+>     // 三角形 → 高度场
+>     unsigned char* triAreas = new unsigned char[input_tris.size() / 3];
+>     memset(triAreas, 0, input_tris.size() / 3);
+>     rcMarkWalkableTriangles(&ctx, cfg.walkableSlopeAngle,
+>                             input_verts.data(), (int)input_verts.size() / 3,
+>                             input_tris.data(), (int)input_tris.size() / 3,
+>                             triAreas);
+>     rcRasterizeTriangles(&ctx, input_verts.data(), (int)input_verts.size() / 3,
+>                          input_tris.data(), triAreas,
+>                          (int)input_tris.size() / 3, *hf, cfg.walkableClimb);
+>     delete[] triAreas;
+>
+>     // 2. 区域生成
+>     rcCompactHeightfield* chf = rcAllocCompactHeightfield();
+>     rcBuildCompactHeightfield(&ctx, cfg.walkableHeight, cfg.walkableClimb, *hf, *chf);
+>     // 过滤可行走表面
+>
+>     // 3. 区域连通 + 轮廓
+>     rcContourSet* cset = rcAllocContourSet();
+>     rcBuildContours(&ctx, *chf, cfg.maxSimplificationError,
+>                     cfg.maxEdgeLen, *cset);
+>
+>     // 4. 多边形网格
+>     rcPolyMesh* pmesh = rcAllocPolyMesh();
+>     rcBuildPolyMesh(&ctx, *cset, cfg.maxVertsPerPoly, *pmesh);
+>
+>     // 5. 细节网格
+>     rcPolyMeshDetail* dmesh = rcAllocPolyMeshDetail();
+>     rcBuildPolyMeshDetail(&ctx, *pmesh, *chf,
+>                           cfg.detailSampleDist, cfg.detailSampleMaxError, *dmesh);
+>
+>     // 6. 构建 Detour NavMesh 数据
+>     unsigned char* navData = nullptr;
+>     int navDataSize = 0;
+>     dtNavMeshCreateParams params = {};
+>     // … 填充 params（verts, polys, detail mesh 等）
+>     dtCreateNavMeshData(&params, &navData, &navDataSize);
+>
+>     // 7. 添加到 Detour NavMesh（替换旧 tile）
+>     dtStatus status = navMesh->addTile(navData, navDataSize,
+>                                        DT_TILE_FREE_DATA, 0, nullptr);
+>
+>     // 清理 Recast 中间数据
+>     rcFreeHeightField(hf);
+>     rcFreeCompactHeightfield(chf);
+>     rcFreeContourSet(cset);
+>     rcFreePolyMesh(pmesh);
+>     rcFreePolyMeshDetail(dmesh);
+>
+>     return dtStatusSucceed(status);
+> }
+> ```
+>
+> **3. 使用 Detour 的 dtTileCache 管理生命周期**
+>
+> ```cpp
+> // dtTileCache 提供完整的 tile 增删改查接口
+> dtTileCache* tileCache = dtAllocTileCache();
+> dtTileCacheParams tcParams;
+> memset(&tcParams, 0, sizeof(tcParams));
+> // … 设置 origin, tile 尺寸等
+> dtStatus status = tileCache->init(&tcParams, alloc, compressor,
+>                                    &dtTileCacheAlloc, &dtTileCacheFree, nullptr);
+>
+> // 添加 tile
+> dtCompressedTileRef tileRef = 0;
+> tileCache->addTile(tileData, dataSize, DT_COMPRESSEDTILE_FREE_DATA, &tileRef);
+>
+> // 更新 tile（先移除旧的，再添加新的）
+> tileCache->removeTile(tileRef);
+> tileCache->addTile(newTileData, newDataSize, DT_COMPRESSEDTILE_FREE_DATA, &tileRef);
+>
+> // 构建 tile（内部调用 Recast 管线 + 压缩）
+> tileCache->buildNavMeshTile(tileRef, navMesh);
+>
+> // 脏区管理
+> tileCache->buildNavMeshTilesAt(tx, ty, navMesh); // 重新烘焙指定 tile
+> ```
+>
+> **4. 性能对比方案**
+>
+> 对比维度：
+> - **寻路质量**：纯几何 NavMesh 生成的路径比网格简化的更平滑（A\* 在 NavMesh 多边形上走的是通道中点 `dtNavMeshQuery::findStraightPath`），且支持任意角度移动
+> - **烘焙时间**：单 tile Recast 烘焙通常 0.5-5ms（取决于体素分辨率和三角形数），而简化的 bool 网格遍历只需微秒级
+> - **内存**：Detour NavMesh 数据通常每 tile 2-20KB（压缩后），简化版每 tile 8×8=64 bool ≈ 64 bytes
+>
+> **验证方法**：
+> ```cpp
+> // 使用 Detour 的 dtNavMeshQuery 查询路径
+> dtNavMeshQuery* query = dtAllocNavMeshQuery();
+> query->init(navMesh, 2048);
+> dtQueryFilter filter;
+> dtPolyRef startRef, endRef;
+> float startPos[3] = {sx, 0, sy};
+> float endPos[3]   = {gx, 0, gy};
+> query->findNearestPoly(startPos, extents, &filter, &startRef, nullptr);
+> query->findNearestPoly(endPos, extents, &filter, &endRef, nullptr);
+>
+> dtPolyRef pathPolys[256];
+> int pathCount;
+> query->findPath(startRef, endRef, startPos, endPos, &filter,
+>                 pathPolys, &pathCount, 256);
+>
+> // 提取直线路径
+> float straightPath[256 * 3];
+> int straightPathCount;
+> query->findStraightPath(startPos, endPos, pathPolys, pathCount,
+>                          straightPath, nullptr, nullptr,
+>                          &straightPathCount, 256);
+> ```
+>
+> **关键点**：Recast 烘焙的核心在于体素化精度与性能的权衡——`cfg.cs`（cell size）和 `cfg.ch`（cell height）越小，NavMesh 越精确但烘焙越慢。`dtTileCache` 自带压缩（LZ4），减少内存占用。真实集成中最容易出错的是坐标系统转换（Recast 用 Y-up，Unity 用 Y-up 但左手系有些差异）和 tile 边界连接（`cfg.borderSize` 控制重叠体素层数，通常 ≥ 1）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。练习 3 需要完整的 Recast/Detour 库环境，建议在本地编译 RecastDemo 后对照源码逐步替换。
+
 ## 4. 扩展阅读
 
 - **Mononen, M. (2009). "Recast Navigation Mesh Toolkit."** Recast/Detour 原项目文档。重点阅读 `RecastDemo` 中的 Tile Mesh/Tile Cache 模式及其与 Solo Mesh 模式的区别。

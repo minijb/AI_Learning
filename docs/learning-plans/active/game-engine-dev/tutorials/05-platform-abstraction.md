@@ -1425,6 +1425,389 @@ public:
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // PlatformMacOS.cpp —— macOS 平台实现
+> // 注意：此文件用 Objective-C++ 编译（.mm 后缀），因为需要调用 Cocoa/Foundation API
+>
+> #include "Platform.h"
+> #include <mach-o/dyld.h>       // _NSGetExecutablePath
+> #include <sys/sysctl.h>        // sysctlbyname
+> #include <sys/mount.h>         // statfs
+> #include <signal.h>            // SIGTRAP
+> #include <Carbon/Carbon.h>     // 或直接导入 CoreFoundation
+> #import <Foundation/Foundation.h>
+>
+> // macOS 文件系统实现
+> class FileSystemMacOS : public FileSystem {
+> public:
+>     std::string GetExecutablePath() const override {
+>         char buffer[PATH_MAX];
+>         uint32_t size = sizeof(buffer);
+>         if (_NSGetExecutablePath(buffer, &size) == 0) {
+>             // 注意：_NSGetExecutablePath 返回的路径可能包含符号链接
+>             // 需要用 realpath 解析为真实路径
+>             char resolved[PATH_MAX];
+>             if (realpath(buffer, resolved)) {
+>                 return std::string(resolved);
+>             }
+>             return std::string(buffer);
+>         }
+>         return "";
+>     }
+>
+>     std::string GetUserDataDirectory() const override {
+>         @autoreleasepool {
+>             NSArray* paths = NSSearchPathForDirectoriesInDomains(
+>                 NSApplicationSupportDirectory, NSUserDomainMask, YES);
+>             if ([paths count] > 0) {
+>                 NSString* path = [paths objectAtIndex:0];
+>                 // 追加应用名称作为子目录
+>                 NSString* appPath = [path stringByAppendingPathComponent:@"MyGameEngine"];
+>                 // 确保目录存在
+>                 [[NSFileManager defaultManager]
+>                     createDirectoryAtPath:appPath
+>                     withIntermediateDirectories:YES
+>                     attributes:nil error:nil];
+>                 return std::string([appPath UTF8String]);
+>             }
+>         }
+>         // Fallback: 使用 ~/Library/Application Support/
+>         const char* home = getenv("HOME");
+>         if (home) return std::string(home) + "/Library/Application Support/MyGameEngine";
+>         return "";
+>     }
+>
+>     // 其余文件操作与 Linux 实现类似（POSIX API 通用）
+>     // 注意：macOS 默认大小写不敏感（但保留大小写）的 HFS+/APFS
+>     // FindFile 等操作不需要额外处理
+>
+>     std::string GetEngineRootDirectory() const override {
+>         std::string exePath = GetExecutablePath();
+>         size_t lastSlash = exePath.find_last_of('/');
+>         if (lastSlash != std::string::npos) {
+>             // macOS .app bundle: Contents/MacOS/executable
+>             // 引擎根目录通常在 .app/Contents/Resources/
+>             std::string dir = exePath.substr(0, lastSlash);
+>             // 检查是否在 bundle 内
+>             size_t bundlePos = dir.find(".app/");
+>             if (bundlePos != std::string::npos) {
+>                 size_t endPos = dir.find('/', bundlePos + 5);
+>                 return dir.substr(0, endPos) + "/Contents/Resources";
+>             }
+>             return dir;
+>         }
+>         return ".";
+>     }
+>
+>     // JoinPath 等通用实现（POSIX 分隔符 "/"）
+>     // ...
+> };
+>
+> // macOS 平台主类
+> class PlatformMacOS : public IPlatform {
+> public:
+>     PlatformInfo GetInfo() const override {
+>         PlatformInfo info;
+>         info.osName = "macOS";
+>         // 获取 macOS 版本
+>         @autoreleasepool {
+>             NSProcessInfo* pi = [NSProcessInfo processInfo];
+>             NSOperatingSystemVersion ver = [pi operatingSystemVersion];
+>             info.osVersion = std::to_string((int)ver.majorVersion) + "." +
+>                              std::to_string((int)ver.minorVersion) + "." +
+>                              std::to_string((int)ver.patchVersion);
+>         }
+>         // CPU 核心数
+>         int ncpu;
+>         size_t len = sizeof(ncpu);
+>         sysctlbyname("hw.logicalcpu", &ncpu, &len, nullptr, 0);
+>         info.cpuCoreCount = ncpu;
+>         // 物理内存
+>         int64_t mem;
+>         len = sizeof(mem);
+>         sysctlbyname("hw.memsize", &mem, &len, nullptr, 0);
+>         info.totalPhysicalRAM = mem;
+> #ifdef _DEBUG
+>         info.isDebugBuild = true;
+> #else
+>         info.isDebugBuild = false;
+> #endif
+>         return info;
+>     }
+>
+>     void DebugBreak() override {
+>         // macOS/iOS 支持 __builtin_debugtrap()（clang），
+>         // 或使用 raise(SIGTRAP) 作为回退方案
+> #ifdef __has_builtin
+> #if __has_builtin(__builtin_debugtrap)
+>         __builtin_debugtrap();
+> #else
+>         raise(SIGTRAP);
+> #endif
+> #else
+>         raise(SIGTRAP);
+> #endif
+>     }
+>
+>     void OutputDebugString(const std::string& msg) override {
+>         // NSLog 会输出到系统日志和控制台
+>         @autoreleasepool {
+>             NSLog(@"%s", msg.c_str());
+>         }
+>     }
+>
+>     // ... 其余接口实现
+>     std::unique_ptr<Window> CreateWindow(const WindowDesc& desc) override { /* 使用 Cocoa NSWindow */ }
+>     std::unique_ptr<FileSystem> CreateFileSystem() override { return std::make_unique<FileSystemMacOS>(); }
+> };
+> ```
+>
+> **关键注意事项：**  
+> 1. macOS 文件系统默认**大小写不敏感但保留大小写**——`"Texture.png"` 和 `"texture.png"` 指向同一个文件，与 Linux 不同。  
+> 2. `.app` Bundle 结构特殊——可执行文件在 `Contents/MacOS/`，资源在 `Contents/Resources/`，引擎根目录需特殊处理。  
+> 3. macOS 实现文件需要用 `.mm` 后缀（Objective-C++）编译，才能调用 Foundation/Cocoa API。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // IThread.h —— 跨平台线程抽象接口
+> #pragma once
+> #include <functional>
+> #include <string>
+> #include <cstdint>
+>
+> class IThread {
+> public:
+>     virtual ~IThread() = default;
+>     virtual void Start(std::function<void()> entryPoint) = 0;
+>     virtual void Join() = 0;
+>     virtual void SetName(const std::string& name) = 0;
+>     virtual void SetAffinity(uint64_t coreMask) = 0;
+>     virtual uint32_t GetID() const = 0;
+> };
+>
+> // ---- Windows 实现 ----
+> #ifdef _WIN32
+> #define NOMINMAX
+> #define WIN32_LEAN_AND_MEAN
+> #include <windows.h>
+>
+> class ThreadWindows : public IThread {
+> public:
+>     ~ThreadWindows() override { if (m_handle) CloseHandle(m_handle); }
+>
+>     void Start(std::function<void()> entryPoint) override {
+>         m_entryPoint = std::move(entryPoint);
+>         m_handle = CreateThread(nullptr, 0, ThreadProc, this, 0, &m_threadID);
+>     }
+>
+>     void Join() override {
+>         if (m_handle) WaitForSingleObject(m_handle, INFINITE);
+>     }
+>
+>     void SetName(const std::string& name) override {
+>         // Windows 10 1607+ 支持 SetThreadDescription
+>         // 需要动态加载 kernel32.dll 中的 SetThreadDescription
+>         using SetThreadDescFn = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+>         HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+>         if (kernel32) {
+>             auto pfn = (SetThreadDescFn)GetProcAddress(kernel32, "SetThreadDescription");
+>             if (pfn) {
+>                 int len = MultiByteToWideChar(CP_UTF8, 0, name.c_str(), -1, nullptr, 0);
+>                 std::wstring wname(len, L'\0');
+>                 MultiByteToWideChar(CP_UTF8, 0, name.c_str(), -1, &wname[0], len);
+>                 pfn(m_handle, wname.c_str());
+>             }
+>         }
+>     }
+>
+>     void SetAffinity(uint64_t coreMask) override {
+>         if (m_handle) SetThreadAffinityMask(m_handle, (DWORD_PTR)coreMask);
+>     }
+>
+>     uint32_t GetID() const override { return m_threadID; }
+>
+> private:
+>     static DWORD WINAPI ThreadProc(LPVOID param) {
+>         auto* self = static_cast<ThreadWindows*>(param);
+>         self->m_entryPoint();
+>         return 0;
+>     }
+>     HANDLE m_handle = nullptr;
+>     DWORD m_threadID = 0;
+>     std::function<void()> m_entryPoint;
+> };
+> #endif
+>
+> // ---- Linux 实现 ----
+> #ifdef __linux__
+> #include <pthread.h>
+>
+> class ThreadLinux : public IThread {
+> public:
+>     void Start(std::function<void()> entryPoint) override {
+>         m_entryPoint = std::move(entryPoint);
+>         pthread_create(&m_thread, nullptr, ThreadProc, this);
+>     }
+>
+>     void Join() override { pthread_join(m_thread, nullptr); }
+>
+>     void SetName(const std::string& name) override {
+>         // pthread 限制：名称最多 15 字符（不含 null）
+>         std::string truncated = name.substr(0, 15);
+>         pthread_setname_np(m_thread, truncated.c_str());
+>     }
+>
+>     void SetAffinity(uint64_t coreMask) override {
+>         cpu_set_t cpuset;
+>         CPU_ZERO(&cpuset);
+>         for (int i = 0; i < 64; ++i) {
+>             if (coreMask & (1ULL << i)) CPU_SET(i, &cpuset);
+>         }
+>         pthread_setaffinity_np(m_thread, sizeof(cpuset), &cpuset);
+>     }
+>
+>     uint32_t GetID() const override {
+>         // 注意：pthread_t 不保证能转为整数，但 Linux/glibc 可以
+>         return static_cast<uint32_t>((uintptr_t)m_thread);
+>     }
+>
+> private:
+>     static void* ThreadProc(void* param) {
+>         auto* self = static_cast<ThreadLinux*>(param);
+>         self->m_entryPoint();
+>         return nullptr;
+>     }
+>     pthread_t m_thread = 0;
+>     std::function<void()> m_entryPoint;
+> };
+> #endif
+>
+> // ---- macOS 实现 ----
+> // macOS 也使用 pthread，与 Linux 实现几乎相同，但有两个关键区别：
+> // 1. macOS 不支持 SetAffinity——线程亲和性设置 pthread_setaffinity_np 不存在于 macOS
+> //    （macOS 的 Grand Central Dispatch 由系统自动管理线程调度）
+> // 2. pthread_setname_np 在 macOS 上只接受当前线程（即 pthread_self()），
+> //    不能给其他线程命名——需要在 Start 的入口函数中调用
+> ```
+>
+> **关键差异：** macOS 不支持 `pthread_setaffinity_np`——这是因为 macOS 的线程调度由 GCD（Grand Central Dispatch）管理，内核自动决定线程在哪个核心上运行。引擎在 macOS 上不应假设线程亲和性可用。线程命名的 API 签名在 Linux（接受 pthread_t）和 macOS（只接受当前线程）之间也不同。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // 自研 Win32 窗口系统 —— 展示 GLFW 背后的实现原理
+> #define NOMINMAX
+> #define WIN32_LEAN_AND_MEAN
+> #include <windows.h>
+> #include <GL/gl.h>
+> #include <iostream>
+>
+> // 全局状态（实际引擎中应封装在类中）
+> static bool g_running = true;
+> static HDC g_hdc = nullptr;
+> static HGLRC g_hglrc = nullptr;
+>
+> // 窗口过程回调
+> LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
+>     switch (msg) {
+>     case WM_SIZE: {
+>         int width = LOWORD(lparam);
+>         int height = HIWORD(lparam);
+>         glViewport(0, 0, width, height);
+>         std::cout << "Window resized: " << width << "x" << height << std::endl;
+>         break;
+>     }
+>     case WM_CLOSE:
+>         g_running = false;
+>         PostQuitMessage(0);
+>         break;
+>     case WM_KEYDOWN:
+>         std::cout << "Key pressed: " << wparam << std::endl;
+>         break;
+>     case WM_MOUSEMOVE: {
+>         int x = LOWORD(lparam), y = HIWORD(lparam);
+>         // 处理鼠标移动（此处简化）
+>         break;
+>     }
+>     case WM_DESTROY:
+>         g_running = false;
+>         PostQuitMessage(0);
+>         break;
+>     default:
+>         return DefWindowProc(hwnd, msg, wparam, lparam);
+>     }
+>     return 0;
+> }
+>
+> int Win32WindowMain() {
+>     // 1. 注册窗口类
+>     WNDCLASSEX wc = {};
+>     wc.cbSize = sizeof(WNDCLASSEX);
+>     wc.lpfnWndProc = WindowProc;
+>     wc.hInstance = GetModuleHandle(nullptr);
+>     wc.lpszClassName = TEXT("GameEngineWindow");
+>     wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
+>     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+>     RegisterClassEx(&wc);
+>
+>     // 2. 创建窗口（带 OpenGL 上下文所需的样式）
+>     HWND hwnd = CreateWindowEx(
+>         0, TEXT("GameEngineWindow"), TEXT("My Game Engine"),
+>         WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT,
+>         1280, 720, nullptr, nullptr, GetModuleHandle(nullptr), nullptr);
+>
+>     // 3. 获取设备上下文（DC）并设置像素格式
+>     g_hdc = GetDC(hwnd);
+>     PIXELFORMATDESCRIPTOR pfd = {
+>         sizeof(PIXELFORMATDESCRIPTOR), 1,
+>         PFD_DRAW_TO_WINDOW | PFD_SUPPORT_OPENGL | PFD_DOUBLEBUFFER,
+>         PFD_TYPE_RGBA, 32, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+>         24, 8, 0, PFD_MAIN_PLANE, 0, 0, 0, 0
+>     };
+>     int pixelFormat = ChoosePixelFormat(g_hdc, &pfd);
+>     SetPixelFormat(g_hdc, pixelFormat, &pfd);
+>
+>     // 4. 创建 OpenGL 渲染上下文
+>     g_hglrc = wglCreateContext(g_hdc);
+>     wglMakeCurrent(g_hdc, g_hglrc);
+>
+>     ShowWindow(hwnd, SW_SHOW);
+>
+>     // 5. 消息循环（游戏循环的 Win32 版本）
+>     MSG msg = {};
+>     while (g_running) {
+>         // PeekMessage 不阻塞，GetMessage 阻塞等待
+>         while (PeekMessage(&msg, nullptr, 0, 0, PM_REMOVE)) {
+>             if (msg.message == WM_QUIT) { g_running = false; break; }
+>             TranslateMessage(&msg);
+>             DispatchMessage(&msg);
+>         }
+>
+>         if (!g_running) break;
+>
+>         // 渲染一帧
+>         glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+>         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+>         // ... 绘制场景 ...
+>         SwapBuffers(g_hdc);  // glfwSwapBuffers 的底层实现
+>     }
+>
+>     // 清理
+>     wglMakeCurrent(nullptr, nullptr);
+>     wglDeleteContext(g_hglrc);
+>     ReleaseDC(hwnd, g_hdc);
+>     DestroyWindow(hwnd);
+>     return 0;
+> }
+> ```
+>
+> **关键学习点：** 这段代码展示了 GLFW 的核心实现——WM_SIZE 处理窗口缩放、WM_CLOSE 处理关闭、`PeekMessage` 实现非阻塞消息泵（游戏循环必须非阻塞）、`SwapBuffers` 交换前后缓冲。GLFW 还额外处理了多显示器 DPI、HiDPI、Raw Input（高精度鼠标）、XInput（游戏手柄）等——理解了这段代码就理解了 GLFW 的工作原理。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 必读文章

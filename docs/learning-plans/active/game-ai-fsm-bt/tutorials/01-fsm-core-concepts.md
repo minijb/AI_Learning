@@ -803,6 +803,222 @@ def evaluate_transitions(current_state: str, event: str) -> Optional[str]:
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **状态转移图（ASCII）：**
+>
+> ```
+>                     ┌──────────────────────┐
+>                     │       Patrol          │
+>                     │ entry: 播放 Walk 动画 │
+>                     │        speed = 2      │
+>                     │ tick:  沿路径点移动    │
+>                     │ exit:  停止移动        │
+>                     └──────────┬───────────┘
+>              PlayerDetected    │   HealthZero
+>               ┌────────────────┼──────────────────┐
+>               ▼                │                  ▼
+>       ┌──────────────┐        │         ┌──────────────┐
+>       │    Chase      │        │         │     Dead      │
+>       │ entry: 播放    │◄───────┘         │ entry: 播放    │
+>       │   Run 动画     │ PlayerLost       │   Death 动画   │
+>       │   警戒音效     │  >10s           │ 禁用碰撞       │
+>       │   Alert 盟友   │                  │ 掉落战利品      │
+>       │   speed = 5    │                  │ 5s 后销毁      │
+>       │ tick: Nav 到   │                  │                │
+>       │   玩家/已知位置 │                  │ ← 所有状态     │
+>       └───────┬────────┘                  │   均可进入     │
+>               │ InAttackRange             └───────────────┘
+>               ▼
+>       ┌──────────────┐
+>       │   Attack      │
+>       │ entry: 面向玩家│
+>       │   speed = 0    │
+>       │ tick: 冷却计时  │
+>       │   冷却完毕→攻击  │
+>       │ exit:  重置冷却  │
+>       └───────┬────────┘
+>               │ HealthZero
+>               ▼
+>       ┌──────────────┐
+>       │     Dead      │ ← 吸收态，无转移
+>       └──────────────┘
+> ```
+>
+> **伪代码实现（C++ 风格）：**
+>
+> ```cpp
+> enum class EnemyState { Patrol, Chase, Attack, Dead };
+> enum class EnemyEvent { PlayerDetected, PlayerLost, InAttackRange,
+>                          OutOfAttackRange, HealthZero, ChaseTimeout };
+>
+> class EnemyAI {
+>     EnemyState m_state = EnemyState::Patrol;
+>     float m_chaseTimer = 0.0f;
+>     static constexpr float MAX_CHASE_TIME = 10.0f;
+>
+>     void Update(float dt) {
+>         if (m_state != EnemyState::Dead) {
+>             EnemyEvent evt = PollEvents(dt);
+>             Transition(evt);
+>         }
+>         UpdateState(dt);
+>     }
+>
+>     void Transition(EnemyEvent evt) {
+>         switch (m_state) {
+>         case EnemyState::Patrol:
+>             if (evt == EnemyEvent::PlayerDetected) SetState(EnemyState::Chase);
+>             else if (evt == EnemyEvent::HealthZero) SetState(EnemyState::Dead);
+>             break;
+>         case EnemyState::Chase:
+>             if (evt == EnemyEvent::InAttackRange) SetState(EnemyState::Attack);
+>             else if (evt == EnemyEvent::PlayerLost) SetState(EnemyState::Patrol);
+>             else if (evt == EnemyEvent::ChaseTimeout) SetState(EnemyState::Patrol);
+>             else if (evt == EnemyEvent::HealthZero) SetState(EnemyState::Dead);
+>             break;
+>         case EnemyState::Attack:
+>             if (evt == EnemyEvent::OutOfAttackRange) SetState(EnemyState::Chase);
+>             else if (evt == EnemyEvent::HealthZero) SetState(EnemyState::Dead);
+>             break;
+>         case EnemyState::Dead:
+>             break; // 吸收态，不处理任何事件
+>         }
+>     }
+>
+>     void SetState(EnemyState s) {
+>         if (s == m_state) return;
+>         OnExit(m_state);
+>         m_state = s;
+>         OnEnter(m_state);
+>     }
+>
+>     void OnEnter(EnemyState s) {
+>         switch (s) {
+>         case EnemyState::Chase:
+>             PlaySound("alert_bark");        // Enter 回调中的副作用示例
+>             AlertNearbyAllies();
+>             m_chaseTimer = 0.0f;
+>             break;
+>         case EnemyState::Dead:
+>             DisableCollision();
+>             DropLoot();
+>             PlayAnimation("Death");
+>             break;
+>         // ...
+>         }
+>     }
+>
+>     EnemyEvent PollEvents(float dt) {
+>         if (health <= 0) return EnemyEvent::HealthZero;
+>         float dist = DistanceToPlayer();
+>         if (m_state == EnemyState::Chase) {
+>             m_chaseTimer += dt;
+>             if (m_chaseTimer > MAX_CHASE_TIME) return EnemyEvent::ChaseTimeout; // Guard
+>         }
+>         if (dist <= attackRange)  return EnemyEvent::InAttackRange;
+>         if (dist <= detectRange)  return EnemyEvent::PlayerDetected;
+>         return EnemyEvent::PlayerLost;
+>     }
+> };
+> ```
+>
+> **状态转移表完备性检查（N=4 状态 × M=7 事件 = 28 组合）：**
+>
+> | 状态\事件 | PlayerDetected | PlayerLost | InAttackRange | OutOfAttackRange | HealthZero | ChaseTimeout | (无事件) |
+> |----------|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+> | Patrol | →Chase | Patrol(忽略) | Patrol(忽略) | Patrol(忽略) | →Dead | Patrol(忽略) | Patrol(自) |
+> | Chase | Chase(自) | →Patrol | →Attack | Chase(忽略) | →Dead | →Patrol | Chase(自) |
+> | Attack | Attack(忽略) | Attack(忽略) | Attack(自) | →Chase | →Dead | Attack(忽略) | Attack(自) |
+> | Dead | Dead(忽略) | Dead(忽略) | Dead(忽略) | Dead(忽略) | Dead(忽略) | Dead(忽略) | Dead(自) |
+>
+> **未处理组合分析：** 28 个组合中 14 个为"忽略"（该状态下事件不可能发生或无需响应），14 个有明确行为。关键遗漏：Attack 状态下 PlayerLost 被标记为"忽略"——但如果玩家在攻击动画中闪现离开，是否需要处理？取决于你的设计：如果攻击动画不可取消，忽略是正确的；如果允许取消，需要补充 `Attack + PlayerLost → Chase`。
+>
+> **如何保证 Dead 不再被转移出去：** Dead 状态的 `Transition()` 中 `case Dead: break;` 不做任何处理。同时 `Update()` 开头 `if (m_state != EnemyState::Dead)` 跳过事件轮询，`PollEvents` 对 Dead 返回 HealthZero 也不影响。三重防护确保 Dead 是吸收态。
+
+> [!tip]- 练习 2 参考答案
+> **状态基类 IEnemyState：**
+>
+> ```cpp
+> class IEnemyState {
+> public:
+>     virtual ~IEnemyState() = default;
+>     virtual void OnEnter(EnemyAI* owner) = 0;
+>     virtual void OnExit(EnemyAI* owner) = 0;
+>     virtual void OnUpdate(EnemyAI* owner, float dt) = 0;
+>     // 返回新状态指针表示切换，返回 nullptr 表示保持
+>     virtual IEnemyState* OnEvent(EnemyAI* owner, EnemyEvent evt) = 0;
+> };
+>
+> class PatrolState : public IEnemyState {
+> public:
+>     void OnEnter(EnemyAI* owner) override {
+>         owner->SetSpeed(2.0f);
+>         owner->PlayAnimation("Walk");
+>     }
+>     void OnExit(EnemyAI* owner) override { owner->StopMovement(); }
+>     void OnUpdate(EnemyAI* owner, float dt) override {
+>         if (owner->ReachedWaypoint())
+>             owner->NextWaypoint();
+>     }
+>     IEnemyState* OnEvent(EnemyAI* owner, EnemyEvent evt) override {
+>         if (evt == EnemyEvent::PlayerDetected) return owner->GetState<ChaseState>();
+>         if (evt == EnemyEvent::HealthZero)    return owner->GetState<DeadState>();
+>         return nullptr; // stay
+>     }
+> };
+>
+> // ChaseState, AttackState, DeadState 同理...
+>
+> class EnemyAI {
+>     IEnemyState* m_currentState = nullptr;
+>     std::unordered_map<std::type_index, std::unique_ptr<IEnemyState>> m_states;
+> public:
+>     template<typename T> T* GetState() { return static_cast<T*>(m_states[typeid(T)].get()); }
+>
+>     void Update(float dt) {
+>         EnemyEvent evt = PollEvents();
+>         IEnemyState* next = m_currentState->OnEvent(this, evt);
+>         if (next) ChangeState(next);
+>         m_currentState->OnUpdate(this, dt);
+>     }
+>
+>     void ChangeState(IEnemyState* next) {
+>         m_currentState->OnExit(this);
+>         m_currentState = next;
+>         m_currentState->OnEnter(this);
+>     }
+> };
+> ```
+>
+> **switch vs 状态模式对比：**
+>
+> | 维度 | switch 模式 | 状态模式 |
+> |------|------------|----------|
+> | 代码行数 | ~150 行（集中在一个类） | ~300 行（分散在多个类） |
+> | 新增状态的改动量 | 在 3-4 个 switch 中分别加 case | 新增一个类 + 在工厂注册 |
+> | 编译期类型安全性 | 差——遗漏 case 编译通过 | 好——纯虚函数强制实现 |
+> | 状态私有数据管理 | 所有状态数据混在主类成员中 | 每个状态类封装自己的成员 |
+> | 性能 | 最优：直接跳转，无虚函数 | 虚函数调用开销（~1-2ns/call） |
+> | 单元测试便利性 | 需实例化整个类 | 可独立测试每个状态类 |
+> | 适合的场景 | ≤5 状态，逻辑简单 | ≥6 状态，多人协作，需复用 |
+>
+> **单例 vs 实例状态对象：** 推荐**单例模式**（每种状态一个全局实例）。原因：(1) 状态对象本身是无状态的——它只定义行为，数据在 `owner`（EnemyAI）上。(2) 避免每次状态切换时的分配开销。(3) 如果状态需要私有数据（如 PatrolState 的 `m_currentWaypoint`），应把数据放在 `owner` 的 Blackboard 上，而非状态对象中。实例模式只在状态逻辑高度差异化（如不同敌人类型需要不同的 AttackState 参数化实例）时才合理。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **纯 FSM 在格斗游戏中指数级膨胀的原因（200-300 字分析）：**
+>
+> 格斗游戏的行为空间由三个正交维度的笛卡尔积构成：(1) 角色姿态（站/蹲/跳/倒地），(2) 动作类型（轻拳/重拳/轻脚/重脚/特殊技），(3) 动作阶段（启动/持续/收招/取消窗口）。每个维度独立变化，但 FSM 要求将它们的乘积拍平成单体状态。以街霸风格为例：站立轻拳有启动、命中、被防三种结果，每种结果又可取消进入不同特殊技——这意味着 `Standing_LightPunch_Startup`、`Standing_LightPunch_Hit`、`Standing_LightPunch_Blocked` 等需要各自独立的状态。加入连招链后，`Standing_LightPunch_Hit_CanCancelToFireball` 和 `Standing_LightPunch_Hit_CanCancelToDP` 又需要不同状态。4 种基础攻击 × 3 阶段 × 2 种取消选项 × 3 种姿态 = 72 个理论状态，而实际格斗游戏还有帧数精确的输入缓冲和可取消帧窗口，这些用静态转移图几乎无法表达。
+>
+> **替代方案：**
+> 1. **帧数据表 + 命令解释器**：将每个动作的启动帧、持续帧、收招帧、可取消帧作为数据，运行时由命令解释器查询帧表决定状态。这是格斗游戏的标准做法——FSM 退化为"当前在执行哪个动作的哪一帧"的索引，决策逻辑由输入缓冲和取消规则驱动。
+> 2. **分层 FSM**：顶层管理姿态（站立/蹲下/空中），中层管理动作类别（普通技/特殊技/防御），底层管理具体动作帧。三层各自独立转移，避免笛卡尔积。
+> 3. **数据驱动的时间线系统**：每个动作是一个时间线资产，定义关键帧事件（"第 3 帧可以取消"、"第 5 帧可以连接下一段"）。FSM 只负责切换时间线，时间线内部的帧逻辑由数据定义。这是现代 3D 格斗游戏（如 Tekken）的做法。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 以下资源按推荐阅读顺序排列。标注了大致阅读时间和适用场景。

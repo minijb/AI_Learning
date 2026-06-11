@@ -300,6 +300,323 @@ PublicDependencyModuleNames.AddRange(new string[] {
 
 创建三个 Fragment 集合分别对应 LOD 三个级别：`FMassLODNearFragment`（包含 `FVector DetailedPosition`）、`FMassLODMediumFragment`（仅包含 `FVector Location`）、`FMassLODFarFragment`（仅包含 `FMassTag`）。编写 `ULODSwitchProcessor` 根据实体到玩家距离动态切换 Fragment 组合。在 `FMassExecutionContext` 中通过 `Defer().AddFragment` / `RemoveFragment` 实现 Fragment 增删。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **1. 修改 `FMassTransformFragment` 添加 Scale 字段**：
+>
+> ```cpp
+> USTRUCT()
+> struct FMassTransformFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     FVector Location = FVector::ZeroVector;
+>
+>     UPROPERTY()
+>     FRotator Rotation = FRotator::ZeroRotator;
+>
+>     UPROPERTY()
+>     FVector Scale = FVector::OneVector;  // 新增：默认缩放为 1
+> };
+> ```
+>
+> **2. 修改 Movement Processor（X 轴正方向匀速移动）**：
+>
+> ```cpp
+> void UMassBasicMovementProcessor::ConfigureQueries()
+> {
+>     EntityQuery.AddRequirement<FMassTransformFragment>(EMassFragmentAccess::ReadWrite);
+>     EntityQuery.AddRequirement<FMassVelocityFragment>(EMassFragmentAccess::ReadOnly);
+>     EntityQuery.AddTagRequirement<FMassPedestrianTag>(EMassFragmentPresence::All);
+>     EntityQuery.RegisterWithProcessor(*this);
+> }
+>
+> void UMassBasicMovementProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     EntityQuery.ForEachEntityChunk(EntityManager, Context,
+>         [](FMassExecutionContext& Context)
+>         {
+>             const int32 NumEntities = Context.GetNumEntities();
+>             const TArrayView<FMassVelocityFragment> Velocities =
+>                 Context.GetFragmentView<FMassVelocityFragment>();
+>             TArrayView<FMassTransformFragment> Transforms =
+>                 Context.GetMutableFragmentView<FMassTransformFragment>();
+>
+>             const float DeltaTime = Context.GetDeltaTimeSeconds();
+>
+>             for (int32 i = 0; i < NumEntities; ++i)
+>             {
+>                 // 仅沿 X 轴正方向移动，速度由 Velocity 的 X 分量（随机值）决定
+>                 Transforms[i].Location.X += Velocities[i].Velocity.X * DeltaTime;
+>                 // Y/Z 保持不变
+>             }
+>         });
+> }
+> ```
+>
+> **3. 修改 `SpawnMassEntities`：扩大范围 + 速度随机 50~300**：
+>
+> ```cpp
+> void SpawnMassEntities(UWorld* World, int32 Count)
+> {
+>     // ... EntitySubsystem 和 EntityManager 获取代码同上 ...
+>
+>     FMassArchetypeHandle Archetype = EntityManager.CreateArchetype({
+>         FMassTransformFragment::StaticStruct(),
+>         FMassVelocityFragment::StaticStruct(),
+>         FMassPedestrianTag::StaticStruct()
+>     });
+>
+>     TArray<FMassEntityHandle> Entities;
+>     EntityManager.BatchCreateEntities(Archetype, Count, Entities);
+>
+>     const FVector SpawnOrigin = FVector(0.0f, 0.0f, 100.0f);
+>
+>     for (int32 i = 0; i < Count; ++i)
+>     {
+>         FMassTransformFragment& Transform =
+>             EntityManager.GetFragmentDataChecked<FMassTransformFragment>(Entities[i]);
+>
+>         // 范围扩大到 2000x2000
+>         Transform.Location = SpawnOrigin +
+>             FVector(FMath::RandRange(-1000.0f, 1000.0f),
+>                     FMath::RandRange(-1000.0f, 1000.0f),
+>                     0.0f);
+>
+>         FMassVelocityFragment& Velocity =
+>             EntityManager.GetFragmentDataChecked<FMassVelocityFragment>(Entities[i]);
+>
+>         // 速度 50~300，仅 X 正方向
+>         Velocity.Velocity = FVector(FMath::RandRange(50.0f, 300.0f), 0.0f, 0.0f);
+>     }
+>
+>     UE_LOG(LogTemp, Log, TEXT("Spawned %d Mass entities moving +X"), Count);
+> }
+> ```
+> **关键点**：`Velocity.Velocity` 直接设置为纯 X 方向向量，Processor 中仅移动 `Location.X`。范围增大时注意视口裁剪范围。
+
+> [!tip]- 练习 2 参考答案
+> **FMassLifetimeFragment 和 ULifetimeProcessor 完整实现**：
+>
+> ```cpp
+> // === MassLifetimeFragment.h ===
+> #pragma once
+> #include "MassEntityTypes.h"
+> #include "MassLifetimeFragment.generated.h"
+>
+> USTRUCT()
+> struct FMassLifetimeFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     float RemainingTime = 0.0f;
+> };
+>
+> // === ULifetimeProcessor.h ===
+> #pragma once
+> #include "MassProcessor.h"
+> #include "LifetimeProcessor.generated.h"
+>
+> UCLASS()
+> class ULifetimeProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     ULifetimeProcessor();
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     FMassEntityQuery LifetimeQuery;
+> };
+>
+> // === LifetimeProcessor.cpp ===
+> #include "LifetimeProcessor.h"
+> #include "MassLifetimeFragment.h"
+> #include "MassExecutionContext.h"
+> #include "MassCommandBuffer.h"
+>
+> ULifetimeProcessor::ULifetimeProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     // 放在 Movement 之后执行——先移动，再判断生命周期
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Movement;
+>     ExecutionOrder.ExecuteAfter.Add(TEXT("MassBasicMovementProcessor"));
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void ULifetimeProcessor::ConfigureQueries()
+> {
+>     LifetimeQuery.AddRequirement<FMassLifetimeFragment>(EMassFragmentAccess::ReadWrite);
+>     LifetimeQuery.RegisterWithProcessor(*this);
+> }
+>
+> void ULifetimeProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     LifetimeQuery.ForEachEntityChunk(EntityManager, Context,
+>         [](FMassExecutionContext& Context)
+>         {
+>             const int32 NumEntities = Context.GetNumEntities();
+>             const float DeltaTime = Context.GetDeltaTimeSeconds();
+>
+>             TArrayView<FMassLifetimeFragment> Lifetimes =
+>                 Context.GetMutableFragmentView<FMassLifetimeFragment>();
+>
+>             for (int32 i = 0; i < NumEntities; ++i)
+>             {
+>                 Lifetimes[i].RemainingTime -= DeltaTime;
+>                 if (Lifetimes[i].RemainingTime <= 0.0f)
+>                 {
+>                     // 延迟销毁：通过 CommandBuffer 在 Execute 结束后统一处理
+>                     Context.Defer().DestroyEntity(Context.GetEntity(i));
+>                 }
+>             }
+>         });
+> }
+> ```
+>
+> **在 SpawnMassEntities 中设置随机寿命**：
+>
+> ```cpp
+> // Archetype 中加入 FMassLifetimeFragment
+> FMassArchetypeHandle Archetype = EntityManager.CreateArchetype({
+>     FMassTransformFragment::StaticStruct(),
+>     FMassVelocityFragment::StaticStruct(),
+>     FMassPedestrianTag::StaticStruct(),
+>     FMassLifetimeFragment::StaticStruct()   // 新增
+> });
+>
+> // 初始化时设置随机寿命 3~10 秒
+> FMassLifetimeFragment& Lifetime =
+>     EntityManager.GetFragmentDataChecked<FMassLifetimeFragment>(Entities[i]);
+> Lifetime.RemainingTime = FMath::RandRange(3.0f, 10.0f);
+> ```
+> **关键点**：`Context.Defer().DestroyEntity()` 不是立即销毁——延迟操作在当前 Execute 结束后由 Mass 框架统一提交，避免在遍历中途破坏内部数据结构。
+
+> [!tip]- 练习 3 参考答案
+> **Mass LOD 三级 Fragment 集合 + 动态切换 Processor**：
+>
+> ```cpp
+> // === 定义三级 LOD Fragment ===
+> USTRUCT()
+> struct FMassLODNearFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>     UPROPERTY()
+>     FVector DetailedPosition = FVector::ZeroVector; // 高精度位置
+> };
+>
+> USTRUCT()
+> struct FMassLODMediumFragment : public FMassFragment
+> {
+>     GENERATED_BODY()
+>     UPROPERTY()
+>     FVector Location = FVector::ZeroVector; // 中等精度
+> };
+>
+> USTRUCT()
+> struct FMassLODFarTag : public FMassTag
+> {
+>     GENERATED_BODY()  // 零数据，仅标记
+> };
+>
+> // === ULODSwitchProcessor ===
+> UCLASS()
+> class ULODSwitchProcessor : public UMassProcessor
+> {
+>     GENERATED_BODY()
+> public:
+>     ULODSwitchProcessor();
+>
+>     UPROPERTY(EditAnywhere, Category = "LOD")
+>     float NearDistance = 2000.0f;
+>     UPROPERTY(EditAnywhere, Category = "LOD")
+>     float MediumDistance = 5000.0f;
+>
+> protected:
+>     virtual void ConfigureQueries() override;
+>     virtual void Execute(FMassEntityManager& EntityManager,
+>                          FMassExecutionContext& Context) override;
+> private:
+>     // 三个查询：分别对应 Near、Medium、Far 级别
+>     FMassEntityQuery NearEntitiesQuery;
+>     FMassEntityQuery MediumEntitiesQuery;
+>     FMassEntityQuery FarEntitiesQuery;
+> };
+>
+> // === ULODSwitchProcessor.cpp ===
+> ULODSwitchProcessor::ULODSwitchProcessor()
+> {
+>     bAutoRegisterWithProcessingPhases = true;
+>     ExecutionOrder.ExecuteInGroup = UE::Mass::ProcessorGroupNames::Movement;
+>     ExecutionFlags = (int32)(EProcessorExecutionFlags::All);
+> }
+>
+> void ULODSwitchProcessor::ConfigureQueries()
+> {
+>     // 查询需要 Transform 和 PedestrianTag，但根据当前 LOD Fragment 区分
+>     // 有 FMassLODNearFragment → 当前是 Near 级别
+>     NearEntitiesQuery.AddRequirement<FMassTransformFragment>(EMassFragmentAccess::ReadOnly);
+>     NearEntitiesQuery.AddRequirement<FMassLODNearFragment>(EMassFragmentAccess::ReadWrite);
+>     NearEntitiesQuery.AddTagRequirement<FMassPedestrianTag>(EMassFragmentPresence::All);
+>     NearEntitiesQuery.RegisterWithProcessor(*this);
+>
+>     MediumEntitiesQuery.AddRequirement<FMassTransformFragment>(EMassFragmentAccess::ReadOnly);
+>     MediumEntitiesQuery.AddRequirement<FMassLODMediumFragment>(EMassFragmentAccess::ReadWrite);
+>     MediumEntitiesQuery.AddTagRequirement<FMassPedestrianTag>(EMassFragmentPresence::All);
+>     MediumEntitiesQuery.RegisterWithProcessor(*this);
+>
+>     FarEntitiesQuery.AddRequirement<FMassTransformFragment>(EMassFragmentAccess::ReadOnly);
+>     FarEntitiesQuery.AddTagRequirement<FMassLODFarTag>(EMassFragmentPresence::All);
+>     FarEntitiesQuery.AddTagRequirement<FMassPedestrianTag>(EMassFragmentPresence::All);
+>     FarEntitiesQuery.RegisterWithProcessor(*this);
+> }
+>
+> void ULODSwitchProcessor::Execute(
+>     FMassEntityManager& EntityManager, FMassExecutionContext& Context)
+> {
+>     // 假设玩家位置由外部获取（这里用原点模拟）
+>     const FVector PlayerLocation = FVector::ZeroVector;
+>
+>     // 处理 Near → 降级到 Medium/Far
+>     NearEntitiesQuery.ForEachEntityChunk(EntityManager, Context,
+>         [&](FMassExecutionContext& Context)
+>         {
+>             const TArrayView<FMassTransformFragment> Transforms =
+>                 Context.GetFragmentView<FMassTransformFragment>();
+>             for (int32 i = 0; i < Context.GetNumEntities(); ++i)
+>             {
+>                 float Dist = FVector::Dist(Transforms[i].Location, PlayerLocation);
+>                 if (Dist > MediumDistance)
+>                 {
+>                     // Near → Far：移除 NearFragment，添加 FarTag
+>                     Context.Defer().RemoveFragment<FMassLODNearFragment>(Context.GetEntity(i));
+>                     Context.Defer().AddTag<FMassLODFarTag>(Context.GetEntity(i));
+>                 }
+>                 else if (Dist > NearDistance)
+>                 {
+>                     // Near → Medium
+>                     Context.Defer().RemoveFragment<FMassLODNearFragment>(Context.GetEntity(i));
+>                     Context.Defer().AddFragment<FMassLODMediumFragment>(Context.GetEntity(i));
+>                 }
+>             }
+>         });
+>
+>     // 处理 Medium → Near/Far（类似逻辑，省略）
+>     // 处理 Far → Medium/Near（类似逻辑，省略）
+> }
+> ```
+> **设计要点**：LOD 切换通过 `Defer().RemoveFragment` / `AddFragment` / `AddTag` 实现，这些操作触发 Archetype 迁移。Near 级别保留最详细数据，Far 级别只保留 Tag 标记（零开销）。实际项目中应节流 LOD 检测频率（如每秒 2 次）而非每帧检测。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

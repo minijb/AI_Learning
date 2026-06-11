@@ -590,6 +590,329 @@ g++ -std=c++17 -O2 -Wall -o terrain_costs terrain_costs.cpp
 1. **实现基于斜率的方向性代价**：不只在进入格子时计算坡度代价，而是根据"上坡/下坡/横穿"三个方向给出不同代价。横穿斜坡（垂直于梯度方向）代价应低于直上直下。
 2. **动态影响图扩散**：实现一个"影响传播"系统——每个 tick，影响值向邻居扩散并衰减。用于模拟"气味/热量/危险信号"的传播。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案（添加冰面地形）
+> 修改三步：枚举、TERRAIN_DB、demo 地图。
+>
+> **第一步：枚举中添加 Ice 成员**
+> ```cpp
+> enum class TerrainType : uint8_t {
+>     Road       = 0,
+>     Grass      = 1,
+>     Forest     = 2,
+>     Swamp      = 3,
+>     ShallowWater = 4,
+>     DeepWater  = 5,
+>     Mountain   = 6,
+>     Sand       = 7,
+>     Ice        = 8,  // 新增
+>     COUNT
+> };
+> ```
+>
+> **第二步：TERRAIN_DB 中追加冰面配置**
+> ```cpp
+> // 在 Sand 条目之后追加
+> const TerrainConfig TERRAIN_DB[] = {
+>     { 0.8, true,  0.1  }, // Road
+>     { 1.0, true,  0.3  }, // Grass
+>     { 2.5, true,  1.0  }, // Forest
+>     { 5.0, true,  2.0  }, // Swamp
+>     { 4.0, true,  0.5  }, // ShallowWater
+>     { INF, false, 0.0  }, // DeepWater
+>     { INF, false, 0.0  }, // Mountain
+>     { 1.8, true,  0.8  }, // Sand
+>     { 0.6, true,  0.5  }, // Ice — 滑行快但坡度敏感度适中
+> };
+> ```
+>
+> **第三步：`terrain_name()` 添加分支**
+> ```cpp
+> case TerrainType::Ice: return "冰面";
+> ```
+>
+> **第四步：`print_cost_grid()` 添加冰面显示字符**
+> ```cpp
+> case TerrainType::Ice:  std::cout << "  I "; break;
+> ```
+>
+> **第五步：在 main() 中绘制冰面区域**
+> ```cpp
+> // ——冰面区域（地图左上角）
+> for (int x = 1; x < 4; ++x)
+>     for (int y = 1; y < 5; ++y)
+>         map.set_terrain(x, y, TerrainType::Ice);
+> ```
+>
+> **预期效果：** 冰面区域显示 `I`，代价 0.6——比道路 (0.8) 还快，但坡度敏感度 0.5 意味着若是斜坡地，惩罚会高于道路的 0.1。这反映冰面滑行快但上坡更费力的物理直觉。
+
+> [!tip]- 练习 2 参考答案（手算坡度代价）
+> **给定高度图：** `h[0][0]=0, h[0][1]=3, h[1][0]=1, h[1][1]=5`
+>
+> **路径 A：** `(0,0) → (0,1) → (1,1)`  (先右后下)
+>
+> - 第一步 `(0,0)→(0,1)`：`slope = |3 - 0| = 3.0`。假设地形为草地 (`sensitivity=0.3`)，上坡 `dh=3>0` → `slope_cost = 3.0 × 0.3 × 1.5 = 1.35`。基础代价 = 1.0。总代价 = `1.0 + 1.35 = 2.35`。
+> - 第二步 `(0,1)→(1,1)`：`slope = |5 - 3| = 2.0`。上坡 `dh=2>0` → `slope_cost = 2.0 × 0.3 × 1.5 = 0.9`。总代价 = `1.0 + 0.9 = 1.9`。
+> - **累计：** `2.35 + 1.9 = 4.25`
+>
+> **路径 B：** `(0,0) → (1,0) → (1,1)`  (先下后右)
+>
+> - 第一步 `(0,0)→(1,0)`：`slope = |1 - 0| = 1.0`。上坡 `dh=1>0` → `slope_cost = 1.0 × 0.3 × 1.5 = 0.45`。总代价 = `1.0 + 0.45 = 1.45`。
+> - 第二步 `(1,0)→(1,1)`：`slope = |5 - 1| = 4.0`。上坡 `dh=4>0` → `slope_cost = 4.0 × 0.3 × 1.5 = 1.8`。总代价 = `1.0 + 1.8 = 2.8`。
+> - **累计：** `1.45 + 2.8 = 4.25`
+>
+> **结论：** 两条路径在草地地形下累计代价相等（4.25），因为坡度代价是累加的。但如果第二步的 `(1,1)` 是森林 (`sensitivity=1.0`)：路径 A 第二步 `slope_cost = 2.0 × 1.0 × 1.5 = 3.0` → `1.0 + 3.0 = 4.0`，累计 `2.35 + 4.0 = 6.35`；路径 B 第二步 `slope_cost = 4.0 × 1.0 × 1.5 = 6.0` → `1.0 + 6.0 = 7.0`，累计 `1.45 + 7.0 = 8.45`。此时路径 A 更优——地形敏感度放大了坡度差异。
+
+> [!tip]- 练习 3 参考答案（高斯衰减影响图）
+> 将 `apply_radial_influence` 中的线性衰减替换为高斯衰减：
+>
+> ```cpp
+> void apply_radial_influence_gaussian(int cx, int cy, int radius, double strength) {
+>     const double sigma = radius / 3.0;  // σ = r/3 使 3σ ≈ radius
+>     const double two_sigma_sq = 2.0 * sigma * sigma;
+>     for (int y = cy - radius; y <= cy + radius; ++y) {
+>         for (int x = cx - radius; x <= cx + radius; ++x) {
+>             if (!in_bounds(x, y)) continue;
+>             double dx = x - cx, dy = y - cy;
+>             double dist_sq = dx * dx + dy * dy;
+>             if (std::sqrt(dist_sq) > radius) continue;
+>             double falloff = std::exp(-dist_sq / two_sigma_sq); // 高斯核
+>             influence_[idx(x, y)] += strength * falloff;
+>         }
+>     }
+> }
+> ```
+>
+> **对比（radius=5, strength=5.0）：**
+>
+> | 距中心距离 | 线性衰减 (1-d/r) | 高斯衰减 (σ=1.67) |
+> |---|---|---|
+> | 0 (中心) | 5.0 × 1.0 = 5.0 | 5.0 × 1.0 = 5.0 |
+> | 1 格 | 5.0 × 0.8 = 4.0 | 5.0 × 0.835 = 4.18 |
+> | 2 格 | 5.0 × 0.6 = 3.0 | 5.0 × 0.487 = 2.44 |
+> | 3 格 | 5.0 × 0.4 = 2.0 | 5.0 × 0.200 = 1.00 |
+> | 4 格 | 5.0 × 0.2 = 1.0 | 5.0 × 0.057 = 0.29 |
+> | 5 格 | 5.0 × 0.0 = 0.0 | 5.0 × 0.011 = 0.06 |
+>
+> **关键区别：** 线性衰减在边界处截断（突然从 0.2 跳到 0），产生"断崖"；高斯衰减平滑过渡到 0，中心附近惩罚更集中，远处衰减更快。在游戏中，高斯衰减更适合模拟"气味/热量"等物理扩散现象——影响集中在源头附近，不会线性延伸到远处造成不自然的绕行。
+
+> [!tip]- 练习 4 参考答案（多层影响图）
+> 扩展 `CostMap` 支持命名图层：
+>
+> ```cpp
+> class CostMap {
+> public:
+>     // ... 原有成员 ...
+>
+> private:
+>     std::unordered_map<std::string, std::vector<double>> layers_;
+>     std::vector<bool> layer_active_;  // 每个图层是否激活
+>     std::vector<std::string> layer_names_; // 保持插入顺序
+>
+> public:
+>     // 创建一个命名影响图层
+>     void create_layer(const std::string& name) {
+>         if (layers_.find(name) != layers_.end()) return; // 已存在
+>         layers_[name] = std::vector<double>(rows * cols, 0.0);
+>         layer_names_.push_back(name);
+>         layer_active_.push_back(true);
+>     }
+>
+>     void set_layer_active(const std::string& name, bool active) {
+>         for (size_t i = 0; i < layer_names_.size(); ++i) {
+>             if (layer_names_[i] == name) { layer_active_[i] = active; return; }
+>         }
+>     }
+>
+>     void set_layer_value(const std::string& name, int x, int y, double v) {
+>         auto it = layers_.find(name);
+>         if (it != layers_.end()) it->second[idx(x, y)] = v;
+>     }
+>
+>     double layer_value(const std::string& name, int x, int y) const {
+>         auto it = layers_.find(name);
+>         return (it != layers_.end()) ? it->second.at(idx(x, y)) : 0.0;
+>     }
+>
+>     void clear_layer(const std::string& name) {
+>         auto it = layers_.find(name);
+>         if (it != layers_.end()) std::fill(it->second.begin(), it->second.end(), 0.0);
+>     }
+>
+>     void clear_all_layers() {
+>         for (auto& [name, layer] : layers_) std::fill(layer.begin(), layer.end(), 0.0);
+>     }
+>
+>     void clear_all_layers() {
+>         for (auto& [name, layer] : layers_) std::fill(layer.begin(), layer.end(), 0.0);
+>     }
+>
+>     // 获取所有激活层的叠加值（取代原有的 influence_）
+>     double combined_influence_at(int x, int y) const {
+>         double total = 0.0;
+>         for (size_t i = 0; i < layer_names_.size(); ++i) {
+>             if (!layer_active_[i]) continue;
+>             total += layers_.at(layer_names_[i])[idx(x, y)];
+>         }
+>         // 限制上限，防止堆叠溢出
+>         constexpr double MAX_INFLUENCE = 100.0;
+>         return std::clamp(total, -MAX_INFLUENCE, MAX_INFLUENCE);
+>     }
+> };
+> ```
+>
+> **使用示例：**
+> ```cpp
+> map.create_layer("enemy_threat");
+> map.create_layer("resource_rich");
+> map.create_layer("recent_combat");
+>
+> // 施加敌人威胁（提高代价，AI 绕开）
+> map.set_layer_value("enemy_threat", 10, 6, 8.0);
+> // 施加资源吸引（降低代价，工人被吸引）
+> map.set_layer_value("resource_rich", 5, 12, -3.0);
+> // 停用某个图层（不影响寻路）
+> map.set_layer_active("recent_combat", false);
+> ```
+>
+> **设计要点：**
+> - `layer_active_` 允许临时停用而不丢失数据——战斗中禁用"资源吸引"，战斗结束重新激活
+> - `clamp` 防止多个图层叠加到极端值导致路径完全绕行
+> - `layer_names_` 保持插入顺序，用于 UI 列表展示
+> - 可进一步扩展为每个图层带独立衰减函数（线性/高斯/自定义）
+
+> [!tip]- 练习 5 参考答案（启发函数适配地形代价）
+> A* 的启发函数必须保持**可容许性**（never overestimate）。当地形代价 > 1.0 时，用曼哈顿距离 × 1.0 会低估，A* 退化为 Dijkstra。修正方法：
+>
+> ```cpp
+> double heuristic_with_terrain(int x1, int y1, int x2, int y2, double min_cost) {
+>     // octile 距离（8 方向启发）——比曼哈顿更精确
+>     int dx = std::abs(x1 - x2);
+>     int dy = std::abs(y1 - y2);
+>     double straight = std::min(dx, dy);
+>     double diagonal = std::abs(dx - dy);
+>     // 对角线步长 ≈ sqrt(2)
+>     double octile = straight * 1.41421356 + diagonal * 1.0;
+>     return octile * min_cost;
+> }
+>
+> // 在 A* 调用处：
+> // min_cost = CostMap 中全局最小可通行代价（例如 0.6 for Ice）
+> double h = heuristic_with_terrain(current.x, current.y, goal.x, goal.y, 0.6);
+> ```
+>
+> **进阶：不同区域使用不同 min_cost**
+>
+> 如果地图上最小代价的格子远在别处（如冰面在角落但 A* 搜索区域在森林里），用全局 `min_cost = 0.6` 会严重低估→退化。更好的做法是用**当前搜索区域的局部 min_cost**，或直接用目标格子的实际 `base_cost` 做启发（虽然可能违反可容许性，但在实践中常可获得 10-50x 加速且路径质量可接受）：
+>
+> ```cpp
+> // 权衡：用目标格子的实际代价做启发——技术上不可容许但实践中常用
+> double h = octile_distance * map.final_cost_simple(goal.x, goal.y);
+> ```
+>
+> **关键公式：** `h = heuristic_distance × min_possible_step_cost`，其中 `min_possible_step_cost` 越小（等于 0.6 而非 0.8），搜索越像 Dijkstra；越大（接近实际均值），搜索越快但可能非最优。
+
+> [!tip]- 练习 6 参考答案（方向性坡度代价，可选）
+> 将坡度代价按方向分解为上坡、下坡、横穿：
+>
+> ```cpp
+> // 计算方向性坡度代价
+> double directional_slope_cost(int x, int y, int nx, int ny) const {
+>     if (!heightmap_) return 0.0;
+>
+>     float h_cur = heightmap_->height_at(x, y);
+>     float h_next = heightmap_->height_at(nx, ny);
+>     double dh = h_next - h_cur;
+>     double slope = std::abs(dh);
+>
+>     // 梯度方向的法向量投影 —— 判断横穿程度
+>     // 简化：dx/dy 在 0..1 之间，对角线 = 横穿（较省力），直线 = 正向
+>     int dx = std::abs(nx - x);
+>     int dy = std::abs(ny - y);
+>     double move_magnitude = std::sqrt(dx * dx + dy * dy);
+>     if (move_magnitude < 0.001) return 0.0;
+>
+>     // 沿梯度方向的投影（0=横穿, 1=直上直下）
+>     double grad_dot_move = (dx / move_magnitude) * (dh == 0 ? 0 : (dh > 0 ? 1 : -1));
+>     double forwardness = std::abs(grad_dot_move);
+>
+>     // 横穿因子：forwardness=1 时全惩罚, forwardness=0 时大幅减少
+>     constexpr double TRAVERSE_FACTOR = 0.3; // 横穿只承担 30% 惩罚
+>     double effective_factor = forwardness + TRAVERSE_FACTOR * (1.0 - forwardness);
+>
+>     double sensitivity = TERRAIN_DB[static_cast<int>(terrain_type_[idx(nx, ny)])].slope_sensitivity;
+>     double base = slope * sensitivity;
+>     if (dh > 0) base *= 1.5; // 上坡加成
+>
+>     return base * effective_factor;
+> }
+> ```
+>
+> **核心思路：** 计算移动方向与坡度梯度方向的夹角。直上直下（`forwardness≈1`）全惩罚；横穿（`forwardness≈0`）只承担 30%。这让 AI 优先选择"贴着斜坡走"而非"硬爬山"。使用 `grad_dot_move` 的绝对值是因为无论上坡还是下坡，横穿都省力。
+
+> [!tip]- 练习 7 参考答案（动态影响图扩散，可选）
+> 每个 tick 让影响值向邻居扩散并衰减：
+>
+> ```cpp
+> class InfluenceDiffusion {
+>     std::vector<double> buffer_;   // 读缓冲区
+>     std::vector<double> value_;    // 写缓冲区（当前值）
+>     int rows_, cols_;
+>
+> public:
+>     InfluenceDiffusion(int r, int c) : rows_(r), cols_(c),
+>         buffer_(r * c, 0.0), value_(r * c, 0.0) {}
+>
+>     double& at(int x, int y) { return value_[idx(x, y)]; }
+>     size_t idx(int x, int y) const { return y * cols_ + x; }
+>
+>     // 每个 tick 调用一次：扩散 + 衰减
+>     void tick(double decay_factor = 0.95, double diffusion_rate = 0.2) {
+>         // 交换双缓冲
+>         std::swap(buffer_, value_);
+>
+>         const int DIRS[4][2] = {{1,0}, {-1,0}, {0,1}, {0,-1}};
+>         for (int y = 0; y < cols_; ++y) {
+>             for (int x = 0; x < rows_; ++x) {
+>                 double self = buffer_[idx(x, y)];
+>                 double neighbor_sum = 0.0;
+>                 int n_count = 0;
+>                 for (int d = 0; d < 4; ++d) {
+>                     int nx = x + DIRS[d][0], ny = y + DIRS[d][1];
+>                     if (nx >= 0 && nx < rows_ && ny >= 0 && ny < cols_) {
+>                         neighbor_sum += buffer_[idx(nx, ny)];
+>                         ++n_count;
+>                     }
+>                 }
+>                 double neighbor_avg = n_count > 0 ? neighbor_sum / n_count : 0.0;
+>                 // 向邻居均值靠拢（扩散）+ 自身衰减
+>                 value_[idx(x, y)] = (self * (1.0 - diffusion_rate)
+>                                    + neighbor_avg * diffusion_rate) * decay_factor;
+>             }
+>         }
+>     }
+> };
+> ```
+>
+> **使用示例（集成到 CostMap）：**
+> ```cpp
+> // 每帧调用（或每 N 帧）
+> diffusion.tick(0.98, 0.15);  // decay_factor=0.98 缓慢衰减, diffusion_rate=0.15
+>
+> // 读取扩散后的值叠加到寻路代价上
+> double influence = diffusion.at(x, y);
+> double final_cost = map.final_cost(x, y, nx, ny) + influence;
+> ```
+>
+> **参数指南：**
+> - `decay_factor`：0.95→快速消失（几秒），0.995→持续很久（几十秒）。选值取决于游戏节奏。
+> - `diffusion_rate`：0.1→慢扩散，0.5→快扩散。过高会导致"震荡"（值来回跳）。
+> - 双缓冲是关键——扩散属于"全网格卷积"类操作，读写必须分开。
+> - 可扩展为**异步扩散**：不每帧全量更新，而是分帧只更新部分格子（如隔行扫描），降低 CPU 开销。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **《AI Game Programming Wisdom》系列**："Terrain Reasoning for Tactical Decisions" (Vol.2) — 讲地形代价如何影响 AI 战术决策，不仅限于寻路。

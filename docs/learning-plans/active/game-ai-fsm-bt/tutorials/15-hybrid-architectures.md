@@ -1679,6 +1679,253 @@ t=5.0: Enqueue(Heal, Priority=10, Target=Self)        // 应抢占一切
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Boss 分层 AI 架构设计**。
+>
+> **1. 三层架构图**：
+> ```
+> ┌─────────────────────────────────────────────────────────┐
+> │ HIGH: Boss Phase Selector (BT)                          │
+> │   Selector:                                             │
+> │   ├── Phase3 [Decorator: HP < 33%]                      │
+> │   │   └── RunBehavior(Phase3_BT)                        │
+> │   ├── Phase2 [Decorator: HP < 66%]                      │
+> │   │   └── RunBehavior(Phase2_BT)                        │
+> │   └── Phase1_Default                                    │
+> │       └── RunBehavior(Phase1_BT)                        │
+> │   [Service: UpdateBossStats @0.3s]                      │
+> ├─────────────────────────────────────────────────────────┤
+> │ MID: Attack Pattern FSM (per-phase)                     │
+> │   Phase1_FSM: MeleeHeavy → Tracking → Orb               │
+> │   Phase2_FSM: SweepAOE → Summon → MeleeLight → Orb(rare)│
+> │   Phase3_FSM: FlameWave → BerserkMelee → ExplodeMinions │
+> │   — 硬直中断：任意状态 → Stunned(FlinchAnim) → 恢复前状态│
+> ├─────────────────────────────────────────────────────────┤
+> │ LOW: Animation State Machine (Animator/AnimBP)          │
+> │   Idle ↔ Walk ↔ Run ↔ Attack_Windup → Attack_Active     │
+> │     → Attack_Recovery ↔ Stunned → Death                 │
+> │   Phase_Transition (2-3s crossfade)                     │
+> └─────────────────────────────────────────────────────────┘
+> ```
+>
+> **2. Blackboard Key 集合（≥15 个）**：
+>
+> | Key | 类型 | 写权限 | 读权限 | 用途 |
+> |-----|------|--------|--------|------|
+> | `BossPhase` | Enum(1/2/3) | BT(PhaseSelector) | FSM, Animator | 当前阶段 |
+> | `HPPercent` | Float | Service | BT, FSM, Animator | 血量百分比 |
+> | `TargetActor` | Object | BT(Perception) | FSM(Action) | 当前目标 |
+> | `CurrentAttackPattern` | String/Enum | FSM | Animator | 当前攻击模式名 |
+> | `AttackStage` | Enum(Windup/Active/Recovery) | FSM | Animator | 攻击动画阶段 |
+> | `IsTransitioning` | Bool | BT | FSM, Animator | 阶段切换中 |
+> | `IsStunned` | Bool | FSM(Stunned) | BT, Animator | 硬直状态 |
+> | `MinionCount` | Int | Service | BT, FSM | 存活小兵数 |
+> | `FlameWaveCooldown` | Float | FSM(Phase3) | BT | 火焰波冷却计时器 |
+> | `Phase1AttackProb` | Float | DataAsset | FSM | 阶段1各攻击概率(设计师可调) |
+> | `Phase2AttackProb` | Float | DataAsset | FSM | 阶段2攻击概率 |
+> | `Phase3AttackProb` | Float | DataAsset | FSM | 阶段3攻击概率 |
+> | `BerserkSpeedMult` | Float | BT(Phase3) | Animator | 狂暴加速倍率 |
+> | `LastStunnedByCrit` | Bool | FSM | BT(Service) | 最近一次硬直是否来自暴击 |
+> | `TransitionTargetPhase` | Int | BT | Animator | 目标阶段(用于播放过渡动画) |
+>
+> **3. 阶段切换数据流（HP 66% → 阶段2 完成）**：
+> ```
+> 1. Service(UpdateBossStats) 每 0.3s 更新 BB.HPPercent
+> 2. PhaseSelect BT 的 Decorator: HP<66% 条件从 false→true(LowerPriority Abort)
+> 3.   → 中断 Phase1_BT → Selector 选择 Phase2 分支
+> 4. Phase2 Sequence:
+>     ├── Task: SetBlackboard(IsTransitioning=true, TransitionTargetPhase=2)
+>     ├── Task: PlayPhaseTransitionAnimation()  ← 2-3秒无敌帧
+>     │     └── Animator 播放过渡动画，过渡期间：
+>     │         - CurrentAttackPattern="" (无攻击)
+>     │         - 伤害系统读取 IsTransitioning=true → 无敌
+>     │         - 收到 Damage 事件 → 无视（被过渡保护）
+>     ├── Task: InitializePhase2FSM()  ← 设置 Phase2_FSM 初始状态
+>     └── Task: SetBlackboard(IsTransitioning=false)
+> 5. Phase2_FSM 开始正常运行
+> ```
+>
+> **4. 设计决策点**：
+> - **为什么阶段选择用 BT 而非 FSM？** 三个阶段是条件驱动的（HP 阈值 + 行为优先级），BT 的每帧条件重评估使得 HP 跨越阈值时瞬间切换——不需要在 Phase1 FSM 的每个状态中检查 "HP<66%？"。另外，如果将来添加"第 4 阶段"或"隐藏阶段（HP<5% 触发）"，只需在 BT Selector 中插入新分支，不影响已有阶段。
+> - **为什么阶段内攻击序列用 FSM 而非 BT？** 攻击之间存在严格的顺序和时序依赖（"技能 A 后必须等 2 秒接技能 B"），这对应 FSM 的确定性优势。BT 的 Sequence 可以表达顺序但难以精确控制 2 秒的等待——Wait 节点不区分"等待中可中断"和"等待是必须的冷却"。FSM 的状态 + 计时器对此表达得更精确。
+> - **为什么硬直用 HSM 的子状态（而非独立 BT 分支）？** 硬直是**中断性**行为——它可能在任何攻击阶段发生，结束后需要恢复到被打断前的状态。这在 BT 中需要 Pushdown Automaton（行为树不天然支持"中断后返回"），但在 HSM 中，父状态 `CombatActive` 内置一个 `OnFlinch → Stunned → Recovery → 回到之前子状态` 的通用转移即可。这正是"状态性需求强的层用有状态的机制"原则的体现。
+
+> [!tip]- 练习 2 参考答案
+> **AI Command Queue 实现**（C++ 风格，语言无关核心逻辑）。
+>
+> ```cpp
+> struct AICommand {
+>     int Type;       // MoveTo=0, Attack=1, Dodge=2, Flee=3, Heal=4
+>     int Priority;
+>     void* Target;   // 目标对象或位置
+>     float EnqueueTime;
+>     float Timeout = 3.0f;  // 默认 3 秒超时
+>
+>     bool operator<(const AICommand& other) const {
+>         return Priority < other.Priority; // 高优先级在前
+>     }
+> };
+>
+> class AICommandQueue {
+>     static const int MAX_SIZE = 5;
+>     std::priority_queue<AICommand> _queue;
+>     AICommand* _currentCommand = nullptr;
+>     int _interruptThreshold = 2; // 新命令需高出当前 2 点优先级才能抢占
+>
+> public:
+>     void Enqueue(const AICommand& cmd) {
+>         // 1. 检查是否抢占当前命令
+>         if (_currentCommand && cmd.Priority > _currentCommand->Priority + _interruptThreshold) {
+>             OnCommandPreempted(*_currentCommand); // 被抢占命令丢弃（不回到队列）
+>             _currentCommand = nullptr;
+>         }
+>         // 2. 入队
+>         _queue.push(cmd);
+>         // 3. 超出容量 → 踢掉最低优先级
+>         if (_queue.size() > MAX_SIZE) {
+>             // std::priority_queue 不直接支持移除最低优先级；
+>             // 实际实现用 std::vector + std::make_heap + pop_back
+>             RemoveLowestPriorityCommand();
+>         }
+>         // 4. 如果当前无命令 → 立即出队
+>         if (!_currentCommand) DequeueNext();
+>     }
+>
+>     void CompleteCurrent() {
+>         if (_currentCommand) OnCommandCompleted(*_currentCommand);
+>         _currentCommand = nullptr;
+>         DequeueNext();
+>     }
+>
+>     void Tick(float dt) {
+>         // 超时检查
+>         float now = GetTime();
+>         // 遍历队列中所有命令检查超时（需要底层容器支持）
+>         for (auto& cmd : _queue) {
+>             if (now - cmd.EnqueueTime > cmd.Timeout)
+>                 OnCommandExpired(cmd);
+>         }
+>     }
+> };
+> ```
+>
+> **测试场景推演**：
+> ```
+> t=0.0: Enqueue(MoveTo, P=1)  → 队: [MoveTo(1)], 当前: MoveTo(1) 执行中
+> t=0.5: Enqueue(Attack, P=3)  → Attack(3) > MoveTo(1) + 2? 3>3? 否 → 不抢占
+>                                → 队: [Attack(3), MoveTo(1)], 当前: MoveTo(1) 继续
+> t=1.0: MoveTo 完成 → CompleteCurrent → 出队 Attack(3)
+>        → 当前: Attack(3) 执行中, 队: 空
+> t=2.0: Enqueue(Dodge, P=5)   → Dodge(5) > Attack(3) + 2? 5>5? 否 → 不抢占
+>                                → 队: [Dodge(5)], 当前: Attack(3)
+>        **关键争议**: 设计者可能期望 Dodge(5) 抢占 Attack(3)。如果 InterruptThreshold=1，
+>        则 5>3+1=4 → 抢占。阈值的选择是设计权衡：高阈值减少抖动，低阈值提升响应性。
+>        此处用默认阈值 2，Dodge 不抢占。
+> t=2.5: Dodge 完成 → CompleteCurrent → 出队 Dodge(5) → 但 Dodge 已完成（无意义）
+>        → 注意**时序 bug**: Dodge 在 2.0 入队但从未成为当前命令，2.5 时它被认为"完成"是不对的。
+>        修正：只有当前命令才能被 CompleteCurrent。
+>        → 重新推演：t=2.0 Dodge(5) 入队但 Attack(3) 仍在执行。
+>        → t=2.5 Dodge 未被出队（因为没有当前 Dodge 在执行）
+>          → 需要明确：Dodge 是"抢占后被立即执行"还是"排队等待"？
+>        **设计修正**: 如果 Dodge 的语义是"立即闪避"，应该设计为抢占源（来自外部事件触发），
+>        不受 InterruptThreshold 限制。给 Dodge 命令加 `bool bForcePreempt = true` 标志。
+> t=3.0: Enqueue(Flee, P=4) → Flee(4) > Attack(3) + 2? 4>5? 否 → 不抢占
+>        → 队: [Dodge(5), Flee(4)]
+>        疑问: Attack(3) 是否还在队中？不在——因为它从未被 Enqueue（在 t=0.5 时入队，t=1.0 时出队执行）。
+>        **Flee(4) 优先级低于 Dodge(5) 但高于 Attack(3)。** 队中 Dodge(5) 在 Flee(4) 前面。
+>        → Flee 不应该抢占 Attack，因为优先级差 < 阈值。
+> t=5.0: Enqueue(Heal, P=10) → Heal(10) > Attack(3) + 2? 10>5? 是 → 抢占！
+>        → OnCommandPreempted(Attack) → Attack 被丢弃
+>        → 队: [Heal(10), Dodge(5), Flee(4)]（Heal 入队 + 立即出队）
+>        → 当前: Heal(10) 执行中
+> ```
+>
+> **最终执行顺序**：`MoveTo(1) → Attack(3) → Heal(10)`（Dodge 和 Flee 被排在 Attack 之后但 Attack 被 Heal 抢占；Dodge 和 Flee 在 Heal 完成后依次出队执行）。
+>
+> **关键偏差分析**：t=3.0 时刻，Attack(3) 正在执行中（1.0-5.0 之间）。Flee(4) 的优先级不比 Attack(3) 高出阈值 → 不抢占。这是正确的——如果 AI 正在攻击，而"逃跑"的优先级增量不足以证明"立刻中断攻击"，Flee 应排队。如果需求是"Flee 永远立即执行"，应该设置 Priority=极大值或 bForcePreempt。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **团队工作流设计**。
+>
+> **1. AI 程序员基础设施清单（≥8 项）**：
+>
+> | 项 | 用途 | 交付形式 |
+> |----|------|---------|
+> | AI Controller 基类 | 所有 AI 实体的决策框架，内含 BT Runner + Blackboard + Perception | C++ 类 + 蓝图可继承 |
+> | 行为树运行时 | Tick 循环、节点生命周期、Observer Abort、并行执行 | C++ 引擎库 |
+> | Blackboard 系统 | 三层作用域 + Observer 通知 + 跨语言读写 | C++ 类 + Lua API |
+> | 感知系统 | Sight/Hearing/Damage 感知，输出为 Blackboard 写入 | C++ System + GameplayTag 事件 |
+> | AI Command Queue | 带优先级的命令缓冲、抢占、超时 | C++ 组件（挂 AIController） |
+> | 行为树节点库（~30 个节点） | MoveTo、PlayAnimation、Attack、FindCover 等通用节点 | C++ 类 + 编辑器暴露参数 |
+> | Lua Bridge | C++ 节点 ↔ Lua 闭包的映射，Blackboard 的 userdata 封装 | C++ 绑定层 + Lua API 文档 |
+> | 调试可视化 | Gameplay Debugger 扩展、行为树状态叠加、性能 profiler | C++ 组件 + Editor 面板 |
+> | 数据资产管线 | 敌人配置表（行为树引用+参数覆盖）、Blackboard 模板 | DataAsset/DataTable + 编辑器 |
+>
+> **2. AI 设计师工具清单（≥5 项）**：
+>
+> | 项 | 如何帮助不依赖程序员 |
+> |----|---------------------|
+> | 可视化行为树编辑器 | 拖拽节点组装树结构、调整优先级、配置 Decorator 条件。不需要理解 C++。 |
+> | Blackboard 变量管理器 | 在数据资产中定义新 Key、设置默认值、配置 Observer 监听关系。不需要修改代码。 |
+> | 数据表驱动的参数配置 | 通过 Excel/CSV 或编辑器表格修改攻击距离、移动速度、冷却时间等可调参数。不需编译。 |
+> | Lua 脚本行为定义 | 编写自定义 Action/Condition 的简单逻辑（5-20 行 Lua），热重载即时生效。不需等待 C++ 编译。 |
+> | 行为树模板库 | 从程序员提供的模板（"近战战士模板""巡逻守卫模板"）开始，在此基础上修改。 |
+> | 单元行为测试场景 | 一个隔离的测试关卡，设计师可以单独运行某个敌人的 BT 并观察行为。 |
+>
+> **3. AI 程序员 ↔ 设计师数据契约**：
+>
+> **合约（不可随意修改）**：
+> - Blackboard Key 的类型定义（`TargetActor: Object`, `Health: Float`）——修改影响所有引用它的节点
+> - BT 节点的函数签名（`ExecuteTask` 的参数列表和返回值语义）
+> - 事件类型枚举（`AI.StateChanged`, `Combat.DamageReceived`）——修改破坏所有订阅者
+> - C++ → Lua API 的函数签名——修改导致设计师的 Lua 脚本报错
+> - World State 的 Key 集合（用于 GOAP/HTN）——修改导致规划器行为不可预测
+>
+> **设计师可自由扩展**：
+> - 行为树的结构排列（节点顺序、新增子树）
+> - Blackboard Key 的新增（不删除或修改已有 Key，只新增）
+> - 数值参数（攻击距离、冷却时间、移动速度、伤害量）
+> - Lua 脚本中叶子节点的具体逻辑（使用已提供的 API）
+> - 敌人类型变体（基于已有 BT 模板 + 参数覆盖 + 新子树）
+>
+> **4. "新敌人类型"完整工作流**：
+>
+> ```
+> Day 1: 关卡设计师提需求 "需要会召唤僵尸的巫妖"
+>        → 与 AI 设计师讨论规格：巫妖的行为骨架、召唤机制细节
+>
+> Day 2-3: AI 设计师检查现有资源：
+>     已有：远程法师 BT 模板（CasterBase_BT）、召唤系统（已有 SummonMinion Task 节点）
+>     缺失：巫妖专属的"吸取生命"和"诅咒光环"行为
+>     → 提需求给 AI 程序员：需要 UBTTask_DrainLife 和 UBTDecorator_CurseAura
+>
+> Day 3-5: AI 程序员实现两个新节点（C++）：
+>     - UBTTask_DrainLife: 引导技能，类似 Channeling Spell Task
+>     - UBTDecorator_CurseAura: 检查周围敌人数量，Observer Abort = Both
+>     → 交付：编译后的 DLL + 在 BT Editor 中可用的新节点
+>     同时：动画师制作"吸取生命"和"诅咒光环"的动画资产
+>
+> Day 4-6: AI 设计师在编辑器中构建巫妖 BT：
+>     1. 以 CasterBase_BT 为模板
+>     2. 添加"DrainLife"子树（HP<50% 时优先吸取生命）
+>     3. 修改召唤逻辑：召唤僵尸（而非骷髅），增加召唤间隔
+>     4. 配置 Blackboard 参数：攻击距离、施法时间、冷却
+>     → 不需要等待程序员（除了节点功能已交付）
+>
+> Day 5-7: 关卡设计师在关卡中放置巫妖：
+>     1. 拖入 AICharacter → 选择 BT 资产 → 配置 Patrol 路径
+>     2. 场景中加入召唤所需的"尸体"标记点
+>     → 反馈给 AI 设计师：僵尸召唤后寻路有问题（尸体标记点的 NavMesh 未 bake）
+>
+> Day 7-8: 迭代修复（AI 设计师 + 关卡设计师协作，很少需要程序员）
+>     → 可玩版本交付
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——架构设计有多种合理方案，只要分层清晰、职责明确、数据流可追踪，就是好的设计。
+
 ## 4. 扩展阅读
 
 ### 必读材料

@@ -553,6 +553,494 @@ void simulate_frame() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：分配追踪器
+> ```cpp
+> #include <iostream>
+> #include <cstdlib>
+> #include <new>
+> #include <atomic>
+> #include <vector>
+> #include <iomanip>
+>
+> // ============ 帧级分配追踪器 ============
+> class SimpleAllocTracker {
+> public:
+>     static SimpleAllocTracker& instance() {
+>         static SimpleAllocTracker t;
+>         return t;
+>     }
+>
+>     void begin_frame() {
+>         frame_allocs_   = 0;
+>         frame_frees_    = 0;
+>         frame_bytes_    = 0;
+>         frame_peak_     = 0;
+>     }
+>
+>     void end_frame(int frame_num) {
+>         std::cout << "Frame " << std::setw(3) << frame_num
+>                   << ": " << std::setw(6) << frame_allocs_  << " allocs, "
+>                   << std::setw(6) << frame_frees_   << " frees, "
+>                   << std::setw(10) << frame_bytes_  << " new bytes, "
+>                   << "peak " << std::setw(10) << frame_peak_ << " bytes\n";
+>     }
+>
+>     // 全局统计
+>     void report_total() const {
+>         std::cout << "\n=== Total ===\n"
+>                   << "Allocations: " << total_allocs_ << "\n"
+>                   << "Frees:       " << total_frees_  << "\n"
+>                   << "Leaked:      " << (total_allocs_ - total_frees_) << "\n";
+>     }
+>
+>     // 供 operator new/delete 调用的内部接口
+>     void on_alloc(size_t size) {
+>         total_allocs_++;
+>         frame_allocs_++;
+>         frame_bytes_ += size;
+>         if (frame_bytes_ > frame_peak_)
+>             frame_peak_ = frame_bytes_;
+>     }
+>
+>     void on_free() {
+>         total_frees_++;
+>         frame_frees_++;
+>     }
+>
+> private:
+>     SimpleAllocTracker() = default;
+>
+>     // 全局累计
+>     std::atomic<size_t> total_allocs_{0};
+>     std::atomic<size_t> total_frees_{0};
+>
+>     // 当前帧统计（单线程场景，非原子即可）
+>     size_t frame_allocs_ = 0;
+>     size_t frame_frees_  = 0;
+>     size_t frame_bytes_  = 0;
+>     size_t frame_peak_   = 0;
+> };
+>
+> // ============ 全局 operator new/delete 重载 ============
+> void* operator new(size_t size) {
+>     void* p = std::malloc(size);
+>     if (!p) throw std::bad_alloc();
+>     SimpleAllocTracker::instance().on_alloc(size);
+>     return p;
+> }
+>
+> void operator delete(void* p) noexcept {
+>     SimpleAllocTracker::instance().on_free();
+>     std::free(p);
+> }
+>
+> void operator delete(void* p, size_t /*size*/) noexcept {
+>     SimpleAllocTracker::instance().on_free();
+>     std::free(p);
+> }
+>
+> // 数组版本
+> void* operator new[](size_t size) {
+>     void* p = std::malloc(size);
+>     if (!p) throw std::bad_alloc();
+>     SimpleAllocTracker::instance().on_alloc(size);
+>     return p;
+> }
+>
+> void operator delete[](void* p) noexcept {
+>     SimpleAllocTracker::instance().on_free();
+>     std::free(p);
+> }
+>
+> // ============ 模拟游戏帧 ============
+> struct Vector3 { float x, y, z; };
+> struct Particle { Vector3 pos, vel; float life; };
+>
+> int main() {
+>     std::cout << "=== 60-Frame Allocation Simulation ===\n\n";
+>     std::cout << std::setfill(' ');
+>
+>     for (int frame = 1; frame <= 60; ++frame) {
+>         SimpleAllocTracker::instance().begin_frame();
+>
+>         // 每帧模拟不同的分配模式
+>         int num_alloc = (frame % 10) * 100 + 50; // 50~950 次分配/帧
+>
+>         for (int i = 0; i < num_alloc; ++i) {
+>             volatile auto* p = new Particle();  // 分配
+>             // 随机释放一部分（模拟生灭循环）
+>             if (i % 3 != 0) {
+>                 delete static_cast<const Particle*>(p);
+>             }
+>         }
+>
+>         // 每 10 帧做一堆 Vector3 分配
+>         if (frame % 10 == 0) {
+>             for (int i = 0; i < 500; ++i) {
+>                 volatile auto* v = new Vector3();
+>                 delete static_cast<const Vector3*>(v);
+>             }
+>         }
+>
+>         // 每 5 帧做一次大批量分配
+>         if (frame % 5 == 0) {
+>             std::vector<int*> temp;
+>             for (int i = 0; i < 200; ++i)
+>                 temp.push_back(new int(i));
+>             // 故意不释放一半（模拟内存泄漏检测场景）
+>             for (size_t i = 0; i < temp.size(); i += 2)
+>                 delete temp[i];
+>             // 注意：另一半泄漏了——end_frame 报告中 allocs > frees
+>             // 在实际调试中用 total report 发现泄漏
+>         }
+>
+>         SimpleAllocTracker::instance().end_frame(frame);
+>     }
+>
+>     SimpleAllocTracker::instance().report_total();
+>     return 0;
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：PMR 粒子系统优化
+> ```cpp
+> #include <iostream>
+> #include <memory_resource>
+> #include <vector>
+> #include <chrono>
+> #include <iomanip>
+>
+> struct Particle {
+>     float x, y, z;
+>     float vx, vy, vz;
+>     float life;
+> };
+>
+> constexpr int FRAMES          = 60;
+> constexpr int PARTICLES       = 50000;
+> constexpr size_t BUFFER_SIZE  = PARTICLES * sizeof(Particle) * 2; // 留有余量
+>
+> // ============ 改造前：标准 std::vector ============
+> double bench_default_vector() {
+>     double total_us = 0;
+>
+>     for (int f = 0; f < FRAMES; ++f) {
+>         auto start = std::chrono::high_resolution_clock::now();
+>
+>         std::vector<Particle> particles;
+>         particles.reserve(PARTICLES);
+>
+>         for (int i = 0; i < PARTICLES; ++i)
+>             particles.push_back({1.0f, 2.0f, 3.0f, 0.1f, 0.2f, 0.3f, 5.0f});
+>
+>         for (auto& p : particles) {
+>             p.x += p.vx;
+>             p.y += p.vy;
+>             p.z += p.vz;
+>             p.life -= 0.016f;
+>         }
+>
+>         auto end = std::chrono::high_resolution_clock::now();
+>         total_us += std::chrono::duration_cast<std::chrono::microseconds>(
+>             end - start).count();
+>     }
+>
+>     return total_us / FRAMES;
+> }
+>
+> // ============ 改造后：std::pmr::vector + monotonic_buffer_resource ============
+> double bench_pmr_vector() {
+>     double total_us = 0;
+>
+>     // 在栈上预分配缓冲区
+>     char buffer[BUFFER_SIZE];
+>     std::pmr::monotonic_buffer_resource pool(
+>         buffer, sizeof(buffer),
+>         std::pmr::null_memory_resource());  // 不回退到堆 — 测试纯粹栈分配
+>
+>     for (int f = 0; f < FRAMES; ++f) {
+>         auto start = std::chrono::high_resolution_clock::now();
+>
+>         // pmr::vector 从 monotonic buffer 分配
+>         std::pmr::vector<Particle> particles(&pool);
+>         particles.reserve(PARTICLES);
+>
+>         for (int i = 0; i < PARTICLES; ++i)
+>             particles.push_back({1.0f, 2.0f, 3.0f, 0.1f, 0.2f, 0.3f, 5.0f});
+>
+>         for (auto& p : particles) {
+>             p.x += p.vx;
+>             p.y += p.vy;
+>             p.z += p.vz;
+>             p.life -= 0.016f;
+>         }
+>
+>         auto end = std::chrono::high_resolution_clock::now();
+>         total_us += std::chrono::duration_cast<std::chrono::microseconds>(
+>             end - start).count();
+>
+>         // 帧结束 — 一次性回收所有内存
+>         pool.release();
+>     }
+>
+>     return total_us / FRAMES;
+> }
+>
+> int main() {
+>     std::cout << "=== PMR 粒子系统性能对比 ===\n";
+>     std::cout << "Particles per frame: " << PARTICLES << "\n";
+>     std::cout << "Frames: " << FRAMES << "\n\n";
+>
+>     // 预热
+>     bench_default_vector();
+>     bench_pmr_vector();
+>
+>     double default_avg = bench_default_vector();
+>     double pmr_avg     = bench_pmr_vector();
+>
+>     double speedup = default_avg / pmr_avg;
+>
+>     std::cout << std::fixed << std::setprecision(1);
+>     std::cout << "std::vector           avg: " << std::setw(8) << default_avg << " us/frame\n";
+>     std::cout << "pmr::vector + mono    avg: " << std::setw(8) << pmr_avg     << " us/frame\n";
+>     std::cout << "Speedup:              " << std::setw(6) << speedup << "x\n\n";
+>
+>     std::cout << "分析：pmr::vector 从预分配的栈缓冲区分配，\n"
+>               << "  避免了 50000 次 malloc 调用。monotonic_buffer_resource\n"
+>               << "  的 allocate 仅为 bump pointer（约 2-5ns），\n"
+>               << "  而 malloc 每次需要数十到数百纳秒。\n"
+>               << "  更重要的是，帧结束时仅需一次 release()，\n"
+>               << "  而不是 50000 次 free，极大减少分配器内部碎片整理开销。\n";
+>
+>     return 0;
+> }
+> ```
+
+> [!info]- 思考题 3 参考答案：多级分配追踪器
+> ```cpp
+> #include <cstdlib>
+> #include <new>
+> #include <iostream>
+> #include <string>
+> #include <unordered_map>
+> #include <iomanip>
+> #include <algorithm>
+> #include <mutex>
+>
+> // ============ 分配类别 Tag ============
+> struct PhysicsTag   { static constexpr const char* name = "Physics";   };
+> struct RenderingTag { static constexpr const char* name = "Rendering"; };
+> struct AudioTag     { static constexpr const char* name = "Audio";     };
+> struct GenericTag   { static constexpr const char* name = "Generic";   };
+>
+> // ============ 分配记录 ============
+> struct AllocRecord {
+>     void* ptr;
+>     size_t size;
+>     const char* category;
+> };
+>
+> // ============ 每类别统计 ============
+> struct CategoryStats {
+>     size_t alloc_count   = 0;
+>     size_t free_count    = 0;
+>     size_t total_bytes   = 0;   // 当前活跃字节
+>     size_t peak_bytes    = 0;
+>     size_t leaked_count  = 0;
+>     size_t leaked_bytes  = 0;
+> };
+>
+> // ============ 多级追踪器（单例，线程安全） ============
+> class MultiLevelAllocTracker {
+> public:
+>     static MultiLevelAllocTracker& instance() {
+>         static MultiLevelAllocTracker t;
+>         return t;
+>     }
+>
+>     // 按类别记录分配
+>     void on_alloc(void* ptr, size_t size, const char* category) {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>
+>         auto& stats = category_stats_[category];
+>         stats.alloc_count++;
+>         stats.total_bytes += size;
+>         stats.peak_bytes = std::max(stats.peak_bytes, stats.total_bytes);
+>
+>         live_allocs_[ptr] = {ptr, size, category};
+>
+>         total_.alloc_count++;
+>         total_.total_bytes += size;
+>         total_.peak_bytes = std::max(total_.peak_bytes, total_.total_bytes);
+>     }
+>
+>     void on_free(void* ptr) {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>
+>         auto it = live_allocs_.find(ptr);
+>         if (it == live_allocs_.end()) {
+>             std::cerr << "[Tracker] WARNING: freeing unknown ptr " << ptr << "\n";
+>             return;
+>         }
+>
+>         const auto& rec = it->second;
+>         auto& stats = category_stats_[rec.category];
+>         stats.free_count++;
+>         stats.total_bytes -= rec.size;
+>         total_.free_count++;
+>         total_.total_bytes -= rec.size;
+>
+>         live_allocs_.erase(it);
+>     }
+>
+>     // 层级报告
+>     void report() const {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>
+>         std::cout << "\n============================================================\n";
+>         std::cout << "           Multi-Level Allocation Report\n";
+>         std::cout << "============================================================\n\n";
+>
+>         // 总体统计
+>         std::cout << "--- Overall ---\n";
+>         print_stats("TOTAL", total_);
+>
+>         // 每类别统计
+>         std::cout << "\n--- By Category ---\n";
+>         std::cout << std::left
+>                   << std::setw(14) << "Category"
+>                   << std::setw(10) << "Allocs"
+>                   << std::setw(10) << "Frees"
+>                   << std::setw(12) << "Active(B)"
+>                   << std::setw(12) << "Peak(B)"
+>                   << std::setw(10) << "Leaked\n";
+>         std::cout << std::string(68, '-') << "\n";
+>
+>         for (auto& [cat, stats] : category_stats_) {
+>             std::cout << std::left
+>                       << std::setw(14) << cat
+>                       << std::setw(10) << stats.alloc_count
+>                       << std::setw(10) << stats.free_count
+>                       << std::setw(12) << stats.total_bytes
+>                       << std::setw(12) << stats.peak_bytes
+>                       << std::setw(10) << (stats.alloc_count - stats.free_count)
+>                       << "\n";
+>         }
+>
+>         // 泄漏报告
+>         if (!live_allocs_.empty()) {
+>             std::cout << "\n--- LEAK DETECTION ---\n";
+>             std::cout << "Live allocations: " << live_allocs_.size() << "\n";
+>
+>             // 按类别分组汇总泄漏
+>             std::unordered_map<std::string, std::pair<size_t, size_t>> leak_by_cat;
+>             for (auto& [ptr, rec] : live_allocs_) {
+>                 auto& [cnt, bytes] = leak_by_cat[rec.category];
+>                 cnt++;
+>                 bytes += rec.size;
+>             }
+>
+>             for (auto& [cat, info] : leak_by_cat) {
+>                 std::cout << "  " << cat << ": "
+>                           << info.first << " blocks, "
+>                           << info.second << " bytes\n";
+>             }
+>         } else {
+>             std::cout << "\n--- No leaks detected ---\n";
+>         }
+>     }
+>
+>     void reset() {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         category_stats_.clear();
+>         live_allocs_.clear();
+>         total_ = CategoryStats{};
+>     }
+>
+> private:
+>     MultiLevelAllocTracker() = default;
+>
+>     static void print_stats(const char* name, const CategoryStats& s) {
+>         std::cout << "  " << name << ": "
+>                   << s.alloc_count << " allocs, "
+>                   << s.free_count << " frees, "
+>                   << "active: " << s.total_bytes << "B, "
+>                   << "peak: " << s.peak_bytes << "B\n";
+>     }
+>
+>     mutable std::mutex mutex_;
+>     std::unordered_map<std::string, CategoryStats> category_stats_;
+>     std::unordered_map<void*, AllocRecord> live_allocs_;
+>     CategoryStats total_;
+> };
+>
+> // ============ 带 Tag 的 new 重载（演示用） ============
+> // 实际使用中可以通过模板参数自动获取类别名
+> template<typename Category>
+> void* tagged_new(size_t size) {
+>     void* p = std::malloc(size);
+>     if (!p) throw std::bad_alloc();
+>     MultiLevelAllocTracker::instance().on_alloc(p, size, Category::name);
+>     return p;
+> }
+>
+> template<typename Category>
+> void tagged_delete(void* p) {
+>     MultiLevelAllocTracker::instance().on_free(p);
+>     std::free(p);
+> }
+>
+> // ============ 模拟引擎使用 ============
+> int main() {
+>     MultiLevelAllocTracker::instance().reset();
+>
+>     std::cout << "=== Multi-Level Allocation Tracker Demo ===\n";
+>
+>     // 物理系统分配
+>     {
+>         std::vector<void*> physics_ptrs;
+>         for (int i = 0; i < 100; ++i) {
+>             physics_ptrs.push_back(tagged_new<PhysicsTag>(256));
+>         }
+>         // 释放 80 个
+>         for (int i = 0; i < 80; ++i)
+>             tagged_delete<PhysicsTag>(physics_ptrs[i]);
+>         // 剩余 20 个故意不释放 → 模拟泄漏
+>     }
+>
+>     // 渲染系统分配
+>     {
+>         std::vector<void*> render_ptrs;
+>         for (int i = 0; i < 200; ++i) {
+>             render_ptrs.push_back(tagged_new<RenderingTag>(512));
+>         }
+>         for (int i = 0; i < 200; ++i)
+>             tagged_delete<RenderingTag>(render_ptrs[i]);
+>     }
+>
+>     // 音频系统分配
+>     {
+>         for (int i = 0; i < 50; ++i) {
+>             void* p = tagged_new<AudioTag>(128);
+>             tagged_delete<AudioTag>(p);
+>         }
+>     }
+>
+>     MultiLevelAllocTracker::instance().report();
+>
+>     std::cout << "\n预期：Physics 有 20 个泄漏块（5,120 bytes），"
+>               << "Rendering 和 Audio 无泄漏。\n";
+>
+>     return 0;
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **深度探索**: `docs/deep-dives/custom-allocators-arena.md` — 913 行 Arena 完整分析

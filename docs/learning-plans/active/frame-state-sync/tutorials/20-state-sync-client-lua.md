@@ -1713,6 +1713,248 @@ end
 
 **预期结果**：延迟突增时本地移动可能出现短暂"回拉"，但随后平滑回到正确位置，无视觉跳变。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1：补全 SyncVar 的类型系统
+> ```lua
+> -- 在 SyncVar.new 中增加 type 和 epsilon 参数
+> function SyncVar.new(initial_value, val_type, on_changed, epsilon)
+>     local self = setmetatable({}, SyncVar)
+>     self._value = initial_value
+>     self._last_synced = initial_value
+>     self._dirty = false
+>     self._on_changed = on_changed
+>     self._type = val_type or "number"   -- 默认 number
+>     self._epsilon = epsilon or 0.001     -- 默认容差
+>     return self
+> end
+> ```
+>
+> 修改 `:set()` 中的相等判断逻辑：
+>
+> ```lua
+> function SyncVar:_is_equal(a, b)
+>     if self._type == "vec2" then
+>         return math.abs(a.x - b.x) < self._epsilon
+>            and math.abs(a.y - b.y) < self._epsilon
+>     elseif self._type == "vec3" then
+>         return math.abs(a.x - b.x) < self._epsilon
+>            and math.abs(a.y - b.y) < self._epsilon
+>            and math.abs(a.z - b.z) < self._epsilon
+>     elseif self._type == "number" then
+>         return math.abs(a - b) < self._epsilon
+>     else
+>         return a == b  -- string, bool 用默认比较
+>     end
+> end
+>
+> function SyncVar:set(new_value)
+>     if not self:_is_equal(self._value, new_value) then
+>         local old = self._value
+>         self._value = new_value
+>         self._dirty = true
+>         if self._on_changed then
+>             self._on_changed(old, new_value)
+>         end
+>     end
+> end
+> ```
+>
+> 测试验证：
+> ```lua
+> local pos = SyncVar.new({x=0, y=0}, "vec2")
+> local dirty_count = 0
+> for i = 1, 100 do
+>     pos:set({x=0, y=0})
+>     if pos:is_dirty() then dirty_count = dirty_count + 1 end
+>     pos:clear_dirty()
+> end
+> assert(dirty_count == 1, "期望只在第一次 set 时 dirty")  -- 全部值相同，只有首次 set 触发
+> ```
+>
+> **关键点**：`"vec2"` 和 `"vec3"` 类型必须做分量级深度比较，不能直接用 `~=`（table 比较的是引用）；`"number"` 类型的 epsilon 阈值防止浮点累积误差导致每帧都 dirty，这是实际网络同步中的常见优化。
+
+> [!tip]- 练习 2：基于优先级的 RPC 合并
+> ```lua
+> local RPC_PRIORITY = { HIGH = 0, NORMAL = 1, LOW = 2 }
+> local MERGEABLE_METHODS = { MoveInput = true }
+> local IMMEDIATE_METHODS = { FireSkill = true }
+>
+> function RPCSystem.new(send_fn, is_server)
+>     -- ... 原有字段 ...
+>     self._send_queue = {}       -- 待发送队列 { {method, params, priority, seq} }
+>     self._batch_timer = 0       -- 批次累积时间(ms)
+>     self._BATCH_INTERVAL = 50   -- 50ms 一批
+>     return self
+> end
+>
+> function RPCSystem:send_c2s(method, params, on_ack, on_timeout)
+>     self._seq_counter = self._seq_counter + 1
+>     local seq = self._seq_counter
+>     local priority = IMMEDIATE_METHODS[method] and RPC_PRIORITY.HIGH
+>                   or (MERGEABLE_METHODS[method] and RPC_PRIORITY.LOW
+>                   or RPC_PRIORITY.NORMAL)
+>
+>     -- 高优先级：立即发送
+>     if priority == RPC_PRIORITY.HIGH then
+>         self:_send_message({type="c2s_rpc", seq=seq, method=method, params=params})
+>         -- 仍加入 pending 队列用于 ACK 追踪
+>         self._pending_rpcs[seq] = { method=method, params=params,
+>             send_time=self:_now_ms(), retries=0, on_ack=on_ack, on_timeout=on_timeout }
+>         return seq
+>     end
+>
+>     -- 低优先级：合并策略 —— 同 method 只保留最新
+>     if priority == RPC_PRIORITY.LOW then
+>         for i, entry in ipairs(self._send_queue) do
+>             if entry.method == method then
+>                 entry.params = params   -- 覆盖为最新
+>                 entry.seq = seq
+>                 return seq
+>             end
+>         end
+>     end
+>
+>     -- 入队
+>     table.insert(self._send_queue, {method=method, params=params, priority=priority, seq=seq})
+>     -- 加入 pending（用于超时追踪）
+>     self._pending_rpcs[seq] = { method=method, params=params,
+>         send_time=self:_now_ms(), retries=0, on_ack=on_ack, on_timeout=on_timeout }
+>     return seq
+> end
+>
+> function RPCSystem:tick(dt_ms)
+>     -- ... 原有超时重传逻辑 ...
+>
+>     -- 批次发送
+>     self._batch_timer = self._batch_timer + (dt_ms or 33)
+>     if self._batch_timer >= self._BATCH_INTERVAL then
+>         self._batch_timer = 0
+>         self:_flush_batch()
+>     end
+> end
+>
+> function RPCSystem:_flush_batch()
+>     if #self._send_queue == 0 then return end
+>     local batch = { type = "c2s_rpc_batch", rpcs = {} }
+>     for _, entry in ipairs(self._send_queue) do
+>         table.insert(batch.rpcs, {seq=entry.seq, method=entry.method, params=entry.params})
+>     end
+>     self:_send_message(batch)
+>     self._send_queue = {}
+> end
+> ```
+>
+> 带宽效果计算：30次 MoveInput/秒 + 3次 FireSkill/秒，Move 合并为 50ms 批次（≈20批次/秒），Fire 立即发送共 3 次。总计 ≈23 包/秒，对比原来的 33 包/秒节省约 30%。关键是 **同 method 的低优先级 RPC 只保留最新一条**，避免了无意义的旧位置覆盖。
+
+> [!tip]- 练习 3：完整的客户端预测 + 和解
+> 核心数据结构在 `StateSyncMgr` 中增加：
+>
+> ```lua
+> -- 在 StateSyncMgr.new() 中增加：
+> self._predicted_moves = {}   -- { tick_id = {from_x, from_y, to_x, to_y} }
+> self._reconciling = false    -- 是否正在和解平滑
+> self._reconcile_target = nil -- {x, y} 目标位置
+> self._reconcile_frames = 0   -- 剩余平滑帧数
+> ```
+>
+> 修改 `_apply_local_prediction`，记录预测前后位置：
+>
+> ```lua
+> function StateSyncMgr:_apply_local_prediction(tick_id, inputs)
+>     local player = self._entities[self._local_player_id]
+>     if not player then return end
+>
+>     local from_x, from_y = player:get("x") or 0, player:get("y") or 0
+>     -- ... 应用输入得到 to_x, to_y ...
+>     player:predict_set("x", to_x)
+>     player:predict_set("y", to_y)
+>
+>     self._predicted_moves[tick_id] = { from_x=from_x, from_y=from_y, to_x=to_x, to_y=to_y }
+>     -- 清理过期条目（超过 256 tick 的删除）
+>     for tid in pairs(self._predicted_moves) do
+>         if tid < tick_id - 256 then self._predicted_moves[tid] = nil end
+>     end
+> end
+> ```
+>
+> 修改 `_handle_server_state` 实现和解：
+>
+> ```lua
+> function StateSyncMgr:_handle_server_state(msg)
+>     local player = self._entities[self._local_player_id]
+>     if not player then return end
+>
+>     local pred_x = player:get("x") or 0
+>     local pred_y = player:get("y") or 0
+>     local dx = (msg.x or pred_x) - pred_x
+>     local dy = (msg.y or pred_y) - pred_y
+>     local RECONCILE_THRESHOLD = 5  -- 像素
+>
+>     if math.sqrt(dx*dx + dy*dy) > RECONCILE_THRESHOLD then
+>         -- 偏差超标 → 触发和解
+>         -- 1. 回滚到服务器位置
+>         player.sync_vars.x:apply_server_update(msg.x)
+>         player.sync_vars.y:apply_server_update(msg.y)
+>
+>         -- 2. 获取未确认的输入
+>         local unacked = self._input_queue:get_unacked_inputs(msg.last_processed_tick or 0)
+>         -- 3. 重放这些输入
+>         for _, entry in ipairs(unacked) do
+>             for _, action in ipairs(entry.inputs) do
+>                 if action.type == "move" then
+>                     local nx = (player:get("x") or 0) + (action.dx or 0) * 200 / 60
+>                     local ny = (player:get("y") or 0) + (action.dy or 0) * 200 / 60
+>                     player:predict_set("x", nx)
+>                     player:predict_set("y", ny)
+>                 end
+>             end
+>         end
+>
+>         -- 4. 启动平滑过渡（5帧内逐渐消除偏差）
+>         self._reconciling = true
+>         self._reconcile_target = {x=player:get("x"), y=player:get("y")}
+>         self._reconcile_frames = 5
+>         self._reconcile_start = {x=msg.x, y=msg.y}  -- 回滚后的渲染起点
+>     else
+>         -- 偏差可接受：直接吸收
+>         player.sync_vars.x:apply_server_update(msg.x)
+>         player.sync_vars.y:apply_server_update(msg.y)
+>     end
+>
+>     if msg.last_processed_tick then
+>         self._input_queue:acknowledge(msg.last_processed_tick)
+>     end
+> end
+> ```
+>
+> 在 `tick()` 末尾增加平滑过渡逻辑：
+>
+> ```lua
+> if self._reconciling then
+>     self._reconcile_frames = self._reconcile_frames - 1
+>     local player = self:get_local_player()
+>     if player and self._reconcile_frames > 0 then
+>         local t = 1 - (self._reconcile_frames / 5)
+>         -- 线性插值过渡到重放后的位置
+>         local rx = self._reconcile_start.x + (self._reconcile_target.x - self._reconcile_start.x) * t
+>         local ry = self._reconcile_start.y + (self._reconcile_target.y - self._reconcile_start.y) * t
+>         player:predict_set("x", rx)
+>         player:predict_set("y", ry)
+>     else
+>         self._reconciling = false
+>     end
+> end
+> ```
+>
+> **关键点**：和解的核心流程是「回滚→重放→平滑」。第 14-17 节详细讲解了理论，这里的 Lua 实现对应了理论中的三个步骤。`reconcile_frames = 5` 是一个经验值——太短会产生"闪现"，太长会让玩家感觉到"被拖拽"。测试时设置模拟延迟从 50ms→300ms，观察 `math.sqrt(dx*dx+dy*dy)` 是否在 5 帧内收敛到接近 0。
+
+> [!note] 答案使用方式
+> - 先独立尝试完成练习，卡住时再展开对应的参考实现
+> - 答案代码是**示意性实现**——省略了 JSON 编解码、错误处理和完整边界检查，重点是展示核心算法逻辑
+> - 练习 3 的和解平滑可以用不同的插值曲线（ease-out 而非线性），观察体验差异
+> - 所有代码均兼容 Lua 5.1+ / LuaJIT，可直接嵌入到 2.5 节的 `state_sync_mgr.lua` 中
 ---
 
 ## 4. 扩展阅读

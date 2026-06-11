@@ -744,6 +744,394 @@ Root Job（等待所有子 Job）
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 在 JobSystem 类中添加 run_parallel 方法：
+> // (追加到 JobSystem 类的 public 区域)
+>
+> #include <functional>
+> #include <cassert>
+> #include <vector>
+> #include <iostream>
+>
+> // ===== 在 JobSystem 类内部添加 =====
+> // 将范围拆分为子 Job，构建 Job 树
+> void run_parallel(std::function<void(int)> func, int N, int num_splits = 4) {
+>     if (N <= 0) return;
+>
+>     // 创建根 Job（等待所有子 Job 完成）
+>     Job* root = new Job{
+>         .func = []{},  // 根 Job 本身不干活，仅用于等待
+>         .parent = nullptr,
+>         .unfinished{1} // 自身计数
+>     };
+>
+>     int chunk = (N + num_splits - 1) / num_splits;
+>     std::vector<Job*> children;
+>     children.reserve(num_splits);
+>
+>     for (int s = 0; s < num_splits; ++s) {
+>         int start = s * chunk;
+>         int end   = std::min(start + chunk, N);
+>         if (start >= end) break;
+>
+>         // 每个子 Job 处理一段范围
+>         Job* child = new Job{
+>             .func = [start, end, func] {
+>                 for (int i = start; i < end; ++i) {
+>                     func(i);
+>                 }
+>             },
+>             .parent = root
+>         };
+>         children.push_back(child);
+>         submit_child(root, child);  // 子 Job 依赖根 Job
+>     }
+>
+>     // 根 Job 的 func 设为空操作，等待子 Job 后 work 计数归零
+>     // 将根 Job 提交入队——当所有子 Job 完成后，root 的 unfinished 变为 0
+>     submit(root);
+> }
+>
+> // ===== 验证代码 (放在 main 或独立的测试函数） =====
+> void test_parallel_for() {
+>     JobSystem js(4);  // 4 个 Worker
+>
+>     constexpr int N = 1'000'000;
+>     std::vector<int> arr(N, 0);
+>
+>     js.run_parallel([&arr](int i) {
+>         arr[i] = (i * i) & 0x7FFFFFFF;  // 填平方（防溢出）
+>     }, N, 4);
+>
+>     // run_parallel 内部已调用 submit，Job 在 Worker 中异步执行
+>     // 实际使用中需等待——这里演示概念：
+>     // 可通过 JobSystem::wait(root) 等待根 Job 完成
+>
+>     // 验证（简化：等待一小段时间让 job 跑完）
+>     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+>
+>     bool ok = true;
+>     for (int i = 0; i < N && ok; ++i) {
+>         if (arr[i] != ((i * i) & 0x7FFFFFFF)) ok = false;
+>     }
+>     std::cout << "parallel_for test: " << (ok ? "PASS" : "FAIL") << '\n';
+> }
+> ```
+>
+> **设计要点**：
+> - 根 Job 的 `unfinished` 初始为 1（自身），每 `submit_child` 一次 `fetch_add(1)`
+> - 子 Job 执行完 `executeJob` 对父 Job `fetch_sub(1)`，归零时将父 Job 重新入队
+> - 根 Job 入队后，当所有子 Job 完成时根 Job 被重新入队并执行（空 func）
+> - 调用方可通过 `wait(root)` 阻塞等待整棵树完成
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <chrono>
+> #include <iostream>
+> #include <vector>
+> #include <thread>
+> #include <future>
+> #include <random>
+>
+> // 4x4 矩阵乘法（每个任务执行 10 万次）
+> using Mat4x4 = float[4][4];
+>
+> void mat4_mul(const Mat4x4& a, const Mat4x4& b, Mat4x4& out) {
+>     for (int row = 0; row < 4; ++row) {
+>         for (int col = 0; col < 4; ++col) {
+>             float sum = 0.0f;
+>             for (int k = 0; k < 4; ++k) {
+>                 sum += a[row][k] * b[k][col];
+>             }
+>             out[row][col] = sum;
+>         }
+>     }
+> }
+>
+> // 单次任务：随机两个矩阵，做 10 万次乘法
+> void matrix_task_heavy() {
+>     Mat4x4 a = {{1,2,3,4},{5,6,7,8},{9,10,11,12},{13,14,15,16}};
+>     Mat4x4 b = {{16,15,14,13},{12,11,10,9},{8,7,6,5},{4,3,2,1}};
+>     Mat4x4 c;
+>     for (int i = 0; i < 100'000; ++i) {
+>         mat4_mul(a, b, c);
+>     }
+>     // 防止优化消除
+>     volatile float sink = c[0][0];
+>     (void)sink;
+> }
+>
+> // Benchmark 1: 未设置 affinity（普通 std::thread + 全局队列）
+> double bench_no_affinity(int num_tasks) {
+>     unsigned n = std::thread::hardware_concurrency();
+>     std::vector<std::thread> workers;
+>     workers.reserve(n);
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>
+>     int tasks_per_thread = num_tasks / n;
+>     for (unsigned i = 0; i < n; ++i) {
+>         workers.emplace_back([tasks_per_thread] {
+>             for (int j = 0; j < tasks_per_thread; ++j) {
+>                 matrix_task_heavy();
+>             }
+>         });
+>     }
+>     for (auto& t : workers) t.join();
+>
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration<double, std::milli>(t1 - t0).count();
+> }
+>
+> // Benchmark 2: 设置了 affinity（在 Worker 创建时 pin）
+> double bench_affinity(int num_tasks) {
+>     unsigned n = std::thread::hardware_concurrency();
+>     std::vector<std::thread> workers;
+>     workers.reserve(n);
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>
+>     int tasks_per_thread = num_tasks / n;
+>     for (unsigned i = 0; i < n; ++i) {
+>         workers.emplace_back([i, tasks_per_thread] {
+> #ifdef _WIN32
+>             SetThreadAffinityMask(GetCurrentThread(), 1ULL << i);
+> #elif defined(__linux__)
+>             cpu_set_t cpuset;
+>             CPU_ZERO(&cpuset);
+>             CPU_SET(i, &cpuset);
+>             pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+> #endif
+>             for (int j = 0; j < tasks_per_thread; ++j) {
+>                 matrix_task_heavy();
+>             }
+>         });
+>     }
+>     for (auto& t : workers) t.join();
+>
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration<double, std::milli>(t1 - t0).count();
+> }
+>
+> // Benchmark 3: std::async
+> double bench_async(int num_tasks) {
+>     unsigned n = std::thread::hardware_concurrency();
+>     int tasks_per_thread = num_tasks / n;
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>
+>     std::vector<std::future<void>> futures;
+>     futures.reserve(n);
+>     for (unsigned i = 0; i < n; ++i) {
+>         futures.push_back(std::async(std::launch::async, [tasks_per_thread] {
+>             for (int j = 0; j < tasks_per_thread; ++j) {
+>                 matrix_task_heavy();
+>             }
+>         }));
+>     }
+>     for (auto& f : futures) f.get();
+>
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration<double, std::milli>(t1 - t0).count();
+> }
+>
+> int main() {
+>     constexpr int TASKS = 1000;
+>
+>     // 预热
+>     bench_no_affinity(10);
+>
+>     double t1 = bench_no_affinity(TASKS);
+>     double t2 = bench_affinity(TASKS);
+>     double t3 = bench_async(TASKS);
+>
+>     std::cout << "=== Benchmark: " << TASKS << " tasks x 100K mat4 muls ===\n";
+>     std::cout << "No affinity:  " << t1 << " ms\n";
+>     std::cout << "With affinity: " << t2 << " ms (" << (t1/t2 - 1.0)*100 << "% faster)\n";
+>     std::cout << "std::async:    " << t3 << " ms\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **分析要点**：
+> - Affinity 通常快 5-15%：线程固定到核心 → L1/L2 缓存命中率更高，减少跨核心缓存行迁移
+> - `std::async` 通常最慢：每次调用创建/销毁线程（或线程池实现质量参差），`future` 也有同步开销
+> - 差异在 NUMA 系统上更明显——跨 socket 的缓存一致性协议开销可达数百周期
+
+> [!tip]- 练习 3 参考答案（挑战）
+> ```cpp
+> // Fiber 协作式调度器 —— x86-64 Linux/Windows
+> // 仅作演示，生产环境请用 boost::fiber 或平台 Fiber API
+>
+> #include <cstdint>
+> #include <cstdlib>
+> #include <cstring>
+> #include <vector>
+> #include <functional>
+> #include <queue>
+> #include <iostream>
+>
+> constexpr size_t FIBER_STACK_SIZE = 64 * 1024; // 64KB
+>
+> enum class FiberState { Idle, Running, Yielded, Done };
+>
+> struct Fiber {
+>     void* rsp = nullptr;          // 栈指针
+>     void* stack_base = nullptr;   // 栈底（用于 free）
+>     FiberState state = FiberState::Idle;
+>     std::function<void()> func;
+> };
+>
+> // 当前运行的 Fiber（全局——单线程调度器）
+> thread_local Fiber* current_fiber = nullptr;
+> thread_local Fiber  main_fiber;          // 主 Fiber（线程本身）
+> thread_local void*  main_rsp = nullptr;  // 主 Fiber 的栈指针快照
+>
+> // x86-64 上下文切换（保存/恢复 callee-saved 寄存器）
+> // 约定：rsp, rbp, rbx, r12, r13, r14, r15 由被调用方保存
+> #if defined(__GNUC__) || defined(__clang__)
+> __attribute__((noinline, used))
+> void switch_context(void** from_rsp, void* to_rsp) {
+>     // 保存当前上下文
+>     __asm__ volatile (
+>         "movq %%rsp, (%0)\n\t"   // 保存 rsp 到 from_rsp
+>         "movq %%rbp, 8(%0)\n\t"
+>         "movq %%rbx, 16(%0)\n\t"
+>         "movq %%r12, 24(%0)\n\t"
+>         "movq %%r13, 32(%0)\n\t"
+>         "movq %%r14, 40(%0)\n\t"
+>         "movq %%r15, 48(%0)\n\t"
+>         :
+>         : "r"(from_rsp)
+>         : "memory"
+>     );
+>
+>     // 如果 to_rsp 非空，加载目标上下文
+>     if (to_rsp) {
+>         // 保存的上下文布局：[0]=rsp, [8]=rbp, [16]=rbx, [24]=r12, [32]=r13, [40]=r14, [48]=r15
+>         uint64_t* saved = static_cast<uint64_t*>(to_rsp);
+>
+>         __asm__ volatile (
+>             "movq %0, %%r15\n\t"
+>             "movq %1, %%r14\n\t"
+>             "movq %2, %%r13\n\t"
+>             "movq %3, %%r12\n\t"
+>             "movq %4, %%rbx\n\t"
+>             "movq %5, %%rbp\n\t"
+>             "movq %6, %%rsp\n\t"
+>             :
+>             : "m"(saved[6]), "m"(saved[5]), "m"(saved[4]),
+>               "m"(saved[3]), "m"(saved[2]), "m"(saved[1]),
+>               "m"(saved[0])
+>             : "memory"
+>         );
+>     }
+> }
+> #else
+> // MSVC x64（未实现内联汇编，实际项目建议用 Windows Fibers API）
+> void switch_context(void** from_rsp, void* to_rsp) {
+>     // 平台相关：MSVC x64 不支持内联汇编，此处为占位
+>     // 生产代码应使用 CreateFiber/SwitchToFiber (Windows) 或
+>     // ucontext (POSIX, 已废弃) / boost.context
+>     #pragma message("switch_context not implemented for this compiler")
+> }
+> #endif
+>
+> Fiber* create_fiber(std::function<void()> func) {
+>     Fiber* f = new Fiber;
+>     f->func = std::move(func);
+>     f->stack_base = malloc(FIBER_STACK_SIZE);
+>
+>     // 栈从高向低增长，rsp 指向栈顶（高地址）
+>     uint64_t* sp = reinterpret_cast<uint64_t*>(
+>         static_cast<char*>(f->stack_base) + FIBER_STACK_SIZE - 8
+>     );
+>
+>     // 初始化保存的寄存器区域（在栈顶下方预留空间）
+>     // 注意：rsp 指向的位置下方需有 8×8=64 字节保存区
+>     uint64_t* save_area = sp - 8;
+>     save_area[0] = reinterpret_cast<uint64_t>(sp);  // rsp——初次切换时跳转到这里
+>     save_area[1] = 0;  // rbp
+>     save_area[2] = 0;  // rbx
+>     save_area[3] = 0;  // r12
+>     save_area[4] = 0;  // r13
+>     save_area[5] = 0;  // r14
+>     save_area[6] = 0;  // r15
+>     save_area[7] = reinterpret_cast<uint64_t>(f);  // Fiber* 作为参数传递
+>
+>     f->rsp = save_area;
+>     f->state = FiberState::Idle;
+>     return f;
+> }
+>
+> void yield() {
+>     current_fiber->state = FiberState::Yielded;
+>     // 切回主 Fiber
+>     switch_context(&current_fiber->rsp, main_rsp);
+> }
+>
+> void resume(Fiber* f) {
+>     f->state = FiberState::Running;
+>     current_fiber = f;
+>     switch_context(&main_rsp, f->rsp);
+>     current_fiber = &main_fiber;
+> }
+>
+> // ===== 生产者-消费者 Demo =====
+> std::queue<int> shared_queue;
+> constexpr int MAX_ITEMS = 10;
+>
+> void producer_fiber_func() {
+>     for (int i = 0; i < MAX_ITEMS; ++i) {
+>         shared_queue.push(i);
+>         std::cout << "Producer: pushed " << i << '\n';
+>         yield();  // 让出执行权给消费者
+>     }
+> }
+>
+> void consumer_fiber_func() {
+>     int consumed = 0;
+>     while (consumed < MAX_ITEMS) {
+>         if (!shared_queue.empty()) {
+>             int val = shared_queue.front();
+>             shared_queue.pop();
+>             std::cout << "Consumer: popped " << val << '\n';
+>             ++consumed;
+>         }
+>         yield();  // 让出执行权给生产者
+>     }
+> }
+>
+> void demo_fibers() {
+>     Fiber* producer = create_fiber(producer_fiber_func);
+>     Fiber* consumer = create_fiber(consumer_fiber_func);
+>
+>     std::cout << "=== Fiber Demo: Producer-Consumer ===\n";
+>
+>     while (producer->state != FiberState::Done &&
+>            consumer->state != FiberState::Done) {
+>         resume(producer);
+>         resume(consumer);
+>     }
+>
+>     delete producer;
+>     delete consumer;
+> }
+> ```
+>
+> **说明**：
+> - 以上汇编代码工作在 x86-64 GNU 风格（GCC/Clang），MSVC x64 需用 Windows Fibers API（`CreateFiber`/`SwitchToFiber`）或 `boost.context`
+> - callee-saved 寄存器按 SysV AMD64 ABI：`rbx`, `rbp`, `r12-r15` 由被调用方保证不修改
+> - 实际游戏引擎中 Fiber 的栈管理更复杂：Naughty Dog 使用 guard page 检测栈溢出，UE5 使用预分配的固定池
+> - 本实现为教学用简化版——未处理 Fiber 退出（`func` 返回后）、未处理异常传播
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读]** *Game Engine Architecture (3rd ed.)* — Jason Gregory，第 7 章 "Concurrency and Parallelism"，详述 Naughty Dog 的 Fiber-based Job System 设计

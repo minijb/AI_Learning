@@ -550,6 +550,440 @@ g++ -std=c++17 -O2 rpg_ecs.cpp -o rpg_ecs && ./rpg_ecs
 ### 练习 3: 行为树 DSL（挑战）
 设计一个简单的 JSON/文本 DSL 描述行为树，运行时解析并挂载到实体的 `AIState` 组件上。实现 Selector/Sequence/Condition/Action 四种节点。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **添加 Bow 武器类型、Projectile 实体和 ProjectileSystem**：
+>
+> ```cpp
+> // ===== 新增组件 =====
+> enum Comp : int { /* ... existing ... */ C_PROJECTILE = 100 };
+>
+> struct Projectile {
+>     Entity owner;       // 谁发射的
+>     float damage;
+>     float lifetime;     // 剩余存活时间（秒）
+>     float maxLifetime;
+> };
+>
+> // ===== 修改 CombatSystem：弓类武器创建投射物 =====
+> class CombatSystem {
+> public:
+>     void update(World& w, float dt, float gameTime) {
+>         auto& entities = w.entities(C_WEAPON);
+>         for (Entity attacker : entities) {
+>             auto* wpn = w.getComponent<Weapon>(attacker, C_WEAPON);
+>             auto* atkPos = w.getComponent<Position>(attacker, C_POS);
+>             if (!wpn || !atkPos) continue;
+>             if (gameTime - wpn->lastAttackTime < 1.0f / wpn->attackSpeed) continue;
+>
+>             auto* atkFaction = w.getComponent<Faction>(attacker, C_FACTION);
+>             Entity bestTarget = 0;
+>             float bestDist = wpn->range + 1;
+>
+>             auto& targets = w.entities(C_HEALTH);
+>             for (Entity target : targets) {
+>                 if (target == attacker) continue;
+>                 auto* tarFac = w.getComponent<Faction>(target, C_FACTION);
+>                 if (!atkFaction || !tarFac) continue;
+>                 if (atkFaction->type == tarFac->type) continue;
+>                 auto* tarPos = w.getComponent<Position>(target, C_POS);
+>                 float dx = atkPos->x - tarPos->x, dy = atkPos->y - tarPos->y;
+>                 float dist = sqrt(dx*dx + dy*dy);
+>                 if (dist <= wpn->range && dist < bestDist) {
+>                     bestDist = dist; bestTarget = target;
+>                 }
+>             }
+>
+>             if (!bestTarget) continue;
+>
+>             if (wpn->type == Weapon::Bow) {
+>                 // 远程弓：创建投射物实体
+>                 createProjectile(w, attacker, bestTarget, wpn, gameTime);
+>             } else {
+>                 // 近战：直接造成伤害
+>                 auto* hp = w.getComponent<Health>(bestTarget, C_HEALTH);
+>                 if (hp) {
+>                     hp->hp -= wpn->damage;
+>                     wpn->lastAttackTime = gameTime;
+>                     logAttack(w, attacker, bestTarget, wpn->damage, hp->hp);
+>                 }
+>             }
+>         }
+>     }
+>
+> private:
+>     void createProjectile(World& w, Entity owner, Entity target,
+>                           Weapon* wpn, float gameTime) {
+>         auto* srcPos = w.getComponent<Position>(owner, C_POS);
+>         auto* dstPos = w.getComponent<Position>(target, C_POS);
+>         if (!srcPos || !dstPos) return;
+>
+>         Entity proj = w.create();
+>         // 从发射者位置出发
+>         auto* pp = w.addComponent<Position>(proj, C_POS);
+>         pp->x = srcPos->x; pp->y = srcPos->y;
+>         // 计算飞行方向（归一化速度向量）
+>         float dx = dstPos->x - srcPos->x;
+>         float dy = dstPos->y - srcPos->y;
+>         float len = sqrt(dx*dx + dy*dy);
+>         float speed = 20.0f;  // 箭的速度
+>         auto* pv = w.addComponent<Movement>(proj, C_MOVEMENT);
+>         pv->speed = speed;
+>         pv->vx = (len > 0) ? dx/len * speed : speed;
+>         pv->vy = (len > 0) ? dy/len * speed : 0;
+>         // 投射物专属组件
+>         auto* pj = w.addComponent<Projectile>(proj, C_PROJECTILE);
+>         pj->owner = owner; pj->damage = wpn->damage;
+>         pj->lifetime = pj->maxLifetime = 2.0f;
+>
+>         wpn->lastAttackTime = gameTime;
+>     }
+> };
+>
+> // ===== ProjectileSystem =====
+> class ProjectileSystem {
+> public:
+>     void update(World& w, float dt) {
+>         auto& entities = w.entities(C_PROJECTILE);
+>         for (Entity e : entities) {
+>             auto* pj = w.getComponent<Projectile>(e, C_PROJECTILE);
+>             auto* pos = w.getComponent<Position>(e, C_POS);
+>             auto* mov = w.getComponent<Movement>(e, C_MOVEMENT);
+>
+>             // 生命周期衰减
+>             pj->lifetime -= dt;
+>             if (pj->lifetime <= 0) { w.destroy(e); continue; }
+>
+>             // 飞行（MovementSystem 也会更新 pos，这是额外的飞行逻辑）
+>             // 命中检测：遍历所有潜在目标
+>             auto& targets = w.entities(C_HEALTH);
+>             for (Entity t : targets) {
+>                 if (t == pj->owner) continue;  // 不打自己人
+>                 auto* tp = w.getComponent<Position>(t, C_POS);
+>                 if (!tp) continue;
+>                 float dx = pos->x - tp->x, dy = pos->y - tp->y;
+>                 if (sqrt(dx*dx + dy*dy) < 0.5f) {  // 命中半径
+>                     auto* hp = w.getComponent<Health>(t, C_HEALTH);
+>                     if (hp) hp->hp -= pj->damage;
+>                     w.destroy(e);  // 箭消失
+>                     break;
+>                 }
+>             }
+>         }
+>     }
+> };
+> ```
+>
+> **设计要点**：
+> - CommbatSystem 中按 `wpn->type` 分支：`Bow` → 创建投射物实体；`Sword/Staff` → 直接伤害
+> - Projectile 是独立实体——可以用现有的 MovementSystem 驱动飞行，无需重复代码
+> - 生命周期管理：`Projectile::lifetime` 防止无限飞行
+> - 主循环中 `ProjectileSystem::update` 应在 `MovementSystem` 之后、`CombatSystem` 之后运行
+
+> [!tip]- 练习 2 参考答案
+> **Buff 层数叠加与中毒 Debuff**：
+>
+> ```cpp
+> // ===== 扩展 Buff 组件 =====
+> struct Buff {
+>     enum Type { SpeedUp, DamageBoost, Shield, Poison } type;
+>     float value = 0;
+>     float duration = 0;   // 剩余持续时间
+>     float elapsed = 0;
+>     int stacks = 1;       // 层数
+>     static constexpr int MAX_STACKS = 5;
+>     float tickTimer = 0;  // Debuff 的 tick 计时器
+> };
+>
+> // 修改 BuffSystem::apply——支持叠加/刷新
+> class BuffSystem {
+> public:
+>     void apply(World& w, Entity target, Buff::Type type,
+>                float value, float duration) {
+>         // 检查是否已有同类型 Buff
+>         auto& entities = w.entities(C_BUFF);
+>         for (Entity e : entities) {
+>             if (e != target) continue;
+>             auto* existing = w.getComponent<Buff>(e, C_BUFF);
+>             if (existing && existing->type == type) {
+>                 if (existing->stacks < Buff::MAX_STACKS) {
+>                     // 叠加层数并刷新持续时间
+>                     existing->stacks++;
+>                     existing->duration = duration;
+>                     existing->elapsed = 0;
+>                     apply_effect(w, target, type, value, true);  // true = 增量
+>                 } else {
+>                     // 已达最大层数——只刷新持续时间
+>                     existing->duration = std::max(existing->duration, duration);
+>                 }
+>                 return;
+>             }
+>         }
+>
+>         // 新 Buff：创建并应用效果
+>         auto* buff = w.addComponent<Buff>(target, C_BUFF);
+>         buff->type = type; buff->value = value;
+>         buff->duration = duration; buff->elapsed = 0;
+>         buff->stacks = 1;
+>         apply_effect(w, target, type, value, true);
+>     }
+>
+>     void update(World& w, float dt) {
+>         auto& entities = w.entities(C_BUFF);
+>         for (Entity e : entities) {
+>             auto* buff = w.getComponent<Buff>(e, C_BUFF);
+>             buff->elapsed += dt;
+>
+>             // 中毒类型：每 1 秒 tick 一次
+>             if (buff->type == Buff::Poison) {
+>                 buff->tickTimer += dt;
+>                 while (buff->tickTimer >= 1.0f) {
+>                     buff->tickTimer -= 1.0f;
+>                     auto* hp = w.getComponent<Health>(e, C_HEALTH);
+>                     if (hp) {
+>                         float tickDmg = buff->value * buff->stacks;
+>                         hp->hp -= tickDmg;
+>                         auto* nm = w.getComponent<NameComp>(e, C_NAME);
+>                         cout << (nm?nm->name:"?") << " 中毒 -" << tickDmg
+>                              << "HP (剩余 " << hp->hp << ")\n";
+>                     }
+>                 }
+>             }
+>
+>             // Buff 过期
+>             if (buff->elapsed >= buff->duration) {
+>                 // 恢复所有层数的效果
+>                 apply_effect(w, e, buff->type,
+>                              buff->value * buff->stacks, false);  // false = 撤销
+>                 w.pools[C_BUFF].remove(e);
+>             }
+>         }
+>     }
+>
+> private:
+>     void apply_effect(World& w, Entity e, Buff::Type type,
+>                       float value, bool apply) {
+>         float sign = apply ? 1.0f : -1.0f;
+>         auto* mov = w.getComponent<Movement>(e, C_MOVEMENT);
+>         switch (type) {
+>         case Buff::SpeedUp:
+>             if (mov) mov->speed += value * sign;
+>             break;
+>         case Buff::DamageBoost:
+>             if (auto* wpn = w.getComponent<Weapon>(e, C_WEAPON))
+>                 wpn->damage += value * sign;
+>             break;
+>         case Buff::Poison:
+>             // Poison 的效果在 tick 中处理，这里只管理生命期
+>             break;
+>         default: break;
+>         }
+>     }
+> };
+> ```
+>
+> **使用示例**：
+> ```cpp
+> // 给哥布林上 3 层中毒（每层每秒 5 伤害 → 每秒 15 伤害持续 5 秒）
+> buffSys.apply(world, goblin, Buff::Poison, 5.0f, 5.0f);
+> buffSys.apply(world, goblin, Buff::Poison, 5.0f, 5.0f);  // 叠加到 2 层
+> buffSys.apply(world, goblin, Buff::Poison, 5.0f, 5.0f);  // 叠加到 3 层
+> ```
+>
+> **关键设计**：
+> - 同类型 Buff 叠加到 MAX_STACKS 上限，之后只刷新持续时间——防止无限堆叠
+> - 过期时 `apply_effect(..., false)` 一次性撤销所有层数的效果——避免"只撤销一层"的 bug
+> - Poison tick 用 `while (tickTimer >= 1.0f)` 而非 `if`——防止帧率波动导致漏 tick
+
+> [!tip]- 练习 3 参考答案（可选）
+> **JSON DSL 行为树方案**：
+>
+> ```json
+> {
+>   "root": {
+>     "type": "Selector",
+>     "children": [
+>       {
+>         "type": "Sequence",
+>         "name": "战斗序列",
+>         "children": [
+>           { "type": "Condition", "name": "有目标在攻击范围内",
+>             "check": "has_target_in_aggro_range" },
+>           { "type": "Action", "name": "追击并攻击",
+>             "do": "chase_and_attack" }
+>         ]
+>       },
+>       {
+>         "type": "Sequence",
+>         "name": "巡逻序列",
+>         "children": [
+>           { "type": "Condition", "name": "有巡逻点",
+>             "check": "has_patrol_points" },
+>           { "type": "Action", "name": "移动到下一巡逻点",
+>             "do": "patrol_move" }
+>         ]
+>       },
+>       {
+>         "type": "Action",
+>         "name": "待机",
+>         "do": "idle"
+>       }
+>     ]
+>   }
+> }
+> ```
+>
+> **C++ 运行时解析与执行**：
+>
+> ```cpp
+> #include <nlohmann/json.hpp>  // 或任何 JSON 库
+>
+> // ===== DSL 节点定义 =====
+> struct BTNode {
+>     enum Kind { Selector, Sequence, Condition, Action } kind;
+>     std::string name;
+>     std::string check_func;  // Condition 节点：检查函数名
+>     std::string action_func; // Action 节点：执行函数名
+>     std::vector<std::unique_ptr<BTNode>> children;
+>
+>     // 执行节点，返回 true = 成功
+>     bool execute(World& w, Entity e, AIState& ai, float dt,
+>                  const std::unordered_map<std::string,
+>                      std::function<bool(World&, Entity, AIState&, float)>>& conditions,
+>                  const std::unordered_map<std::string,
+>                      std::function<bool(World&, Entity, AIState&, float)>>& actions)
+>     {
+>         switch (kind) {
+>         case Selector:
+>             for (auto& child : children)
+>                 if (child->execute(w, e, ai, dt, conditions, actions))
+>                     return true;  // 短路：任一成功则成功
+>             return false;
+>
+>         case Sequence:
+>             for (auto& child : children)
+>                 if (!child->execute(w, e, ai, dt, conditions, actions))
+>                     return false;  // 短路：任一失败则失败
+>             return true;
+>
+>         case Condition: {
+>             auto it = conditions.find(check_func);
+>             return (it != conditions.end()) ? it->second(w, e, ai, dt) : false;
+>         }
+>
+>         case Action: {
+>             auto it = actions.find(action_func);
+>             return (it != actions.end()) ? it->second(w, e, ai, dt) : true;
+>         }
+>         }
+>         return false;
+>     }
+>;
+>
+> // ===== JSON 解析器 =====
+> std::unique_ptr<BTNode> parse_bt_node(const nlohmann::json& j) {
+>     auto node = std::make_unique<BTNode>();
+>
+>     std::string type = j.at("type").get<std::string>();
+>     if (type == "Selector")       node->kind = BTNode::Selector;
+>     else if (type == "Sequence")  node->kind = BTNode::Sequence;
+>     else if (type == "Condition") node->kind = BTNode::Condition;
+>     else if (type == "Action")    node->kind = BTNode::Action;
+>
+>     if (j.contains("name"))   node->name = j["name"];
+>     if (j.contains("check"))  node->check_func = j["check"];
+>     if (j.contains("do"))     node->action_func = j["do"];
+>
+>     if (j.contains("children")) {
+>         for (auto& child : j["children"])
+>             node->children.push_back(parse_bt_node(child));
+>     }
+>     return node;
+> }
+>
+> // ===== AIState 扩展（挂载行为树）=====
+> struct AIState {
+>     // ... 现有字段 ...
+>     std::string bt_name;  // 使用的行为树名（如 "monster_patrol"）
+> };
+>
+> // ===== 行为树管理器 =====
+> class BehaviorTreeManager {
+>     std::unordered_map<std::string, std::unique_ptr<BTNode>> trees_;
+>     std::unordered_map<std::string,
+>         std::function<bool(World&, Entity, AIState&, float)>> conditions_;
+>     std::unordered_map<std::string,
+>         std::function<bool(World&, Entity, AIState&, float)>> actions_;
+>
+> public:
+>     void load_from_file(const std::string& path) {
+>         std::ifstream f(path);
+>         nlohmann::json j;
+>         f >> j;
+>         trees_["default"] = parse_bt_node(j.at("root"));
+>     }
+>
+>     void register_condition(const std::string& name, auto fn) {
+>         conditions_[name] = fn;
+>     }
+>     void register_action(const std::string& name, auto fn) {
+>         actions_[name] = fn;
+>     }
+>
+>     bool run(World& w, Entity e, AIState& ai, float dt) {
+>         auto it = trees_.find(ai.bt_name.empty() ? "default" : ai.bt_name);
+>         if (it == trees_.end()) return false;
+>         return it->second->execute(w, e, ai, dt, conditions_, actions_);
+>     }
+> };
+> ```
+>
+> **注册条件/动作函数**：
+> ```cpp
+> BehaviorTreeManager btm;
+> btm.register_condition("has_target_in_aggro_range",
+>     [](World& w, Entity e, AIState& ai, float dt) -> bool {
+>         return ai.currentTarget != 0;  // AISystem 的感知阶段已设置
+>     });
+> btm.register_action("chase_and_attack",
+>     [](World& w, Entity e, AIState& ai, float dt) -> bool {
+>         ai.state = AIState::Chase;
+>         return true;  // 总是成功
+>     });
+> btm.register_action("patrol_move",
+>     [](World& w, Entity e, AIState& ai, float dt) -> bool {
+>         ai.state = AIState::Patrol;
+>         return true;
+>     });
+> btm.register_action("idle",
+>     [](World& w, Entity e, AIState& ai, float dt) -> bool {
+>         ai.state = AIState::Idle;
+>         return true;
+>     });
+> ```
+>
+> **Selector/Sequence 语义**：
+> - **Selector**（或节点）：依次执行子节点，任一成功立即返回成功；所有失败才返回失败
+> - **Sequence**（与节点）：依次执行子节点，任一失败立即返回失败；所有成功才返回成功
+> - **Condition**：检查条件，返回 true/false（不改变状态）
+> - **Action**：执行动作，返回 true/false（可改变状态）
+>
+> **在 AISystem 中集成**：
+> ```cpp
+> void AISystem::update(World& w, float dt, float gameTime) {
+>     for (Entity e : w.entities(C_AI)) {
+>         auto* ai = w.getComponent<AIState>(e, C_AI);
+>         if (!ai) continue;
+>         // 感知阶段（不变）
+>         perception(w, e, *ai);
+>         // 行为树决策
+>         btm_.run(w, e, *ai, dt);
+>         // 行为执行（按 ai->state 做具体移动/攻击）
+>         execute_state(w, e, *ai, dt);
+>     }
+> }
+> ```
 ---
 
 ## 4. 扩展阅读

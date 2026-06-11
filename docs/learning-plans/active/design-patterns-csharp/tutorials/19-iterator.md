@@ -1054,6 +1054,275 @@ public IEnumerable<T> BfsTraversal()
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：环形缓冲区迭代器
+>   
+> ```csharp
+> // ============================================
+> // CircularBuffer<T> — 实现 IEnumerable<T>
+> // ============================================
+> public class CircularBuffer<T> : IEnumerable<T>
+> {
+>     private readonly T[] _buffer;
+>     private int _head;  // 写入位置（下一个写入的索引）
+>     private int _tail;  // 读取位置（最旧元素的索引）
+>     private bool _full;
+> 
+>     public CircularBuffer(int capacity)
+>     {
+>         _buffer = new T[capacity];
+>         _head = _tail = 0;
+>         _full = false;
+>     }
+> 
+>     public void Write(T item)
+>     {
+>         _buffer[_head] = item;
+>         _head = (_head + 1) % _buffer.Length;
+>         if (_full) _tail = (_tail + 1) % _buffer.Length;
+>         _full = _head == _tail;
+>     }
+> 
+>     public int Count => _full ? _buffer.Length
+>         : (_head - _tail + _buffer.Length) % _buffer.Length;
+> 
+>     // 显式实现非泛型接口
+>     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+>         => GetEnumerator();
+> 
+>     // 泛型版本：从旧到新迭代（_tail → _head），不分配额外集合
+>     public IEnumerator<T> GetEnumerator()
+>     {
+>         if (Count == 0) yield break;
+> 
+>         var pos = _tail;
+>         for (int i = 0; i < Count; i++)
+>         {
+>             yield return _buffer[pos];
+>             pos = (pos + 1) % _buffer.Length;
+>         }
+>     }
+> }
+> 
+> // ============================================
+> // 验证代码
+> // ============================================
+> static void TestCircularBuffer()
+> {
+>     var cb = new CircularBuffer<int>(5);
+>     cb.Write(1); cb.Write(2); cb.Write(3);
+>     Console.Write("Count=3, 迭代: ");
+>     foreach (var x in cb) Console.Write($"{x} "); // → 1 2 3
+>     Console.WriteLine();
+> 
+>     cb.Write(4); cb.Write(5); cb.Write(6);  // 1,2 被覆盖
+>     Console.Write("Count=5, 迭代: ");
+>     foreach (var x in cb) Console.Write($"{x} "); // → 2 3 4 5 6
+>     Console.WriteLine();
+> 
+>     // 验证 Edge case：迭代空缓冲区
+>     var empty = new CircularBuffer<int>(3);
+>     Console.WriteLine($"空缓冲区 Count={empty.Count}, 迭代: [{string.Join(", ", empty)}]");
+> }
+> ```
+>
+> **关键点说明：**
+> - 迭代从 `_tail`（最旧元素）开始，沿环形移动 `Count` 步到达 `_head` 前一个位置
+> - `yield return` 让编译器自动生成 `IEnumerator<T>` 状态机，无需手写 `MoveNext()`/`Current`
+> - 空缓冲区通过 `if (Count == 0) yield break;` 提前退出
+> - 显式实现 `System.Collections.IEnumerable.GetEnumerator()` 保持与非泛型 `foreach` 的兼容性
+
+> [!tip]- 练习 2 参考答案：过滤迭代器
+>   
+> ```csharp
+> // ============================================
+> // FilterIterator<T> — 基于谓词的懒加载过滤器
+> // ============================================
+> public class FilterIterator<T> : IEnumerable<T>
+> {
+>     private readonly IEnumerable<T> _source;
+>     private readonly Func<T, bool> _predicate;
+> 
+>     public FilterIterator(IEnumerable<T> source, Func<T, bool> predicate)
+>     {
+>         _source = source;
+>         _predicate = predicate;
+>     }
+> 
+>     public IEnumerator<T> GetEnumerator()
+>     {
+>         // 懒加载：只在遍历时才逐个检查元素
+>         foreach (var item in _source)
+>         {
+>             if (_predicate(item))
+>                 yield return item;
+>         }
+>     }
+> 
+>     System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator()
+>         => GetEnumerator();
+> }
+> 
+> // ============================================
+> // 复杂对象过滤示例：Student
+> // ============================================
+> public record Student(string Name, int Score);
+> 
+> static void TestFilterIterator()
+> {
+>     // 基础测试：整数过滤
+>     var numbers = new List<int> { 1, 2, 3, 4, 5, 6 };
+>     var filtered = new FilterIterator<int>(numbers, x => x % 2 == 0);
+>     Console.Write("偶数过滤: ");
+>     foreach (var x in filtered) Console.Write($"{x} "); // → 2 4 6
+>     Console.WriteLine();
+> 
+>     // 复杂对象过滤：按成绩过滤
+>     var students = new List<Student>
+>     {
+>         new Student("Alice", 85),
+>         new Student("Bob", 72),
+>         new Student("Charlie", 91),
+>         new Student("Diana", 68),
+>         new Student("Eve", 95)
+>     };
+> 
+>     // 只保留成绩 ≥ 80 的学生
+>     var highScorers = new FilterIterator<Student>(students, s => s.Score >= 80);
+>     Console.WriteLine("高分学生 (≥80):");
+>     foreach (var s in highScorers)
+>         Console.WriteLine($"  {s.Name}: {s.Score}");
+>     // 输出: Alice:85, Charlie:91, Eve:95
+> 
+>     // 链式调用
+>     var excellent = new FilterIterator<Student>(
+>         new FilterIterator<Student>(students, s => s.Score >= 80),
+>         s => s.Name.StartsWith("A")
+>     );
+>     Console.Write("高分且名字A开头: ");
+>     foreach (var s in excellent) Console.WriteLine($"{s.Name}"); // → Alice
+> }
+> ```
+>
+> **懒加载验证（关键点）：**
+> - 如果源集合有 100 万元素且谓词只匹配前 5 个：遍历会在匹配 5 个后**继续**检查剩余元素（因为 `foreach` 遍历整个源），但元素是逐个 `yield` 的——不会一次性加载全部到内存
+> - 消费者如果 `break` 提前终止（如 `Take(5)`），后续元素不会被检查——这就是真正的懒加载
+> - `FilterIterator` 本质上是 LINQ `Where()` 的简化实现
+
+> [!tip]- 练习 3 参考答案：树的 BFS（广度优先）迭代器
+>   
+> ```csharp
+> // ============================================
+> // TreeNode<T> — 支持 DFS 和 BFS 遍历
+> // ============================================
+> public class TreeNode<T>
+> {
+>     public T Value { get; set; }
+>     public List<TreeNode<T>> Children { get; set; } = new();
+> 
+>     public TreeNode(T value) => Value = value;
+> 
+>     // 已有：DFS 迭代器（深度优先/先序）
+>     public IEnumerable<T> DfsTraversal()
+>     {
+>         yield return Value;
+>         foreach (var child in Children)
+>             foreach (var v in child.DfsTraversal())
+>                 yield return v;
+>     }
+> 
+>     // BFS 迭代器：使用 Queue 逐层输出
+>     public IEnumerable<T> BfsTraversal()
+>     {
+>         var queue = new Queue<TreeNode<T>>();
+>         queue.Enqueue(this);
+>         while (queue.Count > 0)
+>         {
+>             var node = queue.Dequeue();
+>             yield return node.Value;
+>             foreach (var child in node.Children)
+>                 queue.Enqueue(child);
+>         }
+>     }
+> 
+>     // BFS 按层输出：每层作为一个独立集合
+>     public IEnumerable<IReadOnlyList<T>> BfsLevelOrder()
+>     {
+>         var queue = new Queue<TreeNode<T>>();
+>         queue.Enqueue(this);
+>         while (queue.Count > 0)
+>         {
+>             var levelSize = queue.Count;
+>             var level = new List<T>(levelSize);
+>             for (int i = 0; i < levelSize; i++)
+>             {
+>                 var node = queue.Dequeue();
+>                 level.Add(node.Value);
+>                 foreach (var child in node.Children)
+>                     queue.Enqueue(child);
+>             }
+>             yield return level;
+>         }
+>     }
+> }
+> 
+> // ============================================
+> // 构建测试树并验证
+> // ============================================
+> static void TestBfsTraversal()
+> {
+>     // 构建树：
+>     //        A
+>     //      / | \
+>     //     B  C  D
+>     //    / \    |
+>     //   E   F   G
+>     var root = new TreeNode<char>('A');
+>     var b = new TreeNode<char>('B');
+>     var c = new TreeNode<char>('C');
+>     var d = new TreeNode<char>('D');
+>     var e = new TreeNode<char>('E');
+>     var f = new TreeNode<char>('F');
+>     var g = new TreeNode<char>('G');
+> 
+>     b.Children.Add(e);
+>     b.Children.Add(f);
+>     d.Children.Add(g);
+>     root.Children.Add(b);
+>     root.Children.Add(c);
+>     root.Children.Add(d);
+> 
+>     // 验证 DFS
+>     Console.Write("DFS (深度优先): ");
+>     foreach (var v in root.DfsTraversal()) Console.Write($"{v} ");
+>     Console.WriteLine(); // → A B E F C D G
+> 
+>     // 验证 BFS
+>     Console.Write("BFS (广度优先): ");
+>     foreach (var v in root.BfsTraversal()) Console.Write($"{v} ");
+>     Console.WriteLine(); // → A B C D E F G
+> 
+>     // 验证 BFS 按层
+>     Console.WriteLine("BFS 按层输出:");
+>     foreach (var level in root.BfsLevelOrder())
+>         Console.WriteLine($"  [{string.Join(",", level)}]");
+>     // 输出:
+>     //   [A]
+>     //   [B,C,D]
+>     //   [E,F,G]
+> }
+> ```
+>
+> **关键点说明：**
+> - `BfsTraversal()` 使用 FIFO 队列：出队一个节点 → `yield return` 其值 → 所有子节点入队
+> - `BfsLevelOrder()` 的关键技巧：在处理每层之前记录 `levelSize = queue.Count`，精确控制内层循环次数
+> - BFS 时间复杂度 O(n)，空间复杂度 O(w)（w = 树的最大宽度）
+> - DFS 递归实现的空间复杂度 O(h)（h = 树高），对深层树可能栈溢出；BFS 用队列无此问题
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [[11-composite|组合模式]] — 组合树 + 迭代器是天然搭配：迭代器提供统一的遍历接口，组合提供统一的节点结构

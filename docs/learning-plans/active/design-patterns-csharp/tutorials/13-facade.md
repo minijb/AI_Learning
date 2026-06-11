@@ -831,6 +831,355 @@ public interface ILogService { void Log(string message); }
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+>
+> ```csharp
+> using System;
+>
+> // ============================================
+> // 子系统实现
+> // ============================================
+> public class LightController : ILightController
+> {
+>     public void TurnOn(string room)
+>         => Console.WriteLine($"  [灯光] {room} — 开灯 💡");
+>     public void TurnOff(string room)
+>         => Console.WriteLine($"  [灯光] {room} — 关灯");
+>     public void Dim(string room, int pct)
+>         => Console.WriteLine($"  [灯光] {room} — 调光至 {pct}%");
+> }
+>
+> public class Thermostat : IThermostat
+> {
+>     private int _currentTemp = 22;
+>     private string _mode = "off";
+>
+>     public void SetTemperature(int celsius)
+>     {
+>         _currentTemp = celsius;
+>         Console.WriteLine($"  [恒温器] 设定温度 → {celsius}°C");
+>     }
+>     public int GetCurrentTemperature()
+>         => _currentTemp;
+>     public void SetMode(string mode)
+>     {
+>         _mode = mode;
+>         Console.WriteLine($"  [恒温器] 模式 → {mode}");
+>     }
+> }
+>
+> public class SecuritySystem : ISecuritySystem
+> {
+>     private bool _isArmed;
+>
+>     public void Arm()
+>     {
+>         _isArmed = true;
+>         Console.WriteLine("  [安防] 🔒 已布防");
+>     }
+>     public void Disarm(string pin)
+>     {
+>         if (pin != "1234")
+>             throw new UnauthorizedAccessException($"PIN 错误: {pin}");
+>         _isArmed = false;
+>         Console.WriteLine("  [安防] 🔓 已撤防");
+>     }
+>     public bool IsArmed()
+>         => _isArmed;
+> }
+>
+> // ============================================
+> // SmartHomeFacade
+> // ============================================
+> public class SmartHomeFacade
+> {
+>     private readonly ILightController _lights;
+>     private readonly IThermostat _thermostat;
+>     private readonly ISecuritySystem _security;
+>
+>     public SmartHomeFacade(
+>         ILightController lights,
+>         IThermostat thermostat,
+>         ISecuritySystem security)
+>     {
+>         _lights = lights;
+>         _thermostat = thermostat;
+>         _security = security;
+>     }
+>
+>     /// <summary>离家：关闭所有灯 → 节能温控 → 布防</summary>
+>     public void LeaveHome()
+>     {
+>         Console.WriteLine("\n═══ 离家模式 ═══");
+>         _lights.TurnOff("客厅");
+>         _lights.TurnOff("卧室");
+>         _lights.TurnOff("走廊");
+>         _lights.TurnOff("厨房");
+>         _thermostat.SetMode("heat");
+>         _thermostat.SetTemperature(18);
+>         _security.Arm();
+>         Console.WriteLine("═══ 已离家，安防已布防 ═══\n");
+>     }
+>
+>     /// <summary>回家：撤防 → 开客厅灯 → 舒适温控</summary>
+>     public void ArriveHome(string pin)
+>     {
+>         Console.WriteLine("\n═══ 回家模式 ═══");
+>         // PIN 验证失败时直接抛异常，不改变任何状态
+>         _security.Disarm(pin);
+>         _lights.TurnOn("客厅");
+>         _thermostat.SetMode("heat");
+>         _thermostat.SetTemperature(23);
+>         Console.WriteLine("═══ 欢迎回家！ ═══\n");
+>     }
+>
+>     /// <summary>晚安：走廊微光 → 关其余灯 → 睡眠温控 → 布防</summary>
+>     public void GoodNight()
+>     {
+>         Console.WriteLine("\n═══ 晚安模式 ═══");
+>         _lights.TurnOff("客厅");
+>         _lights.TurnOff("卧室");
+>         _lights.TurnOff("厨房");
+>         _lights.Dim("走廊", 20);   // 走廊保留 20% 微光
+>         _thermostat.SetMode("heat");
+>         _thermostat.SetTemperature(20);
+>         _security.Arm();
+>         Console.WriteLine("═══ 晚安！ ═══\n");
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> var smartHome = new SmartHomeFacade(
+>     new LightController(),
+>     new Thermostat(),
+>     new SecuritySystem());
+>
+> smartHome.LeaveHome();
+> smartHome.ArriveHome("1234");
+> smartHome.GoodNight();
+>
+> // 测试 PIN 错误
+> try
+> {
+>     smartHome.ArriveHome("0000");
+> }
+> catch (UnauthorizedAccessException ex)
+> {
+>     Console.WriteLine($"  ❌ 被拦截: {ex.Message}");
+> }
+> ```
+>
+> **关键点**：
+> - `ArriveHome` 中 `Disarm(pin)` 是第一步——PIN 错误时立即抛异常，不改变任何灯光/温控状态
+> - `GoodNight` 中走廊灯先调到 20% 再关闭其余灯，顺序不影响最终结果
+> - 外观只做编排，不持有状态
+
+> [!tip]- 练习 2 参考答案
+>
+> ```csharp
+> using System;
+>
+> // ============================================
+> // 服务实现
+> // ============================================
+> public class EmailService : IEmailService
+> {
+>     public void Send(string to, string body)
+>         => Console.WriteLine($"  [Email] 发往 {to}: {body}");
+> }
+>
+> public class SmsService : ISmsService
+> {
+>     public void Send(string phone, string body)
+>         => Console.WriteLine($"  [SMS] 发往 {phone}: {body}");
+> }
+>
+> public class PushNotificationService : IPushNotificationService
+> {
+>     public void Send(string deviceToken, string body)
+>         => Console.WriteLine($"  [Push] 发往设备 {deviceToken[..Math.Min(8, deviceToken.Length)]}...: {body}");
+> }
+>
+> public class ConsoleLogService : ILogService
+> {
+>     public void Log(string message)
+>         => Console.WriteLine($"  [Log] {DateTime.Now:HH:mm:ss} {message}");
+> }
+>
+> // ============================================
+> // NotificationFacade — 核心实现
+> // ============================================
+> public class NotificationFacade
+> {
+>     private readonly IEmailService? _email;
+>     private readonly ISmsService? _sms;
+>     private readonly IPushNotificationService? _push;
+>     private readonly ILogService _log;
+>
+>     public NotificationFacade(
+>         ILogService log,
+>         IEmailService? email = null,
+>         ISmsService? sms = null,
+>         IPushNotificationService? push = null)
+>     {
+>         _log = log;
+>         _email = email;
+>         _sms = sms;
+>         _push = push;
+>     }
+>
+>     /// <summary>按渠道掩码发送通知。全部不可用时抛异常。</summary>
+>     public void SendNotification(string message, NotificationChannel channels)
+>     {
+>         // 前置：检查是否至少有一个已配置的渠道可用
+>         bool anyConfigured = false;
+>
+>         if (channels.HasFlag(NotificationChannel.Email))
+>         {
+>             if (_email != null)
+>             {
+>                 _email.Send("user@example.com", message);
+>                 anyConfigured = true;
+>             }
+>             else
+>             {
+>                 _log.Log("Email 渠道未配置，跳过");
+>             }
+>         }
+>
+>         if (channels.HasFlag(NotificationChannel.SMS))
+>         {
+>             if (_sms != null)
+>             {
+>                 _sms.Send("+86-13800000000", message);
+>                 anyConfigured = true;
+>             }
+>             else
+>             {
+>                 _log.Log("SMS 渠道未配置，跳过");
+>             }
+>         }
+>
+>         if (channels.HasFlag(NotificationChannel.Push))
+>         {
+>             if (_push != null)
+>             {
+>                 _push.Send("device-token-abc123", message);
+>                 anyConfigured = true;
+>             }
+>             else
+>             {
+>                 _log.Log("Push 渠道未配置，跳过");
+>             }
+>         }
+>
+>         if (!anyConfigured)
+>             throw new InvalidOperationException(
+>                 $"所有请求的渠道 ({channels}) 均未配置或不可用");
+>
+>         _log.Log($"通知已发送 (渠道: {channels})");
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> // 场景 1：全部渠道可用
+> var fullFacade = new NotificationFacade(
+>     new ConsoleLogService(),
+>     new EmailService(), new SmsService(), new PushNotificationService());
+> fullFacade.SendNotification("系统维护通知", NotificationChannel.All);
+>
+> // 场景 2：仅 Email 可用
+> var emailOnly = new NotificationFacade(
+>     new ConsoleLogService(),
+>     email: new EmailService());
+> emailOnly.SendNotification("邮件通知", NotificationChannel.Email | NotificationChannel.SMS);
+> // SMS 未配置 → 记录警告，Email 正常发送，不抛异常
+>
+> // 场景 3：全部不可用（抛异常）
+> try
+> {
+>     var none = new NotificationFacade(new ConsoleLogService());
+>     none.SendNotification("无渠道通知", NotificationChannel.Email);
+> }
+> catch (InvalidOperationException ex)
+> {
+>     Console.WriteLine($"  ❌ {ex.Message}");
+> }
+> ```
+>
+> **关键点**：
+> - 构造函数使用可选参数，让调用方只传已实现的服务
+> - `?.` null-conditional operator 简洁处理可选服务：`_email?.Send(...)` 等价于 `if (_email != null) _email.Send(...)`
+> - `HasFlag` 判断 Flags enum——Email | SMS 两个标志同时设时，两次 `HasFlag` 都返回 `true`
+> - 渠道未配置时记录警告日志而非抛异常——外观容忍部分缺失，只在实际要用的渠道全空时才抛
+
+> [!tip]- 练习 3 参考答案（可选）
+>
+> > **1. 场景 A 用 Facade 更合适还是 Mediator？为什么？**
+> >
+> > Facade 更合适。场景 A 的需求是**单向简化**：Client 需要一键执行初始化音频+视频+打开聊天面板的固定序列。这是典型的"封装调用序列"——客户端不需要知道子系统间的交互顺序，只需一个 `StartMeeting()` 方法。Facade 正好提供这种面向客户端的简化入口，而 Mediator 关注的是子系统之间的多向通信，在场景 A 中属于过度设计。
+> >
+> > **2. 场景 B 用 Facade 更合适还是 Mediator？为什么？**
+> >
+> > Mediator 更合适。场景 B 是**多向实时交互**：`ScreenShareService` 的状态变化需要通知 `VideoStreamService` 调整码率——这是子系统之间的协作。如果让子系统互相引用，会形成网状依赖；Mediator 将交互逻辑集中在一个中介者对象中，各组件只依赖 Mediator，实现星型拓扑。Facade 不懂"当 A 发生某事时 B 该做什么"——那不是它的职责。
+> >
+> > **3. 如果同时存在 A 和 B，你会怎么设计？**
+> >
+> > Facade 和 Mediator **可以共存且互补**：
+> >
+> > ```csharp
+> > // Mediator 处理子系统间的交互
+> > public class MeetingMediator
+> > {
+> >     private readonly VideoStreamService _video;
+> >     private readonly AudioService _audio;
+> >     private readonly ScreenShareService _screenShare;
+> >
+> >     public MeetingMediator(/* 注入各子系统 */) { /* ... */ }
+> >
+> >     // 场景 B：屏幕共享开始时，通知视频降码率
+> >     public void OnScreenShareStarted()
+> >     {
+> >         _video.SetBitrate(VideoQuality.Low);
+> >     }
+> >     public void OnScreenShareStopped()
+> >     {
+> >         _video.SetBitrate(VideoQuality.High);
+> >     }
+> > }
+> >
+> > // Facade 提供客户端的统一入口
+> > public class MeetingFacade
+> > {
+> >     private readonly VideoStreamService _video;
+> >     private readonly AudioService _audio;
+> >     private readonly ChatService _chat;
+> >     private readonly MeetingMediator _mediator; // 复用 Mediator
+> >
+> >     public MeetingFacade(/* 注入子系统 + mediator */) { /* ... */ }
+> >
+> >     // 场景 A：一键开始会议
+> >     public void StartMeeting()
+> >     {
+> >         _audio.Initialize();
+> >         _video.Initialize();
+> >         _chat.OpenPanel();
+> >         // 子系统间的交互规则交给 Mediator，Facade 不关心
+> >     }
+> > }
+> > ```
+> >
+> > **总结**：Facade 面向上层（Client → Facade → Subsystem），Mediator 面向内部（ComponentA ↔ Mediator ↔ ComponentB）。两者职责正交，组合使用时 Facade 负责"启动序列"，Mediator 负责"运行时协调"。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [[08-structural-intro|结构型模式总览]] — 七种结构型模式的对比和选择指南

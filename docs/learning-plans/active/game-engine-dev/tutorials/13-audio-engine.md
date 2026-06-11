@@ -1900,6 +1900,427 @@ pitch = (v_sound + v_listener) / (v_sound - v_source)
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // streaming_audio.cpp —— 音频流式加载（环形缓冲区 + 后台解码线程）
+>
+> #define MINIAUDIO_IMPLEMENTATION
+> #include "miniaudio.h"
+> #include <thread>
+> #include <mutex>
+> #include <atomic>
+> #include <condition_variable>
+> #include <vector>
+>
+> // 环形缓冲区（无锁读/写，用原子变量保护位置）
+> template<typename T>
+> class RingBuffer {
+> public:
+>     RingBuffer(size_t capacity) : buffer_(capacity), capacity_(capacity) {}
+>
+>     // 写入数据（后台线程调用），返回实际写入数量
+>     size_t Write(const T* data, size_t count) {
+>         size_t available = capacity_ - Used();
+>         size_t toWrite = std::min(count, available);
+>         for (size_t i = 0; i < toWrite; ++i) {
+>             buffer_[writePos_] = data[i];
+>             writePos_ = (writePos_ + 1) % capacity_;
+>         }
+>         return toWrite;
+>     }
+>
+>     // 读取数据（音频回调调用），返回实际读取数量
+>     size_t Read(T* out, size_t count) {
+>         size_t available = Used();
+>         size_t toRead = std::min(count, available);
+>         for (size_t i = 0; i < toRead; ++i) {
+>             out[i] = buffer_[readPos_];
+>             readPos_ = (readPos_ + 1) % capacity_;
+>         }
+>         return toRead;
+>     }
+>
+>     size_t Used() const {
+>         if (writePos_ >= readPos_)
+>             return writePos_ - readPos_;
+>         return capacity_ - readPos_ + writePos_;
+>     }
+>
+>     size_t Free() const { return capacity_ - Used() - 1; }
+>
+> private:
+>     std::vector<T> buffer_;
+>     size_t capacity_;
+>     std::atomic<size_t> readPos_{0};
+>     std::atomic<size_t> writePos_{0};
+> };
+>
+> // 流式音频播放器
+> class StreamingAudioPlayer {
+> public:
+>     // 4秒 × 48000Hz × 2声道 = 384000帧的缓冲区
+>     static constexpr ma_uint32 SAMPLE_RATE = 48000;
+>     static constexpr ma_uint32 CHANNELS = 2;
+>     static constexpr float BUFFER_SECONDS = 4.0f;
+>     static constexpr size_t RING_SIZE =
+>         (size_t)(SAMPLE_RATE * CHANNELS * BUFFER_SECONDS);
+>
+>     bool Open(const char* filename) {
+>         // 初始化解码器
+>         ma_decoder_config decCfg = ma_decoder_config_init(
+>             ma_format_f32, CHANNELS, SAMPLE_RATE);
+>         if (ma_decoder_init_file(filename, &decCfg, &decoder_)
+>             != MA_SUCCESS) {
+>             printf("Failed to open: %s\n", filename);
+>             return false;
+>         }
+>
+>         ringBuffer_ = std::make_unique<RingBuffer<float>>(RING_SIZE);
+>         running_ = true;
+>
+>         // 启动后台解码线程
+>         decodeThread_ = std::thread([this]() { DecodeLoop(); });
+>
+>         // 启动音频设备
+>         ma_device_config devCfg = ma_device_config_init(
+>             ma_device_type_playback);
+>         devCfg.playback.format   = ma_format_f32;
+>         devCfg.playback.channels = CHANNELS;
+>         devCfg.sampleRate        = SAMPLE_RATE;
+>         devCfg.dataCallback      = AudioCallback;
+>         devCfg.pUserData         = this;
+>
+>         if (ma_device_init(NULL, &devCfg, &device_)
+>             != MA_SUCCESS) {
+>             running_ = false;
+>             return false;
+>         }
+>         ma_device_start(&device_);
+>         return true;
+>     }
+>
+>     void Close() {
+>         running_ = false;
+>         if (decodeThread_.joinable()) decodeThread_.join();
+>         ma_device_uninit(&device_);
+>         ma_decoder_uninit(&decoder_);
+>     }
+>
+> private:
+>     // 后台解码线程：持续从OGG文件解码填充环形缓冲区
+>     void DecodeLoop() {
+>         // 每次解码的帧数（约50ms的数据）
+>         const ma_uint32 CHUNK_FRAMES = SAMPLE_RATE / 20;
+>         std::vector<float> temp(CHUNK_FRAMES * CHANNELS);
+>
+>         while (running_) {
+>             // 如果缓冲区快满了，短暂休眠
+>             if (ringBuffer_->Free() < CHUNK_FRAMES * CHANNELS / 2) {
+>                 std::this_thread::sleep_for(
+>                     std::chrono::milliseconds(5));
+>                 continue;
+>             }
+>
+>             // 解码一块数据
+>             ma_uint64 framesRead = 0;
+>             ma_result result = ma_decoder_read_pcm_frames(
+>                 &decoder_, temp.data(), CHUNK_FRAMES, &framesRead);
+>
+>             if (framesRead > 0) {
+>                 ringBuffer_->Write(temp.data(),
+>                     (size_t)(framesRead * CHANNELS));
+>             }
+>
+>             // 文件播放完毕
+>             if (result == MA_AT_END) break;
+>         }
+>     }
+>
+>     // 音频回调：从环形缓冲区读取数据输出到声卡
+>     static void AudioCallback(ma_device* pDevice, void* pOutput,
+>                                const void*, ma_uint32 frameCount) {
+>         auto* self = (StreamingAudioPlayer*)pDevice->pUserData;
+>         float* out = (float*)pOutput;
+>         size_t needed = (size_t)(frameCount * CHANNELS);
+>         size_t read = self->ringBuffer_->Read(out, needed);
+>
+>         // 欠载处理：环形缓冲区数据不足，输出静音并警告
+>         if (read < needed) {
+>             // 剩余部分填充静音
+>             for (size_t i = read; i < needed; ++i) out[i] = 0.0f;
+>             self->underrunCount_++;
+>             if (self->underrunCount_ % 100 == 0) {
+>                 printf("WARNING: Audio underrun #%d "
+>                        "(read %zu of %zu samples)\n",
+>                        (int)self->underrunCount_, read, needed);
+>             }
+>         }
+>         (void)pInput;
+>     }
+>
+>     ma_decoder decoder_;
+>     ma_device device_;
+>     std::unique_ptr<RingBuffer<float>> ringBuffer_;
+>     std::thread decodeThread_;
+>     std::atomic<bool> running_{false};
+>     std::atomic<size_t> underrunCount_{0};
+> };
+> ```
+>
+> **核心思路**：流式加载避免了将整个音频文件全部解码到内存中。环形缓冲区在音频回调和后台线程之间扮演生产者-消费者角色：后台线程写入解码后的PCM数据，音频回调读取并输出。`std::atomic` 读写位置保证了无锁的线程安全——音频回调(实时线程)不能阻塞，所以不能使用 mutex。欠载处理在数据不足时填充静音，避免声卡读到未初始化内存产生爆音。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // dsp_effects.hpp —— 数字信号处理效果器
+>
+> #include <vector>
+> #include <cmath>
+>
+> // 一阶低通滤波器（IIR）
+> class LowPassFilter {
+> public:
+>     void SetCutoff(float cutoffHz, float sampleRate = 48000.0f) {
+>         // RC = 1 / (2*pi*cutoff)
+>         float RC = 1.0f / (2.0f * 3.14159265f * cutoffHz);
+>         float dt = 1.0f / sampleRate;
+>         alpha_ = dt / (RC + dt);  // 平滑系数
+>     }
+>
+>     float Process(float input) {
+>         // y[n] = y[n-1] + alpha * (x[n] - y[n-1])
+>         output_ = output_ + alpha_ * (input - output_);
+>         return output_;
+>     }
+>
+> private:
+>     float alpha_ = 1.0f;  // 默认直通
+>     float output_ = 0.0f;
+> };
+>
+> // 延迟线（echo 效果）
+> class DelayLine {
+> public:
+>     void Initialize(float delayMs, float sampleRate = 48000.0f,
+>                     float feedback = 0.5f, float wetMix = 0.3f) {
+>         size_ = (size_t)(delayMs / 1000.0f * sampleRate);
+>         buffer_.resize(size_, 0.0f);
+>         feedback_ = feedback;
+>         wetMix_ = wetMix;
+>         writePos_ = 0;
+>     }
+>
+>     float Process(float input) {
+>         float delayed = buffer_[writePos_];
+>         // 当前输入 + 延迟反馈写入缓冲区（下次回读）
+>         buffer_[writePos_] = input + delayed * feedback_;
+>         writePos_ = (writePos_ + 1) % size_;
+>         // 干湿混合
+>         return input * (1.0f - wetMix_) + delayed * wetMix_;
+>     }
+>
+> private:
+>     std::vector<float> buffer_;
+>     size_t size_;
+>     size_t writePos_;
+>     float feedback_;   // 反馈系数（决定回声衰减速度）
+>     float wetMix_;     // 湿声比例
+> };
+>
+> // 音量渐变
+> class Fader {
+> public:
+>     void FadeIn(float durationSec, float sampleRate = 48000.0f) {
+>         targetVolume_ = 1.0f;
+>         steps_ = (size_t)(durationSec * sampleRate);
+>         step_ = 0;
+>         fading_ = true;
+>     }
+>
+>     void FadeOut(float durationSec, float sampleRate = 48000.0f) {
+>         targetVolume_ = 0.0f;
+>         steps_ = (size_t)(durationSec * sampleRate);
+>         step_ = 0;
+>         fading_ = true;
+>     }
+>
+>     // 每采样点返回当前音量系数
+>     float GetVolume() {
+>         if (!fading_) return currentVolume_;
+>         step_++;
+>         if (step_ >= steps_) {
+>             fading_ = false;
+>             currentVolume_ = targetVolume_;
+>             return currentVolume_;
+>         }
+>         float t = (float)step_ / (float)steps_;
+>         // 使用指数曲线实现更自然的音量变化
+>         currentVolume_ = startVolume_ +
+>             (targetVolume_ - startVolume_) * (1.0f - std::exp(-t * 5.0f));
+>         return currentVolume_;
+>     }
+>
+>     bool IsFading() const { return fading_; }
+>
+> private:
+>     float startVolume_ = 0.0f;
+>     float currentVolume_ = 0.0f;
+>     float targetVolume_ = 0.0f;
+>     size_t steps_ = 0;
+>     size_t step_ = 0;
+>     bool fading_ = false;
+> };
+>
+> // 增强版 Voice 结构（集成效果器）
+> struct EffectVoice : public Voice {
+>     LowPassFilter lowPass;
+>     bool lowPassEnabled = false;
+> };
+>
+> // 增强版混音器回调
+> void MixerCallbackWithEffects(ma_device* pDevice, void* pOutput,
+>                                const void*, ma_uint32 frameCount) {
+>     auto* mixer = (MixerContext*)pDevice->pUserData;
+>     float* out = (float*)pOutput;
+>
+>     for (ma_uint32 frame = 0; frame < frameCount; ++frame) {
+>         float left = 0.0f, right = 0.0f;
+>
+>         for (int v = 0; v < MAX_VOICES; ++v) {
+>             EffectVoice& voice = mixer->voices[v];
+>             if (!voice.active) continue;
+>
+>             // 读取采样点
+>             size_t pos = voice.position * 2;  // interleaved立体声
+>             float sampleL = voice.pcmData[pos];
+>             float sampleR = voice.pcmData[pos + 1];
+>
+>             // 应用低通滤波（每个声道独立）
+>             if (voice.lowPassEnabled) {
+>                 sampleL = voice.lowPass.Process(sampleL);
+>                 sampleR = voice.lowPass.Process(sampleR);
+>             }
+>
+>             // 声像 + 音量
+>             float leftGain  = voice.volume
+>                 * (1.0f - voice.pan) * 0.5f;
+>             float rightGain = voice.volume
+>                 * (1.0f + voice.pan) * 0.5f;
+>
+>             left  += sampleL * leftGain;
+>             right += sampleR * rightGain;
+>
+>             voice.position++;
+>             if (voice.position >= voice.totalFrames) {
+>                 if (voice.looping) voice.position = 0;
+>                 else voice.active = false;
+>             }
+>         }
+>
+>         // Master总线：延迟效果（echo） + 软裁剪
+>         left  = mixer->delayLine.Process(left);
+>         right = mixer->delayLine.Process(right);
+>
+>         // 混音溢出保护：tanh 软裁剪
+>         out[frame * 2]     = std::tanh(left);
+>         out[frame * 2 + 1] = std::tanh(right);
+>     }
+> }
+> ```
+>
+> **核心思路**：低通滤波器使用一阶IIR实现，`alpha = dt/(RC+dt)`平滑系数控制截止频率——alpha越小截止频率越低。延迟线通过环形缓冲区存储历史采样，每个新采样与feedback系数相乘后写回缓冲区，下一次读取时产生回声；wetMix控制原始声与回声的混合比例。Fade使用指数曲线而非线性，因为人耳对音量感知是对数的，线性淡入会听起来不均匀。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // doppler_effect.cpp —— 多普勒效应实现
+>
+> struct AudioSource3D {
+>     float posX, posY, posZ;
+>     float velX, velY, velZ;     // 速度向量
+>     float pitch = 1.0f;         // 当前音高倍数
+> };
+>
+> struct AudioListener {
+>     float posX, posY, posZ;
+>     float velX, velY, velZ;     // 速度向量
+> };
+>
+> // 多普勒效应计算
+> float ComputeDopplerPitch(const AudioSource3D& source,
+>                           const AudioListener& listener) {
+>     const float SOUND_SPEED = 343.0f;  // 声速 m/s
+>
+>     // 声源到听者的方向向量
+>     float dx = listener.posX - source.posX;
+>     float dy = listener.posY - source.posY;
+>     float dz = listener.posZ - source.posZ;
+>     float dist = std::sqrt(dx*dx + dy*dy + dz*dz);
+>     if (dist < 1e-6f) return 1.0f;  // 重合时无多普勒效应
+>
+>     // 单位方向向量（从声源指向听者）
+>     float nx = dx / dist, ny = dy / dist, nz = dz / dist;
+>
+>     // 听者在声源方向上的速度分量（投影）
+>     float v_listener = listener.velX * nx
+>                      + listener.velY * ny
+>                      + listener.velZ * nz;
+>
+>     // 声源在听者方向上的速度分量（相反方向）
+>     float v_source = source.velX * nx
+>                    + source.velY * ny
+>                    + source.velZ * nz;
+>
+>     // 多普勒公式（注意符号约定）
+>     // pitch = (v_sound + v_listener) / (v_sound - v_source)
+>     // 声源靠近听者 → v_source > 0 → pitch > 1 → 音高变高
+>     float pitch = (SOUND_SPEED + v_listener)
+>                 / (SOUND_SPEED - v_source);
+>
+>     // 钳制避免极端值
+>     return std::max(0.5f, std::min(2.0f, pitch));
+> }
+>
+> // 多普勒测试场景：声源以不同速度掠过听者
+> void TestDoppler() {
+>     AudioListener listener = {0, 0, 0, 0, 0, 0};  // 静止听者在原点
+>
+>     printf("Testing Doppler Effect:\n");
+>     printf("Format: sourceX, v_source, pitch\n");
+>     printf("--------------------------------\n");
+>
+>     // 声源从远处靠近然后远离（采样位置和速度）
+>     float testCases[][4] = {
+>         // posX, velX(正=远离, 负=靠近), posY, velY
+>         {-100, 20, 0, 0},  // 以20m/s靠近
+>         { -50, 20, 0, 0},  // 继续靠近
+>         {   0, 20, 0, 0},  // 正好经过听者
+>         {  50, 20, 0, 0},  // 开始远离
+>         { 100, 20, 0, 0},  // 以20m/s远离
+>         {-100, 50, 0, 0},  // 以50m/s靠近（更快）
+>         {  50, 50, 0, 0},  // 以50m/s远离
+>     };
+>
+>     for (auto& tc : testCases) {
+>         AudioSource3D source = {tc[0], tc[2], tc[3],
+>                                  tc[1], 0, 0};
+>         float pitch = ComputeDopplerPitch(source, listener);
+>         printf("posX=%.0f v=%.0f m/s → pitch=%.3f\n",
+>                tc[0], tc[1], pitch);
+>     }
+> }
+> // 预期输出：
+> // posX=-100 v=20 m/s → pitch: 声源靠近, pitch > 1.0 (音高升高)
+> // posX=0   v=20 m/s → pitch = 1.0 (径向速度为零, 无多普勒)
+> // posX=100 v=20 m/s → pitch: 声源远离, pitch < 1.0 (音高降低)
+> // posX=-100 v=50 m/s → pitch 更高 (更快靠近)
+> ```
+>
+> **核心思路**：多普勒效应的关键是速度的**径向分量**（沿声源-听者连线方向的分量），而非总速度。垂直于连线的运动不产生多普勒频移。`pitch = (v_sound + v_listener) / (v_sound - v_source)`中分子分母的符号约定：声源靠近听者→`v_source`为正→分母变小→pitch>1→音高升高（符合常见体验：救护车靠近时声音变尖）。实际应用中，`pitch`值会传递给音频引擎改变播放速率。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **miniaudio 官方文档**: https://miniaud.io/docs/manual/index.html — 详细的 API 参考和教程

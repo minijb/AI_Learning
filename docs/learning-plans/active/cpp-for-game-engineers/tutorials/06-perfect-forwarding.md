@@ -537,6 +537,312 @@ auto bad_lambda_capture(Args&&... args) {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：识别转发 Bug
+> ```cpp
+> #include <iostream>
+> #include <utility>
+> #include <string>
+>
+> // 模拟目标函数
+> void log(const char* msg) { std::cout << msg << "\n"; }
+> void target(int& x)  { std::cout << "  target(lvalue): " << x << "\n"; }
+> void target(int&& x) { std::cout << "  target(rvalue): " << x << "\n"; }
+> void sink1(int& x)   { std::cout << "  sink1(lvalue): " << x << "\n"; x = 0; }
+> void sink1(int&& x)  { std::cout << "  sink1(rvalue): " << x << "\n"; }
+> void sink2(int& x)   { std::cout << "  sink2(lvalue): " << x << "\n"; }
+> void sink2(int&& x)  { std::cout << "  sink2(rvalue): " << x << "\n"; }
+> void use(int x)      { std::cout << "  use: " << x << "\n"; }
+>
+> // ===== 修复后的版本 =====
+>
+> // Bug 1 修复：用 std::forward 替代 std::move
+> // 错误后果：std::move 无条件将参数转为右值。
+> //   调用 bad_wrapper(x) 时 x 被移动走，调用方之后访问 x 是未定义行为。
+> template<typename T>
+> void bad_wrapper(T&& arg) {      // 修复后改名为 fixed_wrapper
+>     log("before");
+>     target(std::forward<T>(arg)); // 正确：保留值类别
+>     log("after");
+> }
+>
+> // Bug 2 修复：不能对同一个参数做两次 forward
+> // 错误后果：第一次 forward 可能已经将 arg 移动走，
+> //   第二次 forward 对已移动的对象再次操作 —— 未定义行为。
+> // 修复：只 forward 给最后一个消费者，或者对前一个消费者传 const&。
+> template<typename T>
+> void double_forward(T&& arg) {       // 修复后改名为 fixed_double_forward
+>     sink1(static_cast<const std::remove_reference_t<T>&>(arg)); // 只读观察
+>     sink2(std::forward<T>(arg));      // 最后真正转发（可能是移动）
+> }
+>
+> // Bug 3 修复：lambda 按值捕获会拷贝，改用 init-capture + forward
+> // 错误后果：args 被拷贝到 lambda 闭包中，丢失移动语义，
+> //   move-only 类型完全无法编译。
+> template<typename... Args>
+> auto bad_lambda_capture(Args&&... args) { // 修复后改名为 fixed_lambda_capture
+>     return [... args = std::forward<Args>(args)]() mutable {
+>         use(args...);
+>     };
+> }
+>
+> // ===== 验证 =====
+> int main() {
+>     int x = 5;
+>     std::cout << "=== Bug 1 fix test ===\n";
+>     std::cout << "Before wrapper, x = " << x << "\n";
+>     bad_wrapper(x);   // 修复后 x 保持不变
+>     std::cout << "After wrapper,  x = " << x << " (should be 5)\n\n";
+>
+>     std::cout << "=== Bug 2 fix test ===\n";
+>     int y = 10;
+>     double_forward(y);
+>     double_forward(42);
+>     std::cout << "\n";
+>
+>     std::cout << "=== Bug 3 fix test ===\n";
+>     std::string msg = "hello";
+>     auto fn = bad_lambda_capture(std::string("world")); // 右值被移动捕获
+>     fn();
+>     auto fn2 = bad_lambda_capture(msg);                  // 左值被拷贝捕获
+>     fn2();
+>     std::cout << "msg after capture: " << msg << " (should be 'hello')\n";
+>
+>     return 0;
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：泛型工厂函数
+> ```cpp
+> #include <iostream>
+> #include <memory>
+> #include <utility>
+> #include <cstdlib>
+> #include <new>
+>
+> // 模拟一个简单的自定义分配器接口
+> struct SimpleAllocator {
+>     void* allocate(size_t size) {
+>         void* p = std::aligned_alloc(alignof(std::max_align_t), size);
+>         std::cout << "  [Alloc] " << size << "B at " << p << "\n";
+>         if (!p) throw std::bad_alloc();
+>         return p;
+>     }
+>     void deallocate(void* p) {
+>         std::cout << "  [Free]  " << p << "\n";
+>         std::free(p);
+>     }
+> };
+>
+> // ============ 自定义 RAII 句柄 ============
+> template<typename T, typename Allocator>
+> class ResourceHandle {
+> public:
+>     ResourceHandle(T* ptr, Allocator* alloc)
+>         : ptr_(ptr), alloc_(alloc) {}
+>
+>     ~ResourceHandle() {
+>         if (ptr_) {
+>             ptr_->~T();                 // 调用析构函数
+>             alloc_->deallocate(ptr_);   // 归还内存
+>         }
+>     }
+>
+>     // 禁止拷贝（独占所有权）
+>     ResourceHandle(const ResourceHandle&) = delete;
+>     ResourceHandle& operator=(const ResourceHandle&) = delete;
+>
+>     // 允许移动
+>     ResourceHandle(ResourceHandle&& other) noexcept
+>         : ptr_(other.ptr_), alloc_(other.alloc_) {
+>         other.ptr_ = nullptr;
+>     }
+>     ResourceHandle& operator=(ResourceHandle&& other) noexcept {
+>         if (this != &other) {
+>             if (ptr_) { ptr_->~T(); alloc_->deallocate(ptr_); }
+>             ptr_ = other.ptr_;
+>             alloc_ = other.alloc_;
+>             other.ptr_ = nullptr;
+>         }
+>         return *this;
+>     }
+>
+>     T* get()        { return ptr_; }
+>     T* operator->() { return ptr_; }
+>     T& operator*()  { return *ptr_; }
+>
+> private:
+>     T* ptr_;
+>     Allocator* alloc_;
+> };
+>
+> // ============ 核心工厂函数 ============
+> template<typename Resource, typename Allocator, typename... Args>
+> auto make_engine_resource(Allocator& alloc, Args&&... args)
+>     -> ResourceHandle<Resource, Allocator>
+> {
+>     // 1. 分配原始内存
+>     void* memory = alloc.allocate(sizeof(Resource));
+>
+>     Resource* obj = nullptr;
+>     try {
+>         // 2. placement new + 完美转发构造
+>         obj = ::new (memory) Resource(std::forward<Args>(args)...);
+>     } catch (...) {
+>         // 3. 构造失败 → 归还内存（析构函数尚未调用）
+>         alloc.deallocate(memory);
+>         throw;
+>     }
+>
+>     // 4. 返回 RAII 句柄
+>     return ResourceHandle<Resource, Allocator>(obj, &alloc);
+> }
+>
+> // ============ 测试用类型 ============
+> struct Texture {
+>     int id;
+>     std::string name;
+>
+>     Texture(int i, std::string n) : id(i), name(std::move(n)) {
+>         std::cout << "  Texture(" << id << ", " << name << ") constructed\n";
+>     }
+>     ~Texture() {
+>         std::cout << "  Texture(" << id << ", " << name << ") destroyed\n";
+>     }
+> };
+>
+> // move-only 参数类型
+> struct GpuBuffer {
+>     std::unique_ptr<float[]> data;
+>     size_t size;
+>
+>     GpuBuffer(std::unique_ptr<float[]> d, size_t s)
+>         : data(std::move(d)), size(s) {
+>         std::cout << "  GpuBuffer(" << size << " floats) constructed\n";
+>     }
+>     ~GpuBuffer() {
+>         std::cout << "  GpuBuffer destroyed\n";
+>     }
+> };
+>
+> int main() {
+>     SimpleAllocator alloc;
+>
+>     std::cout << "=== Test 1: 基本构造 ===\n";
+>     {
+>         auto tex = make_engine_resource<Texture>(alloc, 42, std::string("albedo"));
+>         std::cout << "  Texture id = " << tex->id << "\n";
+>     }
+>
+>     std::cout << "\n=== Test 2: move-only 参数 ===\n";
+>     {
+>         auto data = std::make_unique<float[]>(1024);
+>         data[0] = 3.14f;
+>         auto buf = make_engine_resource<GpuBuffer>(alloc, std::move(data), 1024);
+>         std::cout << "  Buffer size = " << buf->size << "\n";
+>     }
+>
+>     std::cout << "\n=== Test 3: 移动句柄 ===\n";
+>     {
+>         auto tex1 = make_engine_resource<Texture>(alloc, 1, std::string("diffuse"));
+>         auto tex2 = std::move(tex1);  // tex1 不再持有资源
+>         std::cout << "  tex1 is " << (tex1.get() ? "non-null" : "null") << "\n";
+>     }
+>
+>     std::cout << "\n=== All handles destroyed ===\n";
+>     return 0;
+> }
+> ```
+
+> [!info]- 思考题 3 参考答案：转发性能计数器
+> ```cpp
+> #include <iostream>
+> #include <utility>
+> #include <type_traits>
+>
+> template<typename F>
+> class CountCopies {
+> public:
+>     size_t total_forwards = 0;  // 总转发次数
+>     size_t copies         = 0;  // 导致拷贝的次数
+>     size_t moves          = 0;  // 导致移动的次数
+>
+>     explicit CountCopies(F&& f) : f_(std::forward<F>(f)) {}
+>
+>     // 核心：在每个参数的转发点做编译期检测
+>     template<typename... Args>
+>     decltype(auto) operator()(Args&&... args) {
+>         count_forwards(args...);
+>         return f_(std::forward<Args>(args)...);
+>     }
+>
+>     void report() const {
+>         std::cout << "\n========== Forward Stats ==========\n";
+>         std::cout << "Total forwards: " << total_forwards << "\n";
+>         std::cout << "Copies (lvalue): " << copies << "\n";
+>         std::cout << "Moves  (rvalue): " << moves << "\n";
+>     }
+>
+> private:
+>     F f_;
+>
+>     // 递归展开参数包，对每个参数做编译期判断
+>     template<typename T, typename... Rest>
+>     void count_forwards(T&& arg, Rest&&... rest) {
+>         total_forwards++;
+>         // 关键：用 if constexpr 在编译期区分左值/右值
+>         if constexpr (std::is_lvalue_reference_v<T&&>) {
+>             // T 被推导为 T& → arg 是左值 → forward 产生拷贝
+>             copies++;
+>         } else {
+>             // T 被推导为 T → arg 是右值 → forward 产生移动
+>             moves++;
+>         }
+>         count_forwards(std::forward<Rest>(rest)...);
+>     }
+>
+>     void count_forwards() {} // 递归终止
+> };
+>
+> // 工厂函数：推导 F 的类型
+> template<typename F>
+> auto count_copies(F&& f) {
+>     return CountCopies<std::decay_t<F>>(std::forward<F>(f));
+> }
+>
+> // ===== 演示 =====
+> struct Heavy {
+>     int data[100];
+>     Heavy() { std::cout << "  Heavy() default\n"; }
+>     Heavy(const Heavy&) { std::cout << "  Heavy(copy)\n"; }
+>     Heavy(Heavy&&)      { std::cout << "  Heavy(move)\n"; }
+> };
+>
+> int main() {
+>     auto fn = [](int a, const std::string& b, Heavy&& c, double d) {
+>         std::cout << "  fn called: a=" << a << " b=" << b << " d=" << d << "\n";
+>     };
+>
+>     auto wrapped = count_copies(fn);
+>
+>     int x = 42;
+>     std::string s = "test";
+>     Heavy h;
+>
+>     // 转发：x 和 s 是左值 → 拷贝；std::move(h) 是右值 → 移动；3.14 右值 → 移动
+>     wrapped(x, s, std::move(h), 3.14);
+>     wrapped.report();
+>     // 预期：total_forwards=4, copies=2 (x, s), moves=2 (h&&, 3.14)
+>
+>     return 0;
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **深度探索**: `docs/deep-dives/cpp-perfect-forwarding.md` — 796 行的完整分析，涵盖所有 7 层

@@ -166,6 +166,78 @@ OMP 会在 TUI 中逐步展示其操作:
 仔细观察 OMP 处理你的 prompt 时调用了哪些工具。在 TUI 中可以看到工具调用的展开/折叠。记录下 OMP 处理"列出项目结构并分析"这个请求时使用的工具序列。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在 OMP 中依次执行：
+>
+> ```text
+> 1. "列出项目的目录结构"          → OMP 使用 read . 浏览目录
+> 2. "找出所有配置文件"             → OMP 使用 find **/config.* 等 glob
+> 3. "统计各语言的代码行数"         → OMP 使用 bash: wc -l 或 find + 遍历
+> ```
+>
+> **预期行为：**
+> - 第一步 OMP 会调用 `read <项目根目录>`，返回按 mtime 排序的目录树
+> - 第二步 OMP 会用 `find` 搜索 `*.config.*`、`.env*`、`*.json`、`*.yaml` 等模式
+> - 第三步 OMP 可能用 `bash` 执行 `find . -name "*.ts" | xargs wc -l | tail -1` 或类似命令统计行数
+>
+> **关键观察：** OMP 会自动分解复杂请求为多个工具调用，不需要你手动指定使用哪个工具。
+
+> [!tip]- 练习 2 参考答案
+> 在 OMP 中输入：
+>
+> ```text
+> 在 src/ 下创建 healthcheck.ts，实现一个简单的 HTTP 健康检查端点，
+> 使用 Node.js 内置 http 模块，监听 /health 路径，返回 { status: "ok" }
+> ```
+>
+> OMP 的执行流程：
+> 1. 检查 `src/` 目录是否存在（`read src/`）
+> 2. 使用 `write src/healthcheck.ts` 创建文件，写入完整实现
+> 3. 可能追加启动说明或检查 TypeScript 配置
+>
+> **参考实现：**
+>
+> ```typescript
+> import http from "node:http";
+>
+> const server = http.createServer((req, res) => {
+>   if (req.url === "/health") {
+>     res.writeHead(200, { "Content-Type": "application/json" });
+>     res.end(JSON.stringify({ status: "ok", uptime: process.uptime() }));
+>   } else {
+>     res.writeHead(404);
+>     res.end("Not Found");
+>   }
+> });
+>
+> server.listen(3000, () => {
+>   console.log("Health check server on :3000");
+> });
+> ```
+>
+> 验证方法：启动后 `curl http://localhost:3000/health`，应返回 `{"status":"ok",...}`。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 当 OMP 处理"列出项目结构并分析"时，典型的工具调用序列：
+>
+> ```text
+> 1. read .                          ← 获取根目录列表
+> 2. read package.json               ← 读取构建配置（了解技术栈）
+> 3. read src/                       ← 浏览源码目录
+> 4. read src/index.ts:1-30          ← 读取入口文件开头（理解程序入口）
+> 5. read src/<关键目录>/             ← 逐模块深入
+> ```
+>
+> **关键观察：**
+> - OMP 遵循"先读目录 → 读关键文件 → 深入细节"的层次策略
+> - 每个 `read` 调用都带有合适的选择器——不会无选择器地通读大文件
+> - 你可以在 TUI 中点击每个工具调用展开/折叠，查看参数和返回值
+> - 这个序列不是硬编码的——是 LLM 根据项目结构和 prompt 动态决定的
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

@@ -1284,6 +1284,221 @@ RenderSystem (R: Position, Mesh)
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 在 World 类中添加 RemoveComponent 方法
+> template<typename T>
+> void World::RemoveComponent(Entity entity) {
+>     uint32_t cid = ComponentId<T>();
+>     Archetype* oldArchetype = entityArchetype_[entity];
+>     if (!oldArchetype) return;
+>
+>     // 构建不包含目标组件的新组件 ID 列表
+>     std::vector<uint32_t> oldIds = oldArchetype->GetComponentIds();
+>     std::vector<uint32_t> newIds;
+>     for (uint32_t id : oldIds) {
+>         if (id != cid) newIds.push_back(id);
+>     }
+>
+>     // 查找或创建目标 Archetype
+>     Archetype* newArchetype = FindOrCreateArchetype(newIds);
+>     for (uint32_t id : newIds) {
+>         newArchetype->RegisterComponent(componentMeta_[id]);
+>     }
+>
+>     // 在新 Archetype 中创建位置
+>     size_t newIndex = newArchetype->CreateEntity(entity);
+>
+>     // 复制保留的组件数据（除了目标组件 T 之外）
+>     size_t oldIndex = entityIndex_[entity];
+>     for (const auto& layout : oldArchetype->GetLayouts()) {
+>         if (layout.componentId == cid) continue; // 跳过被删除的组件
+>         // 通过 metadata 执行类型擦除的 memcpy
+>         auto& meta = componentMeta_[layout.componentId];
+>         // 读取旧数据
+>         size_t oldChunk = oldIndex / Archetype::CHUNK_CAPACITY;
+>         size_t oldLocal = oldIndex % Archetype::CHUNK_CAPACITY;
+>         uint8_t* oldPtr = oldArchetype->GetChunks()[oldChunk].data.data()
+>                           + layout.offset + oldLocal * layout.size;
+>         // 写入新位置
+>         size_t newChunk = newIndex / Archetype::CHUNK_CAPACITY;
+>         size_t newLocal = newIndex % Archetype::CHUNK_CAPACITY;
+>         uint8_t* newPtr = newArchetype->GetChunks()[newChunk].data.data()
+>                           + layout.offset + newLocal * layout.size;
+>         std::memcpy(newPtr, oldPtr, meta.size);
+>     }
+>
+>     // 从旧 Archetype 移除实体（标记空位或紧凑化）
+>     RemoveEntityFromArchetype(oldArchetype, oldIndex);
+>
+>     // 更新映射
+>     entityArchetype_[entity] = newArchetype;
+>     entityIndex_[entity] = newIndex;
+> }
+> ```
+>
+> **思考题：为什么 Archetype-based ECS 中删除组件比 Sparse-set ECS 更昂贵？**  
+> 因为 Archetype ECS 在删除组件时需要实体在 Archetype 间**迁移**——将保留的组件数据从旧 Archetype 复制到新 Archetype，这涉及内存复制操作。而 Sparse-set ECS 只需从对应的密集数组中移除该组件条目（O(1) swap-and-pop），实体仍留在原位。Archetype 的优势在于批量查询时的缓存局部性；Sparse-set 的优势在于动态添加/删除组件的速度。这是两种方案的核心权衡。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 事件组件：纯数据结构
+> struct DamageEvent {
+>     float amount;
+>     Entity source;
+> };
+> struct FireDamageEvent {
+>     float amount;
+>     float duration;
+> };
+> struct HealEvent {
+>     float amount;
+>     Entity source;
+> };
+>
+> // 使用 ECS World 管理事件（事件即组件）
+> class EventECS {
+> public:
+>     // 向实体发送伤害事件——为实体短暂添加 DamageEvent 组件
+>     void EmitDamage(Entity target, float amount, Entity source) {
+>         DamageEvent evt{amount, source};
+>         world_.AddComponent(target, evt);
+>     }
+>
+>     void EmitFireDamage(Entity target, float amount, float duration) {
+>         FireDamageEvent evt{amount, duration};
+>         world_.AddComponent(target, evt);
+>     }
+>
+>     // 每帧结束后消费所有事件组件
+>     void ConsumeAllEvents() {
+>         // 收集所有持有事件的实体
+>         std::vector<Entity> eventEntities;
+>         for (auto& [entity, archetype] : world_.entityArchetype_) {
+>             if (!archetype) continue;
+>             if (archetype->HasComponents({ComponentId<DamageEvent>()}) ||
+>                 archetype->HasComponents({ComponentId<FireDamageEvent>()}) ||
+>                 archetype->HasComponents({ComponentId<HealEvent>()})) {
+>                 eventEntities.push_back(entity);
+>             }
+>         }
+>
+>         for (Entity e : eventEntities) {
+>             // 处理伤害事件
+>             DamageEvent* dmg = world_.GetComponent<DamageEvent>(e);
+>             if (dmg) {
+>                 Health* hp = world_.GetComponent<Health>(e);
+>                 if (hp) hp->current -= dmg->amount;
+>                 world_.RemoveComponent<DamageEvent>(e);
+>             }
+>
+>             // 处理火焰伤害事件（可叠加）
+>             FireDamageEvent* fire = world_.GetComponent<FireDamageEvent>(e);
+>             if (fire) {
+>                 // 应用火焰持续伤害效果（添加一个持续减益组件）
+>                 BurnDebuff debuff{fire->amount, fire->duration};
+>                 world_.AddComponent(e, debuff);
+>                 world_.RemoveComponent<FireDamageEvent>(e);
+>             }
+>
+>             // 处理治疗事件
+>             HealEvent* heal = world_.GetComponent<HealEvent>(e);
+>             if (heal) {
+>                 Health* hp = world_.GetComponent<Health>(e);
+>                 if (hp) hp->current = std::min(hp->current + heal->amount, hp->max);
+>                 world_.RemoveComponent<HealEvent>(e);
+>             }
+>         }
+>     }
+>
+> private:
+>     World world_;
+> };
+> ```
+>
+> **关键设计决策：** 事件组件只在产生它的那一帧存在（ConsumeAllEvents 后全部移除）。多事件通过不同的 Component 类型区分（DamageEvent vs FireDamageEvent），而非同一类型的多个实例——因为 ECS 中每个实体每种 Component 类型只能有一个。若需要同类型多事件，可改用 `std::vector<DamageEvent>` 作为单个组件的字段，或使用独立的事件队列（Event Queue）而非组件系统。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // 系统声明自己的读写依赖
+> struct SystemDependency {
+>     std::vector<uint32_t> readComponents;   // 只读组件类型 ID
+>     std::vector<uint32_t> writeComponents;  // 写入组件类型 ID
+> };
+>
+> // 判断两个系统是否冲突（需要串行化）
+> bool HasConflict(const SystemDependency& a, const SystemDependency& b) {
+>     // 规则：写-写冲突 或 读-写冲突
+>     for (uint32_t wA : a.writeComponents) {
+>         for (uint32_t wB : b.writeComponents) {
+>             if (wA == wB) return true; // 写-写冲突
+>         }
+>         for (uint32_t rB : b.readComponents) {
+>             if (wA == rB) return true; // 写-读冲突
+>         }
+>     }
+>     for (uint32_t wB : b.writeComponents) {
+>         for (uint32_t rA : a.readComponents) {
+>             if (wB == rA) return true; // 读-写冲突
+>         }
+>     }
+>     return false; // 无冲突，可并行
+> }
+>
+> // 拓扑排序 + 并行分组
+> std::vector<std::vector<size_t>> ScheduleSystems(
+>     const std::vector<SystemDependency>& deps) {
+>     size_t n = deps.size();
+>     std::vector<int> inDegree(n, 0);
+>     std::vector<std::vector<size_t>> adj(n);
+>
+>     // 构建显式依赖图（这里用全连接检查冲突构建）
+>     for (size_t i = 0; i < n; ++i) {
+>         for (size_t j = i + 1; j < n; ++j) {
+>             if (HasConflict(deps[i], deps[j])) {
+>                 // 假设顺序是 i 在 j 之前（实际需根据系统优先级决定方向）
+>                 adj[i].push_back(j);
+>                 inDegree[j]++;
+>             }
+>         }
+>     }
+>
+>     // 按层级分组：无前驱的系统进入第一层
+>     std::vector<std::vector<size_t>> layers;
+>     std::vector<size_t> current;
+>     for (size_t i = 0; i < n; ++i)
+>         if (inDegree[i] == 0) current.push_back(i);
+>
+>     // BFS 分层：每层内的系统可并行执行
+>     while (!current.empty()) {
+>         layers.push_back(current);
+>         std::vector<size_t> next;
+>         for (size_t u : current) {
+>             for (size_t v : adj[u]) {
+>                 if (--inDegree[v] == 0) next.push_back(v);
+>             }
+>         }
+>         current = std::move(next);
+>     }
+>
+>     // 每层内：用 std::async 或 job system 并行执行各系统
+>     // for (auto& layer : layers) {
+>     //     std::vector<std::future<void>> futures;
+>     //     for (size_t idx : layer) futures.push_back(std::async(systems[idx]));
+>     //     for (auto& f : futures) f.wait();
+>     // }
+>
+>     return layers;
+> }
+> ```
+>
+> **核心思路：** 构建依赖图 → 拓扑排序分层 → 层内并行。示例中的 InputSystem 和 AISystem 无共享组件，在同一层并行；MovementSystem 依赖它们的输出，在下一层执行。实际引擎（如 Unity DOTS、Bevy）的调度器有更精细的优化——支持读-读共享并行、chunk 级并行、job graph 依赖声明等。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 必读文章

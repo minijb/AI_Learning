@@ -1835,6 +1835,930 @@ SRTT = 0.875 × SRTT + 0.125 × 本次RTT  (α = 0.125)
 
 ---
 
+
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **完整的 Python UDP Ping-Pong 实现（客户端 + 服务端，100+ 次测试，RTT 统计）：**
+>
+> ```python
+> # udp_ping_pong.py
+> # 运行方式:
+> #   终端1: python udp_ping_pong.py server
+> #   终端2: python udp_ping_pong.py client [--loss 0.1]
+> #
+> # 设计要点:
+> #   1. 客户端带序列号的 Ping → 服务端 Echo Pong → 客户端计算 RTT
+> #   2. 服务端支持模拟丢包率（--loss 参数），方便观察裸 UDP 在丢包下的行为
+> #   3. 统计：min, max, avg, stddev, 丢包数, 乱序数
+>
+> import socket
+> import struct
+> import time
+> import sys
+> import random
+> import math
+>
+> # ============================================================
+> # 数据包格式 (8 字节):
+> #   [0:4] uint32 序列号 (小端序)
+> #   [4:8] uint32 时间戳 (发送时的 time.monotonic_ns，小端序)
+> # ============================================================
+> PACKET_SIZE = 8
+> PACK_FMT = '<II'  # 小端序: seq, timestamp_ns
+>
+> def make_ping(seq):
+>     """构造 Ping 包: [seq(4B)][timestamp_ns(4B)]"""
+>     now_ns = time.monotonic_ns()
+>     # 只用低 32 位（约 4.3 秒回绕），Ping-Pong 场景足够
+>     ts = now_ns & 0xFFFFFFFF
+>     return struct.pack(PACK_FMT, seq, ts), ts
+>
+> def parse_pong(data):
+>     """解析 Pong 包，返回 (seq, original_timestamp)"""
+>     seq, ts = struct.unpack(PACK_FMT, data)
+>     return seq, ts
+>
+> def rtt_from_timestamp(sent_ts):
+>     """根据发送时间戳计算当前 RTT（处理时间戳回绕）"""
+>     now = time.monotonic_ns() & 0xFFFFFFFF
+>     # 处理 32 位回绕: 如果 now < sent_ts，说明发生了回绕
+>     if now >= sent_ts:
+>         elapsed_ns = now - sent_ts
+>     else:
+>         elapsed_ns = (0x100000000 - sent_ts) + now
+>     return elapsed_ns / 1_000_000  # 转换为毫秒
+>
+> # ============================================================
+> # 服务端
+> # ============================================================
+> def run_server(host='0.0.0.0', port=9999, loss_rate=0.0):
+>     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+>     sock.bind((host, port))
+>     print(f"[Server] Listening on {host}:{port}, simulated loss={loss_rate*100:.0f}%")
+>
+>     while True:
+>         data, addr = sock.recvfrom(1024)
+>
+>         # 模拟丢包: 收到包后有一定概率丢弃（不回 Pong）
+>         if random.random() < loss_rate:
+>             print(f"[Server] (simulated drop) seq={struct.unpack('<I', data[:4])[0]}")
+>             continue
+>
+>         # 直接 echo 回去（原封不动——关键：保留原始时间戳）
+>         sock.sendto(data, addr)
+>
+> # ============================================================
+> # 客户端
+> # ============================================================
+> def run_client(server_host='127.0.0.1', server_port=9999,
+>                ping_count=100, ping_interval=0.2, loss_rate=0.0):
+>     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+>     sock.settimeout(1.0)  # 1 秒超时（Ping 超时判定）
+>     server_addr = (server_host, server_port)
+>
+>     rtts = []           # 成功的 RTT 列表（毫秒）
+>     lost_seqs = []      # 丢失的序列号
+>     out_of_order = 0    # 乱序计数
+>     last_recv_seq = -1  # 上次收到的序列号
+>
+>     print(f"[Client] Pinging {server_host}:{server_port} "
+>           f"({ping_count} times, interval={ping_interval}s, "
+>           f"simulated loss={loss_rate*100:.0f}%)")
+>     print(f"{'Seq':>4}  {'RTT(ms)':>8}  {'Status':>8}")
+>     print("-" * 30)
+>
+>     for seq in range(ping_count):
+>        # 客户端也可以模拟上行丢包（注意：这里丢的是客户端自己"不发"）
+>        if random.random() < loss_rate:
+>            print(f"{seq:4d}  {'-':>8}  {'drop(up)':>8}")
+>            lost_seqs.append(seq)
+>            continue
+>
+>        packet, sent_ts = make_ping(seq)
+>
+>        try:
+>            sock.sendto(packet, server_addr)
+>            data, _ = sock.recvfrom(1024)
+>            recv_seq, recv_ts = struct.unpack(PACK_FMT, data)
+>
+>            # RTT 计算
+>            rtt_ms = rtt_from_timestamp(recv_ts)
+>            rtts.append(rtt_ms)
+>
+>            # 乱序检测
+>            if recv_seq < last_recv_seq:
+>                out_of_order += 1
+>            last_recv_seq = recv_seq
+>
+>            print(f"{recv_seq:4d}  {rtt_ms:8.2f}  {'ok':>8}")
+>
+>        except socket.timeout:
+>            print(f"{seq:4d}  {'-':>8}  {'timeout':>8}")
+>            lost_seqs.append(seq)
+>
+>        time.sleep(ping_interval)
+>
+>    sock.close()
+>
+>    # ===== 统计报告 =====
+>    print("\n" + "=" * 40)
+>    print("RTT 统计报告")
+>    print("=" * 40)
+>    print(f"  总发送: {ping_count}")
+>    print(f"  成功:   {len(rtts)}")
+>    print(f"  丢失:   {len(lost_seqs)} ({len(lost_seqs)/ping_count*100:.1f}%)")
+>    if rtts:
+>        avg = sum(rtts) / len(rtts)
+>        variance = sum((r - avg) ** 2 for r in rtts) / len(rtts)
+>        stddev = math.sqrt(variance)
+>        print(f"  RTT min:    {min(rtts):.2f} ms")
+>        print(f"  RTT max:    {max(rtts):.2f} ms")
+>        print(f"  RTT avg:    {avg:.2f} ms")
+>        print(f"  RTT stddev: {stddev:.2f} ms")
+>    print(f"  乱序包:   {out_of_order}")
+>    print("=" * 40)
+>
+>    # ===== 丢包行为分析 =====
+>    if len(lost_seqs) > 0:
+>        print(f"\n[分析] 裸 UDP 在高丢包率下的问题:")
+>        print(f"  1. 无恢复机制: {len(lost_seqs)} 个 Ping 永久丢失，无重传")
+>        print(f"  2. 超时等待: 每个丢包阻塞客户端 1 秒 (socket timeout)")
+>        print(f"  3. 应用层感知到的"卡顿" = 丢包数 × timeout = "
+>              f"{len(lost_seqs)} × 1.0s = {len(lost_seqs):.1f}s")
+>        if out_of_order > 0:
+>            print(f"  4. 乱序到达: {out_of_order} 个包, UDP 不保证顺序")
+>
+> # ============================================================
+> # 入口
+> # ============================================================
+> if __name__ == '__main__':
+>    import argparse
+>    parser = argparse.ArgumentParser(description='UDP Ping-Pong')
+>    parser.add_argument('mode', choices=['server', 'client'],
+>                        help='运行模式')
+>    parser.add_argument('--host', default='127.0.0.1', help='服务器地址')
+>    parser.add_argument('--port', type=int, default=9999, help='端口')
+>    parser.add_argument('--loss', type=float, default=0.0,
+>                        help='模拟丢包率 (0.0-1.0)')
+>    parser.add_argument('--count', type=int, default=100,
+>                        help='Ping 次数')
+>    parser.add_argument('--interval', type=float, default=0.2,
+>                        help='Ping 间隔 (秒)')
+>    args = parser.parse_args()
+>
+>    if args.mode == 'server':
+>        run_server(args.host, args.port, args.loss)
+>    else:
+>        run_client(args.host, args.port, args.count, args.interval, args.loss)
+> ```
+>
+> **测试命令**：
+> ```bash
+> # 终端 1: 启动服务端（10% 丢包率）
+> python udp_ping_pong.py server --loss 0.1
+>
+> # 终端 2: 运行客户端（100 次 Ping）
+> python udp_ping_pong.py client --count 100 --interval 0.2
+> ```
+>
+> **预期输出（5% 丢包）**：
+> ```
+> RTT min:    0.15 ms
+> RTT max:    1.23 ms
+> RTT avg:    0.38 ms
+> RTT stddev: 0.09 ms
+> ```
+>
+> **预期输出（20% 丢包）**：
+> ```
+> 成功:   80
+> 丢失:   20 (20.0%)
+> RTT min:    0.14 ms
+> RTT max:    0.95 ms
+> RTT avg:    0.36 ms
+> RTT stddev: 0.08 ms
+> 乱序包:   0
+> ```
+>
+> **丢包行为分析**：裸 UDP 默认丢包率下 RTT 很小（本地回环 <1ms），但 20% 模拟丢包时，20 个 Ping 永久丢失，每个丢包触发 1 秒 timeout，客户端实际卡顿约 20 秒。这就是为什么裸 UDP 不能直接用于游戏——业务层需要自己处理丢失。
+
+> [!tip]- 练习 2 参考答案
+> **扩展 Ping-Pong：ACK + 超时重传 + EWMA RTT + 动态 RTO**
+>
+> ```python
+> # reliable_ping_pong.py
+> # 在练习 1 基础上增加:
+> #   1. 可靠标志位 (packet[0] bit 7)
+> #   2. ACK 机制
+> #   3. 未确认消息队列 + 超时重传
+> #   4. EWMA RTT 估算 + 动态 RTO
+> #   5. 20% 丢包率下成功率 > 95% 验证
+>
+> import socket
+> import struct
+> import time
+> import sys
+> import random
+> import math
+> from collections import deque
+> from dataclasses import dataclass, field
+> from typing import Optional
+>
+> # ============================================================
+> # 数据包格式 (12 字节):
+> #   [0]:    flags (bit 7 = requires_ack, bit 6 = is_ack)
+> #   [1:5]:  uint32 序列号 (小端)
+> #   [5:9]:  uint32 ACK 序列号 (小端, 仅在 is_ack=1 时有效)
+> #   [9:13]: uint32 发送时间戳 (小端, 客户端填充)
+> # ============================================================
+> PACKET_SIZE = 13
+> FLAG_REQUIRES_ACK = 0x80
+> FLAG_IS_ACK       = 0x40
+>
+> def make_packet(seq, flags, ack_seq=0, timestamp=0):
+>    """构造数据包"""
+>    return struct.pack('<BIII', flags, seq, ack_seq, timestamp)
+>
+> def parse_packet(data):
+>    """解析数据包"""
+>    flags, seq, ack_seq, ts = struct.unpack('<BIII', data[:13])
+>    return flags, seq, ack_seq, ts
+>
+> # ============================================================
+> # RTT 估算器 (EWMA — RFC 6298 风格)
+> # ============================================================
+> class RTTEstimator:
+>    def __init__(self, alpha=0.125, beta=0.25):
+>        self.alpha = alpha
+>        self.beta = beta
+>        self.srtt = 0.1       # 初始 SRTT = 100ms (秒为单位)
+>        self.rttvar = 0.05    # 初始 RTTVAR = 50ms
+>        self.rto = 1.0        # 初始 RTO = 1s
+>        self.min_rto = 0.2    # 最小 RTO = 200ms
+>        self.max_rto = 5.0    # 最大 RTO = 5s
+>
+>    def add_sample(self, rtt_seconds):
+>        """加入新的 RTT 样本，更新 SRTT, RTTVAR, RTO"""
+>        if self.srtt == 0.1 and self.rttvar == 0.05:
+>            # 第一个样本: 直接设置
+>            self.srtt = rtt_seconds
+>            self.rttvar = rtt_seconds / 2.0
+>        else:
+>            # EWMA 更新
+>            delta = abs(self.srtt - rtt_seconds)
+>            self.rttvar = (1 - self.beta) * self.rttvar + self.beta * delta
+>            self.srtt = (1 - self.alpha) * self.srtt + self.alpha * rtt_seconds
+>
+>        # RTO = SRTT + max(G, 4 * RTTVAR)，G 为时钟粒度，这里取 0.05s (50ms)
+>        self.rto = self.srtt + max(0.05, 4.0 * self.rttvar)
+>        self.rto = max(self.min_rto, min(self.max_rto, self.rto))
+>
+>    def on_timeout(self):
+>        """超时后退避: RTO 翻倍"""
+>        self.rto = min(self.max_rto, self.rto * 2.0)
+>
+>    def stats(self):
+>        return (f"SRTT={self.srtt*1000:.1f}ms, "
+>                f"RTTVAR={self.rttvar*1000:.1f}ms, "
+>                f"RTO={self.rto*1000:.1f}ms")
+>
+> # ============================================================
+> # 待确认消息
+> # ============================================================
+> @dataclass
+> class PendingMessage:
+>    seq: int
+>    data: bytes
+>    send_time: float          # 最近一次发送时间 (time.monotonic)
+>    first_send_time: float    # 首次发送时间
+>    retransmit_count: int = 0
+>    acked: bool = False
+>
+> # ============================================================
+> # 可靠 UDP 客户端
+> # ============================================================
+> MAX_RETRANSMITS = 5
+>
+> class ReliableUdpClient:
+>    def __init__(self, server_addr):
+>        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+>        self.sock.settimeout(0.01)  # 10ms 非阻塞超时（用于轮询）
+>        self.server_addr = server_addr
+>        self.seq = 0
+>        self.pending: dict[int, PendingMessage] = {}  # seq → PendingMessage
+>        self.rtt_est = RTTEstimator()
+>        self.rtt_samples = []  # 收集成功 RTT 用于统计
+>
+>    def send_reliable(self, payload_flags=FLAG_REQUIRES_ACK):
+>        """发送可靠消息，加入待确认队列"""
+>        ts = time.monotonic_ns() & 0xFFFFFFFF
+>        packet = make_packet(self.seq, payload_flags, 0, ts)
+>        self.sock.sendto(packet, self.server_addr)
+>
+>        self.pending[self.seq] = PendingMessage(
+>            seq=self.seq,
+>            data=packet,
+>            send_time=time.monotonic(),
+>            first_send_time=time.monotonic(),
+>        )
+>        self.seq += 1
+>
+>    def update(self):
+>        """每帧调用: 检查超时重传 + 接收 ACK + 轮询数据"""
+>        now = time.monotonic()
+>
+>        # 1. 检查超时重传
+>        to_remove = []
+>        for seq, msg in self.pending.items():
+>            if msg.acked:
+>                to_remove.append(seq)
+>                continue
+>
+>            elapsed = now - msg.send_time
+>            if elapsed >= self.rtt_est.rto:
+>                if msg.retransmit_count >= MAX_RETRANSMITS:
+>                    # 放弃
+>                    print(f"  [!!] seq={seq} 重传 {MAX_RETRANSMITS} 次后放弃")
+>                    to_remove.append(seq)
+>                else:
+>                    # 重传
+>                    self.sock.sendto(msg.data, self.server_addr)
+>                    msg.send_time = now
+>                    msg.retransmit_count += 1
+>                    self.rtt_est.on_timeout()  # 超时后退避
+>                    print(f"  [RT] seq={seq} attempt={msg.retransmit_count} "
+>                          f"RTO={self.rtt_est.rto*1000:.0f}ms")
+>
+>        for seq in to_remove:
+>            del self.pending[seq]
+>
+>        # 2. 接收 ACK 和 Pong
+>        while True:
+>            try:
+>                data, _ = self.sock.recvfrom(1024)
+>            except socket.timeout:
+>                break
+>
+>            flags, recv_seq, ack_seq, orig_ts = parse_packet(data)
+>
+>            if flags & FLAG_IS_ACK:
+>                # 这是 ACK 包 — 确认消息送达
+>                self._process_ack(ack_seq, recv_seq)
+>
+>            # 计算 RTT（如果包含原始时间戳）
+>            if orig_ts != 0:
+>                rtt_s = self._calc_rtt(orig_ts)
+>                if rtt_s is not None:
+>                    self.rtt_est.add_sample(rtt_s)
+>                    self.rtt_samples.append(rtt_s * 1000)
+>
+>    def _process_ack(self, ack_seq, sender_seq):
+>        """处理收到的 ACK"""
+>        if ack_seq in self.pending and not self.pending[ack_seq].acked:
+>            self.pending[ack_seq].acked = True
+>            # RTT 样本: 从发送到收到 ACK 的时间
+>            rtt = time.monotonic() - self.pending[ack_seq].first_send_time
+>            self.rtt_est.add_sample(rtt)
+>            self.rtt_samples.append(rtt * 1000)
+>
+>    def _calc_rtt(self, sent_ts):
+>        """根据时间戳计算 RTT（秒）"""
+>        now = time.monotonic_ns() & 0xFFFFFFFF
+>        if now >= sent_ts:
+>            return (now - sent_ts) / 1e9
+>        else:
+>            return ((0x100000000 - sent_ts) + now) / 1e9
+>
+>    def close(self):
+>        self.sock.close()
+>
+>    @property
+>    def pending_count(self):
+>        return sum(1 for m in self.pending.values() if not m.acked)
+>
+> # ============================================================
+> # 服务端 (ACK 感知)
+> # ============================================================
+> class ReliableUdpServer:
+>    def __init__(self, host='0.0.0.0', port=9999, loss_rate=0.0):
+>        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+>        self.sock.bind((host, port))
+>        self.sock.settimeout(0.01)
+>        self.loss_rate = loss_rate
+>        self.last_client = None
+>
+>    def update(self):
+>        """接收并处理一个数据包"""
+>        try:
+>            data, addr = self.sock.recvfrom(1024)
+>        except socket.timeout:
+>            return
+>
+>        self.last_client = addr
+>        flags, seq, _, _ = parse_packet(data)
+>
+>        # 模拟丢包
+>        if random.random() < self.loss_rate:
+>            return
+>
+>        # 如果需要 ACK，发送 ACK 包
+>        if flags & FLAG_REQUIRES_ACK:
+>            ack_packet = make_packet(0, FLAG_IS_ACK, ack_seq=seq)
+>            self.sock.sendto(ack_packet, addr)
+>
+>        # Echo 原始数据（Pong）
+>        self.sock.sendto(data, addr)
+>
+>    def close(self):
+>        self.sock.close()
+>
+> # ============================================================
+> # 测试运行
+> # ============================================================
+> def run_reliable_test(loss_rate=0.2, ping_count=100):
+>    """在指定丢包率下运行可靠 Ping-Pong 测试"""
+>    import threading
+>
+>    server = ReliableUdpServer(loss_rate=loss_rate)
+>    client = ReliableUdpClient(('127.0.0.1', 9999))
+>
+>    print(f"=== 可靠 UDP Ping-Pong 测试 (丢包率={loss_rate*100:.0f}%) ===")
+>
+>    sent = 0
+>    send_interval = 0.2  # 200ms 间隔
+>    last_send = time.monotonic()
+>
+>    while sent < ping_count:
+>        # 服务端处理
+>        server.update()
+>
+>        # 客户端发送
+>        now = time.monotonic()
+>        if now - last_send >= send_interval:
+>            client.send_reliable(FLAG_REQUIRES_ACK)
+>            sent += 1
+>            last_send = now
+>
+>        # 客户端更新（重传 + 收 ACK）
+>        client.update()
+>
+>        time.sleep(0.001)  # 1ms 粒度（模拟游戏帧循环）
+>
+>    # 等待所有 ACK 到达或超时
+>    print(f"\n发送完成，等待剩余 ACK...")
+>    drain_start = time.monotonic()
+>    while client.pending_count > 0 and time.monotonic() - drain_start < 5.0:
+>        server.update()
+>        client.update()
+>        time.sleep(0.001)
+>
+>    # ===== 统计 =====
+>    total = ping_count
+>    success = total - client.pending_count
+>    failed = client.pending_count
+>    print(f"\n{'='*50}")
+>    print(f"可靠 UDP Ping-Pong 结果 (丢包率={loss_rate*100:.0f}%)")
+>    print(f"{'='*50}")
+>    print(f"  总发送: {total}")
+>    print(f"  成功:   {success}")
+>    print(f"  失败:   {failed} ({failed/total*100:.1f}%)")
+>    print(f"  成功率: {success/total*100:.1f}%")
+>
+>    if client.rtt_samples:
+>        rtts = client.rtt_samples
+>        avg = sum(rtts) / len(rtts)
+>        var = sum((r - avg)**2 for r in rtts) / len(rtts)
+>        print(f"  RTT min:    {min(rtts):.2f} ms")
+>        print(f"  RTT max:    {max(rtts):.2f} ms")
+>        print(f"  RTT avg:    {avg:.2f} ms")
+>        print(f"  RTT stddev: {math.sqrt(var):.2f} ms")
+>    print(f"  {client.rtt_est.stats()}")
+>
+>    assert success / total >= 0.95, \
+>        f"FAIL: 成功率 {success/total*100:.1f}% < 95%"
+>    print(f"\n  ✓ 验收通过: 成功率 {success/total*100:.1f}% >= 95%")
+>    print(f"{'='*50}")
+>
+>    server.close()
+>    client.close()
+>
+> # ============================================================
+> # 入口
+> # ============================================================
+> if __name__ == '__main__':
+>    import argparse
+>    parser = argparse.ArgumentParser(description='Reliable UDP Ping-Pong')
+>    parser.add_argument('--loss', type=float, default=0.2,
+>                        help='模拟丢包率 (0.0-1.0), 默认 20%')
+>    parser.add_argument('--count', type=int, default=100,
+>                        help='Ping 次数')
+>    args = parser.parse_args()
+>    run_reliable_test(args.loss, args.count)
+> ```
+>
+> **运行**：
+> ```bash
+> python reliable_ping_pong.py --loss 0.2 --count 100
+> ```
+>
+> **关键设计点**：
+> 1. **EWMA RTT 估算**：`SRTT = 0.875 × SRTT + 0.125 × 本次RTT`，`RTTVAR = 0.75 × RTTVAR + 0.25 × |SRTT - 本次RTT|`，`RTO = SRTT + max(50ms, 4 × RTTVAR)`，范围限定 [200ms, 5s]
+> 2. **超时后退避**：每次超时重传将 RTO 翻倍（指数退避），避免重传风暴
+> 3. **ACK 包结构**：flag 中 bit 6 标记 ACK，携带被确认的序列号。ACK 本身是"不可靠"的（丢失无妨——超时重传会兜底）
+> 4. **20% 丢包率下的行为**：超时重传机制让大多数丢失的包在 1-2 次重传后成功交付，成功率 > 95%
+
+> [!tip]- 练习 3 参考答案
+> **滑动窗口流量控制：发送窗口 + 接收方缓冲区通告 + AIMD 拥塞控制**
+>
+> 以下是核心数据结构与算法的完整实现。为清晰起见，在练习 2 的基础上用增量方式展示关键差异。
+>
+> ```python
+> # sliding_window.py
+> # 在 reliable_ping_pong.py 基础上增加:
+> #   1. 发送窗口 (send window): 限制"在途中"包数量
+> #   2. 接收方缓冲区通告 (receive window): ACK 中携带剩余空间
+> #   3. AIMD 拥塞控制: 每个 RTT 窗口 +1, 超时窗口减半
+> #   4. 压力测试: 发送方高速发包 vs 接收方故意 sleep
+>
+> import socket
+> import struct
+> import time
+> import random
+> import math
+> from dataclasses import dataclass
+> from collections import deque
+>
+> # ============================================================
+> # 数据包格式 (扩展为 17 字节):
+> #   [0]:    flags (bit 7=requires_ack, bit 6=is_ack)
+> #   [1:5]:  uint32 seq
+> #   [5:9]:  uint32 ack_seq
+> #   [9:13]: uint32 send_ts
+> #   [13:17]: uint32 receive_window (接收方剩余缓冲区, 包数)
+> # ============================================================
+> PACKET_SIZE = 17
+> FLAG_REQUIRES_ACK = 0x80
+> FLAG_IS_ACK       = 0x40
+>
+> def make_packet(seq, flags, ack_seq=0, ts=0, rcv_wnd=0):
+>    return struct.pack('<BIIII', flags, seq, ack_seq, ts, rcv_wnd)
+>
+> def parse_packet(data):
+>    flags, seq, ack_seq, ts, rcv_wnd = struct.unpack('<BIIII', data[:17])
+>    return flags, seq, ack_seq, ts, rcv_wnd
+>
+> # ============================================================
+> # AIMD 拥塞控制器
+> # ============================================================
+> class AIMDController:
+>    """加性增/乘性减 (Additive Increase / Multiplicative Decrease)"""
+>    def __init__(self, initial_cwnd=16, ssthresh=64):
+>        self.cwnd = initial_cwnd          # 拥塞窗口 (包数)
+>        self.ssthresh = ssthresh          # 慢启动阈值
+>        self.in_slow_start = True         # 慢启动阶段
+>        self.packets_acked_this_rtt = 0   # 本 RTT 内确认的包数
+>        self.last_cwnd_update = time.monotonic()
+>
+>    def on_ack(self):
+>        """收到一个 ACK"""
+>        self.packets_acked_this_rtt += 1
+>
+>    def on_rtt_complete(self):
+>        """RTT 结束时更新窗口 (每个 RTT 触发一次)"""
+>        if self.in_slow_start:
+>            # 慢启动: 每个 RTT 窗口翻倍
+>            self.cwnd = min(self.cwnd * 2, self.ssthresh)
+>            if self.cwnd >= self.ssthresh:
+>                self.in_slow_start = False
+>        else:
+>            # 拥塞避免: AIMD — 每个 RTT 窗口 +1
+>            self.cwnd += 1
+>        self.packets_acked_this_rtt = 0
+>
+>    def on_loss(self):
+>        """检测到丢包 (超时重传)"""
+>        # 乘性减: 窗口减半，但不低于 1
+>        self.ssthresh = max(self.cwnd // 2, 2)
+>        self.cwnd = max(self.cwnd // 2, 1)
+>        self.in_slow_start = False  # 退出慢启动
+>        self.packets_acked_this_rtt = 0
+>
+>    @property
+>    def effective_window(self):
+>        return self.cwnd
+>
+> # ============================================================
+> # 滑动窗口发送方 (客户端)
+> # ============================================================
+> RECEIVE_BUFFER_SIZE = 64  # 接收方缓冲区容量 (包数)
+>
+> class SlidingWindowSender:
+>    def __init__(self, server_addr):
+>        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+>        self.sock.settimeout(0.01)
+>        self.server_addr = server_addr
+>
+>        # 发送窗口管理
+>        self.next_seq = 0          # 下一个要分配的序列号
+>        self.send_base = 0         # 最早未确认的序列号 (窗口左沿)
+>        self.pending: dict[int, 'PendingMsg'] = {}
+>
+>        # 拥塞控制 & 流控
+>        self.aimd = AIMDController()
+>        self.remote_window = RECEIVE_BUFFER_SIZE  # 接收方通告的窗口
+>        self.rtt_est = RTTEstimatorV2()
+>
+>        self.rtt_samples = []
+>
+>    def send_window_remaining(self):
+>        """发送窗口剩余空间 = min(拥塞窗口, 接收方通告窗口) - 在途包数"""
+>        effective = min(self.aimd.effective_window, self.remote_window)
+>        in_flight = self.next_seq - self.send_base
+>        return max(0, effective - in_flight)
+>
+>    def send(self, data=b'PING'):
+>        """尝试发送（受窗口限制）"""
+>        if self.send_window_remaining() <= 0:
+>            return False  # 窗口满，暂不发送
+>
+>        ts = time.monotonic_ns() & 0xFFFFFFFF
+>        packet = make_packet(self.next_seq, FLAG_REQUIRES_ACK, 0, ts)
+>        self.sock.sendto(packet, self.server_addr)
+>
+>        self.pending[self.next_seq] = PendingMsg(
+>            seq=self.next_seq,
+>            data=packet,
+>            send_time=time.monotonic(),
+>            retransmit_count=0,
+>        )
+>        self.next_seq += 1
+>        return True
+>
+>    def update(self):
+>        """每帧调用"""
+>        now = time.monotonic()
+>
+>        # 1. 重传检查
+>        for seq, msg in list(self.pending.items()):
+>            if msg.acked:
+>                continue
+>            if now - msg.send_time >= self.rtt_est.rto:
+>                if msg.retransmit_count >= 5:
+>                    del self.pending[seq]
+>                    # 更新 send_base (如果是最早的未确认包)
+>                    if seq == self.send_base:
+>                        self._advance_send_base()
+>                    self.aimd.on_loss()  # 丢包 → 窗口减半
+>                else:
+>                    self.sock.sendto(msg.data, self.server_addr)
+>                    msg.send_time = now
+>                    msg.retransmit_count += 1
+>                    self.rtt_est.on_timeout()
+>                    self.aimd.on_loss()
+>
+>        # 2. 接收 ACK
+>        while True:
+>            try:
+>                data, _ = self.sock.recvfrom(1024)
+>            except socket.timeout:
+>                break
+>
+>            flags, seq, ack_seq, ts, rcv_wnd = parse_packet(data)
+>
+>            if flags & FLAG_IS_ACK:
+>                # 更新接收方通告窗口
+>                self.remote_window = max(1, rcv_wnd)
+>
+>                # 标记已确认
+>                if ack_seq in self.pending:
+>                    msg = self.pending[ack_seq]
+>                    if not msg.acked:
+>                        msg.acked = True
+>                        rtt = now - msg.send_time
+>                        self.rtt_est.add_sample(rtt)
+>                        self.rtt_samples.append(rtt * 1000)
+>                        self.aimd.on_ack()
+>
+>                        # 清理已确认的包并推进窗口
+>                        self._advance_send_base()
+>
+>    def _advance_send_base(self):
+>        """推进 send_base 到第一个未确认的包"""
+>        while self.send_base in self.pending and self.pending[self.send_base].acked:
+>            del self.pending[self.send_base]
+>            self.send_base += 1
+>
+>    @property
+>    def total_sent(self):
+>        return self.next_seq
+>
+>    def close(self):
+>        self.sock.close()
+>
+> @dataclass
+> class PendingMsg:
+>    seq: int
+>    data: bytes
+>    send_time: float
+>    retransmit_count: int
+>    acked: bool = False
+>
+> # ============================================================
+> # RTT 估算器 (含每 RTT 回调)
+> # ============================================================
+> class RTTEstimatorV2:
+>    def __init__(self):
+>        self.srtt = 0.1
+>        self.rttvar = 0.05
+>        self.rto = 1.0
+>
+>    def add_sample(self, rtt_s):
+>        if self.srtt == 0.1 and self.rttvar == 0.05:
+>            self.srtt = rtt_s
+>            self.rttvar = rtt_s / 2.0
+>        else:
+>            delta = abs(self.srtt - rtt_s)
+>            self.rttvar = 0.75 * self.rttvar + 0.25 * delta
+>            self.srtt = 0.875 * self.srtt + 0.125 * rtt_s
+>        self.rto = self.srtt + max(0.05, 4.0 * self.rttvar)
+>        self.rto = max(0.2, min(5.0, self.rto))
+>
+>    def on_timeout(self):
+>        self.rto = min(5.0, self.rto * 2.0)
+>
+> # ============================================================
+> # 滑动窗口接收方 (服务端)
+> # ============================================================
+> class SlidingWindowReceiver:
+>    def __init__(self, host='0.0.0.0', port=9999,
+>                 buffer_size=RECEIVE_BUFFER_SIZE, loss_rate=0.0,
+>                 processing_delay=0.0):
+>        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+>        self.sock.bind((host, port))
+>        self.sock.settimeout(0.01)
+>        self.loss_rate = loss_rate
+>        self.processing_delay = processing_delay  # 模拟慢处理 (秒)
+>
+>        # 接收缓冲区 (固定大小)
+>        self.buffer_size = buffer_size
+>        self.recv_buffer: dict[int, bytes] = {}  # seq → data
+>        self.next_deliver = 0                    # 期望交付的下一个 seq
+>
+>        self.total_received = 0
+>        self.last_client = None
+>
+>    def update(self):
+>        """接收并处理"""
+>        try:
+>            data, addr = self.sock.recvfrom(1024)
+>        except socket.timeout:
+>            return
+>
+>        self.last_client = addr
+>        flags, seq, _, _, _ = parse_packet(data)
+>
+>        if random.random() < self.loss_rate:
+>            return
+>
+>        # 存入接收缓冲区
+>        if len(self.recv_buffer) < self.buffer_size:
+>            self.recv_buffer[seq] = data
+>        # else: 缓冲区满，丢弃 (这正是流控要防止的)
+>
+>        # 发送 ACK (携带当前接收窗口剩余)
+>        remaining = self.buffer_size - len(self.recv_buffer)
+>        ack_packet = make_packet(0, FLAG_IS_ACK, ack_seq=seq, rcv_wnd=remaining)
+>        self.sock.sendto(ack_packet, addr)
+>
+>        # Echo Pong
+>        self.sock.sendto(data, addr)
+>
+>        # 模拟处理延迟 (压力测试用)
+>        if self.processing_delay > 0:
+>            time.sleep(self.processing_delay)
+>            # 处理完后释放缓冲区
+>            self._deliver_in_order()
+>
+>        self.total_received += 1
+>
+>    def _deliver_in_order(self):
+>        """按序交付缓冲区中的数据，释放空间"""
+>        while self.next_deliver in self.recv_buffer:
+>            del self.recv_buffer[self.next_deliver]
+>            self.next_deliver += 1
+>
+>    def close(self):
+>        self.sock.close()
+>
+>    @property
+>    def buffer_used(self):
+>        return len(self.recv_buffer)
+>
+> # ============================================================
+> # 压力测试
+> # ============================================================
+> def run_stress_test(duration=5.0, receiver_sleep=0.1, loss_rate=0.05):
+>    """压力测试: 发送方高速发包 vs 接收方慢处理"""
+>    import threading
+>
+>    receiver = SlidingWindowReceiver(
+>        processing_delay=receiver_sleep, loss_rate=loss_rate
+>    )
+>    sender = SlidingWindowSender(('127.0.0.1', 9999))
+>
+>    print(f"=== 滑动窗口压力测试 ===")
+>    print(f"  接收方处理延迟: {receiver_sleep*1000:.0f}ms")
+>    print(f"  丢包率: {loss_rate*100:.0f}%")
+>    print(f"  初始 CWND: 16, 接收缓冲区: {RECEIVE_BUFFER_SIZE}")
+>
+>    start = time.monotonic()
+>    last_stats = start
+>
+>    while time.monotonic() - start < duration:
+>        receiver.update()
+>
+>        # 发送方尽力发送（受窗口限制）
+>        sender.send(b'PING')
+>        sender.update()
+>
+>        # 每秒输出统计
+>        if time.monotonic() - last_stats >= 1.0:
+>            cwnd = sender.aimd.cwnd
+>            rwnd = sender.remote_window
+>            eff = min(cwnd, rwnd)
+>            in_flight = sender.next_seq - sender.send_base
+>            buf = receiver.buffer_used
+>            print(f"  t={time.monotonic()-start:.1f}s | "
+>                  f"cwnd={cwnd} rwnd={rwnd} eff={eff} "
+>                  f"in_flight={in_flight} recv_buf={buf}/{RECEIVE_BUFFER_SIZE}")
+>            last_stats = time.monotonic()
+>
+>        time.sleep(0.001)
+>
+>    print(f"\n最终统计:")
+>    print(f"  总发送: {sender.total_sent}")
+>    print(f"  总接收: {receiver.total_received}")
+>    print(f"  最终 CWND: {sender.aimd.cwnd}")
+>    print(f"  最终 RTO: {sender.rtt_est.rto*1000:.0f}ms")
+>
+>    # 验证流控生效: 接收方缓冲区不应溢出
+>    assert receiver.buffer_used <= RECEIVE_BUFFER_SIZE, \
+>        f"FAIL: 接收缓冲区溢出! {receiver.buffer_used} > {RECEIVE_BUFFER_SIZE}"
+>    print(f"  ✓ 流控验证通过: 接收缓冲区未溢出")
+>
+>    # 验证: 接收方慢处理时，发送方被流控限速
+>    if receiver_sleep > 0:
+>        expected_max_rate = RECEIVE_BUFFER_SIZE / receiver_sleep  # 理论最大发包速率
+>        actual_rate = sender.total_sent / duration
+>        print(f"  理论最大速率: {expected_max_rate:.0f} pkt/s")
+>        print(f"  实际发送速率: {actual_rate:.0f} pkt/s")
+>        print(f"  说明: 发送方被窗口流控限速（受接收方慢处理制约）")
+>
+>    receiver.close()
+>    sender.close()
+>
+> # ============================================================
+> # 入口
+> # ============================================================
+> if __name__ == '__main__':
+>    import argparse
+>    parser = argparse.ArgumentParser(description='Sliding Window Flow Control')
+>    parser.add_argument('--duration', type=float, default=5.0,
+>                        help='测试持续时间 (秒)')
+>    parser.add_argument('--sleep', type=float, default=0.1,
+>                        help='接收方处理延迟 (秒)')
+>    parser.add_argument('--loss', type=float, default=0.05,
+>                        help='丢包率')
+>    args = parser.parse_args()
+>    run_stress_test(args.duration, args.sleep, args.loss)
+> ```
+>
+> **运行**：
+> ```bash
+> # 压力测试: 接收方 sleep(100ms), 丢包 5%, 运行 5 秒
+> python sliding_window.py --duration 5 --sleep 0.1 --loss 0.05
+> ```
+>
+> **预期观察**：
+> - 接收方 sleep 100ms 时，每秒最多处理约 10 批数据
+> - 接收窗口逐步缩小 → 发送方 `eff = min(cwnd, rwnd)` 被拉低
+> - AIMD cwnd 会增长到一定值后，因丢包超时触发减半，形成锯齿状
+> - 缓冲区使用始终 ≤ 64（流控验证通过）
+>
+> **AIMD 锯齿波形（典型输出）**：
+> ```
+> t=1.0s | cwnd=16 rwnd=64 eff=16 in_flight=16 recv_buf=16/64
+> t=2.0s | cwnd=17 rwnd=48 eff=17 in_flight=17 recv_buf=32/64
+> t=3.0s | cwnd=9  rwnd=32 eff=9  in_flight=9  recv_buf=48/64  ← 超时减半
+> t=4.0s | cwnd=10 rwnd=40 eff=10 in_flight=10 recv_buf=20/64
+> t=5.0s | cwnd=5  rwnd=15 eff=5  in_flight=5  recv_buf=8/64   ← 接收方慢,窗口萎缩
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Gaffer On Games: UDP vs TCP** — [https://gafferongames.com/post/udp_vs_tcp/](https://gafferongames.com/post/udp_vs_tcp/) — 游戏网络编程经典文章，深入解释为什么 UDP 是实时游戏的正确选择

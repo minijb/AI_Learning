@@ -1359,6 +1359,330 @@ After release, handle Get() is safe (returns nullptr if unloaded)
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 扩展 Texture 类，添加 Mipmap 链生成
+>
+> class Texture : public IResource {
+> public:
+>     std::string GetResourceTypeName() const override { return "Texture"; }
+>
+>     size_t GetMemorySize() const override {
+>         size_t total = m_pixels.size() * sizeof(uint8_t);
+>         // ★ 计入 Mipmap 链的内存
+>         for (const auto& mip : m_mipmaps) {
+>             total += mip.size() * sizeof(uint8_t);
+>         }
+>         return total;
+>     }
+>
+>     uint32_t m_width = 0;
+>     uint32_t m_height = 0;
+>     uint32_t m_channels = 4;
+>     std::vector<uint8_t> m_pixels;                     // Mip Level 0（原始分辨率）
+>     std::vector<std::vector<uint8_t>> m_mipmaps;       // ★ Mip Level 1, 2, 3, ...
+>
+>     // 生成 Mipmap 链：使用盒式滤波（2x2 平均）逐级降采样
+>     void GenerateMipmaps() {
+>         if (m_pixels.empty()) return;
+>         m_mipmaps.clear();
+>
+>         uint32_t w = m_width;
+>         uint32_t h = m_height;
+>         const uint8_t* srcData = m_pixels.data();
+>         size_t srcSize = m_pixels.size();
+>
+>         // 逐级生成，直到 1x1
+>         while (w > 1 || h > 1) {
+>             uint32_t nextW = std::max(w / 2, 1u);
+>             uint32_t nextH = std::max(h / 2, 1u);
+>
+>             std::vector<uint8_t> mip(nextW * nextH * m_channels);
+>
+>             for (uint32_t y = 0; y < nextH; ++y) {
+>                 for (uint32_t x = 0; x < nextW; ++x) {
+>                     // 2x2 像素平均
+>                     for (uint32_t c = 0; c < m_channels; ++c) {
+>                         uint32_t sum = 0;
+>                         int count = 0;
+>                         for (uint32_t dy = 0; dy < 2 && (y * 2 + dy) < h; ++dy) {
+>                             for (uint32_t dx = 0; dx < 2 && (x * 2 + dx) < w; ++dx) {
+>                                 uint32_t sx = x * 2 + dx;
+>                                 uint32_t sy = y * 2 + dy;
+>                                 sum += srcData[(sy * w + sx) * m_channels + c];
+>                                 count++;
+>                             }
+>                         }
+>                         mip[(y * nextW + x) * m_channels + c] =
+>                             static_cast<uint8_t>(sum / count);
+>                     }
+>                 }
+>             }
+>
+>             m_mipmaps.push_back(std::move(mip));
+>             // 下一级
+>             srcData = m_mipmaps.back().data();
+>             w = nextW;
+>             h = nextH;
+>         }
+>     }
+>
+>     // 获取指定 Mip Level 的数据
+>     const std::vector<uint8_t>* GetMipLevel(int level) const {
+>         if (level == 0) return &m_pixels;
+>         int idx = level - 1;
+>         if (idx >= 0 && idx < static_cast<int>(m_mipmaps.size()))
+>             return &m_mipmaps[idx];
+>         return nullptr;
+>     }
+> };
+> ```
+>
+> **盒式滤波 vs 高质量滤波：** 上述实现使用简单的 2x2 盒式滤波（取平均），适合快速生成。实际引擎中（如 DirectXTex 的 `GenerateMipMaps`）通常使用更高质量的下采样滤波器（如 Kaiser 窗、Lanczos 滤波），避免 Mipmap 链中出现高频混叠（aliasing）。对于法线贴图，简单的平均会破坏法线向量的归一化性质——需要在平均后重新归一化。另外，GPU 生成的 Mipmap（`glGenerateMipmap`）使用的是 GPU 硬件加速的滤波器，质量和速度都优于 CPU 实现。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 资源类型注册表：运行时根据类型名字符串动态创建资源实例
+>
+> #include <functional>
+> #include <unordered_map>
+>
+> class ResourceTypeRegistry {
+> public:
+>     static ResourceTypeRegistry& Instance() {
+>         static ResourceTypeRegistry inst;
+>         return inst;
+>     }
+>
+>     // 注册资源类型的工厂函数
+>     // 示例: RegisterType("Texture", []() -> IResource* { return new Texture(); });
+>     void RegisterType(const std::string& typeName,
+>                       std::function<IResource*()> factory) {
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         m_factories[typeName] = std::move(factory);
+>     }
+>
+>     // 根据类型名创建资源实例
+>     IResource* CreateResource(const std::string& typeName) {
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         auto it = m_factories.find(typeName);
+>         if (it == m_factories.end()) {
+>             std::cerr << "[Registry] Unknown resource type: " << typeName << std::endl;
+>             return nullptr;
+>         }
+>         return it->second();  // 调用工厂函数创建实例
+>     }
+>
+>     // 检查类型是否已注册
+>     bool IsTypeRegistered(const std::string& typeName) const {
+>         std::lock_guard<std::mutex> lock(m_mutex);
+>         return m_factories.find(typeName) != m_factories.end();
+>     }
+>
+> private:
+>     mutable std::mutex m_mutex;
+>     std::unordered_map<std::string, std::function<IResource*()>> m_factories;
+> };
+>
+> // ==== 在 ResourceManager 中添加按类型名加载 ====
+> // 修改 ResourceManager 类：
+>
+> IResource* ResourceManager::LoadSyncByType(const std::string& path,
+>                                            const std::string& typeName) {
+>     // 检查是否已加载
+>     ResourceID existingID = FindResourceByPath(path);
+>     if (existingID != INVALID_RESOURCE_ID) {
+>         auto* res = GetResourceInternal(existingID);
+>         if (res) { res->AddRef(); res->Touch(); return res; }
+>     }
+>
+>     // 通过注册表创建资源实例
+>     IResource* resource = ResourceTypeRegistry::Instance().CreateResource(typeName);
+>     if (!resource) return nullptr;
+>
+>     resource->SetPath(path);
+>     if (!resource->LoadFromFile(path)) {
+>         delete resource;
+>         return nullptr;
+>     }
+>
+>     ResourceID id = AllocateResourceID();
+>     resource->SetID(id);
+>     resource->AddRef();
+>     resource->Touch();
+>
+>     // 使用 typeName 推导 typeID（简化：用 typeName 的哈希）
+>     ResourceTypeID typeID = std::hash<std::string>{}(typeName);
+>
+>     {
+>         std::lock_guard<std::shared_mutex> lock(m_resourcesMutex);
+>         ResourceEntry entry;
+>         entry.resource = resource;
+>         entry.typeID = typeID;
+>         entry.path = path;
+>         m_resources[id] = entry;
+>         m_pathToID[path] = id;
+>     }
+>
+>     EnforceMemoryBudget();
+>     return resource;
+> }
+>
+> // ==== 初始化时注册所有资源类型 ====
+> void InitializeResourceTypes() {
+>     auto& reg = ResourceTypeRegistry::Instance();
+>     reg.RegisterType("Texture",  []() -> IResource* { return new Texture(); });
+>     reg.RegisterType("Mesh",     []() -> IResource* { return new Mesh(); });
+>     reg.RegisterType("Material", []() -> IResource* { return new Material(); });
+>     reg.RegisterType("Shader",   []() -> IResource* { return new Shader(); });
+> }
+> ```
+>
+> **设计考量：** 工厂模式 + 字符串查找的运行时开销主要来自 `std::string` 的哈希计算和 `unordered_map` 的查找（~50-100ns）。对于加载操作（通常 >1ms），这个开销可以忽略。需要线程安全（`ResourceTypeRegistry` 使用 mutex）因为资源类型可能在后台加载线程中动态注册。对于更高效的实现，可以使用编译期类型 ID（如教程中的 `GetResourceTypeID<T>()`）替代字符串，但字符串方案的优势是支持从配置文件/场景文件动态反序列化资源类型。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // 流式加载系统：以玩家位置为中心的 3x3 地形区块管理
+>
+> #include <cmath>
+>
+> // 地形区块资源
+> class TerrainChunk : public IResource {
+> public:
+>     std::string GetResourceTypeName() const override { return "TerrainChunk"; }
+>     size_t GetMemorySize() const override { return sizeof(float) * 256 * 256; }
+>
+>     int chunkX = 0, chunkZ = 0;  // 区块在世界空间中的坐标
+>     float heightMap[256][256];    // 简化的高度图
+>     // ... 纹理引用等
+>     bool LoadFromFile(const std::string& path) {
+>         SetPath(path);
+>         // 模拟加载（实际会从磁盘/网络加载高度图和纹理）
+>         for (int i = 0; i < 256; ++i)
+>             for (int j = 0; j < 256; ++j)
+>                 heightMap[i][j] = sinf(i * 0.1f) * cosf(j * 0.1f) * 10.0f;
+>         return true;
+>     }
+> };
+>
+> // 流式管理器
+> class StreamingManager {
+> public:
+>     static constexpr int GRID_SIZE = 3;     // 3x3 网格
+>     static constexpr float CHUNK_WORLD_SIZE = 100.0f; // 每个区块的世界大小
+>     static constexpr float LOAD_DISTANCE = 100.0f;    // 加载阈值
+>     static constexpr float UNLOAD_DISTANCE = 500.0f;  // 卸载阈值
+>
+>     StreamingManager(ResourceManager& rm) : m_rm(rm) {}
+>
+>     // 每帧调用：根据玩家位置更新加载状态
+>     void Update(const Vec3& playerPos) {
+>         int playerCX = static_cast<int>(std::floor(playerPos.x / CHUNK_WORLD_SIZE));
+>         int playerCZ = static_cast<int>(std::floor(playerPos.z / CHUNK_WORLD_SIZE));
+>
+>         // 确定当前应该活跃的区块范围
+>         int minCX = playerCX - GRID_SIZE / 2;
+>         int maxCX = playerCX + GRID_SIZE / 2;
+>         int minCZ = playerCZ - GRID_SIZE / 2;
+>         int maxCZ = playerCZ + GRID_SIZE / 2;
+>
+>         // 检查所有已知区块的距离
+>         for (auto it = m_activeChunks.begin(); it != m_activeChunks.end(); ) {
+>             const auto& [chunkKey, handle] = *it;
+>             auto [cx, cz] = decodeKey(chunkKey);
+>
+>             Vec3 chunkCenter(cx * CHUNK_WORLD_SIZE + CHUNK_WORLD_SIZE / 2,
+>                              0, cz * CHUNK_WORLD_SIZE + CHUNK_WORLD_SIZE / 2);
+>             float dist = std::sqrt(
+>                 (chunkCenter.x - playerPos.x) * (chunkCenter.x - playerPos.x) +
+>                 (chunkCenter.z - playerPos.z) * (chunkCenter.z - playerPos.z));
+>
+>             if (dist >= UNLOAD_DISTANCE) {
+>                 // ★ 超出卸载距离：卸载
+>                 std::cout << "[Streaming] Unloading chunk (" << cx << "," << cz
+>                           << ") at distance " << dist << std::endl;
+>                 m_rm.Release(handle.GetID());
+>                 it = m_activeChunks.erase(it);
+>             } else {
+>                 ++it;
+>             }
+>         }
+>
+>         // 检查目标范围内的区块：加载缺失的
+>         for (int cx = minCX; cx <= maxCX; ++cx) {
+>             for (int cz = minCZ; cz <= maxCZ; ++cz) {
+>                 uint64_t key = encodeKey(cx, cz);
+>                 if (m_activeChunks.find(key) != m_activeChunks.end())
+>                     continue;  // 已加载
+>
+>                 Vec3 chunkCenter(cx * CHUNK_WORLD_SIZE + CHUNK_WORLD_SIZE / 2,
+>                                  0, cz * CHUNK_WORLD_SIZE + CHUNK_WORLD_SIZE / 2);
+>                 float dist = std::sqrt(
+>                     (chunkCenter.x - playerPos.x) * (chunkCenter.x - playerPos.x) +
+>                     (chunkCenter.z - playerPos.z) * (chunkCenter.z - playerPos.z));
+>
+>                 if (dist < LOAD_DISTANCE) {
+>                     // ★ 近距离：立即同步加载（Critical）
+>                     std::string path = "terrain_" + std::to_string(cx) +
+>                                        "_" + std::to_string(cz);
+>                     std::cout << "[Streaming] Critical loading chunk (" << cx
+>                               << "," << cz << ")" << std::endl;
+>                     auto handle = m_rm.LoadSync<TerrainChunk>(path);
+>                     if (handle.IsValid()) {
+>                         m_activeChunks[key] = handle;
+>                     }
+>                 } else if (dist < UNLOAD_DISTANCE) {
+>                     // ★ 中距离：异步加载（Normal）
+>                     std::string path = "terrain_" + std::to_string(cx) +
+>                                        "_" + std::to_string(cz);
+>                     std::cout << "[Streaming] Async loading chunk (" << cx
+>                               << "," << cz << ")" << std::endl;
+>                     // 使用 async 加载，完成后在主线程下一帧通过回调加入 m_activeChunks
+>                     // auto future = m_rm.LoadAsync<TerrainChunk>(path);
+>                     // m_pendingLoads.push_back({key, std::move(future)});
+>                 }
+>                 // dist >= UNLOAD_DISTANCE: 不在范围内，不加载
+>             }
+>         }
+>     }
+>
+> private:
+>     static uint64_t encodeKey(int cx, int cz) {
+>         return (static_cast<uint64_t>(static_cast<uint32_t>(cx)) << 32) |
+>                 static_cast<uint32_t>(cz);
+>     }
+>     static std::pair<int, int> decodeKey(uint64_t key) {
+>         return {static_cast<int>(key >> 32), static_cast<int>(key & 0xFFFFFFFF)};
+>     }
+>
+>     ResourceManager& m_rm;
+>     std::unordered_map<uint64_t, ResourceHandle<TerrainChunk>> m_activeChunks;
+>     // std::vector<std::pair<uint64_t, std::future<ResourceHandle<TerrainChunk>>>> m_pendingLoads;
+> };
+>
+> // ==== 模拟测试 ====
+> // int main() {
+> //     ResourceManager rm;
+> //     StreamingManager sm(rm);
+> //     Vec3 playerPos(0, 0, 0);
+> //     // 模拟玩家移动
+> //     for (float t = 0; t < 1000.0f; t += 0.5f) {
+> //         playerPos.x += 0.5f;
+> //         sm.Update(playerPos);
+> //     }
+> // }
+> ```
+>
+> **关键设计决策：**  
+> - **加载策略不是简单的距离阈值：** 实际引擎（如 UE5 World Partition）使用更复杂的方法——考虑玩家移动方向预加载前方区块，考虑渲染距离和 LOD 级别决定加载精度。本实现使用纯距离判断是教学简化。  
+> - **异步加载的回调安全性：** `LoadAsync` 在后台线程完成，不能直接在回调中修改 `m_activeChunks`（主线程也在访问它）。正确做法是——后台线程将结果放入线程安全的待处理队列，主线程在下一帧开始时处理队列。  
+> - **区块坐标编码：** 使用 `uint64_t` 将两个 `int` (cx, cz) 合并为一个 key——`(cx << 32) | cz`，避免了 `std::pair<int,int>` 的哈希开销。这是游戏引擎中空间索引的常用技巧。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 引擎源码参考

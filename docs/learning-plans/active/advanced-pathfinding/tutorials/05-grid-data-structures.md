@@ -699,6 +699,413 @@ public class GridVisualizer : MonoBehaviour
 1. **实现基于位图的 SoA walkable**：将 `std::vector<bool>`（每个 bool 1 bit）替换为手写的 `std::vector<uint64_t>` 位图。实现 `bool is_walkable(size_t idx)` 的位运算版本。在 4096×4096 网格上对比内存占用。
 2. **流式分块加载**：为 `ChunkedGrid` 添加 `load_range(int x0, int y0, int x1, int y1)` 和 `unload_outside(int x0, int y0, int x1, int y1)`，模拟摄像机移动时的分块流式加载。
 
+
+## 3.5 参考答案
+
+> [!tip]- 基础练习 1 参考答案 — 改写 A\* 为 SoA 网格
+> 将教程 04 的 A\* 中的 `std::vector<std::vector<Cell>>` 替换为 `GridSoA`，用 `index(x,y)` 替代 `cells[x][y]`。核心改动点：
+>
+> ```cpp
+> // 原来的 AoS 访问
+> double cost = grid.cells[x][y].cost;
+> bool   walk = grid.cells[x][y].walkable;
+>
+> // 改为 SoA 访问
+> size_t idx = grid.index(x, y);
+> double cost = grid.cost_data()[idx];
+> bool   walk = grid.walkable_data()[idx];
+> ```
+>
+> 完整改造示例：
+>
+> ```cpp
+> // SoA 版 A* — 直接操作平坦数组指针以消除 index() 乘法开销
+> auto astar_soa(const GridSoA& grid, int sx, int sy, int gx, int gy)
+>     -> std::vector<std::pair<int,int>>
+> {
+>     int rows = grid.rows, cols = grid.cols;
+>     size_t total = static_cast<size_t>(rows) * cols;
+>     const double INF = std::numeric_limits<double>::infinity();
+>
+>     std::vector<double> g_cost(total, INF);
+>     std::vector<int> parent(total, -1);
+>     std::vector<bool> closed(total, false);
+>
+>     struct State { double f, g; int x, y;
+>         bool operator<(const State& o) const { return f > o.f; } };
+>     std::priority_queue<State> open;
+>
+>     auto idx = [cols](int x, int y) { return static_cast<size_t>(y) * cols + x; };
+>     auto heuristic = [](int x1, int y1, int x2, int y2) {
+>         return std::abs(x1-x2) + std::abs(y1-y2); }; // 曼哈顿
+>
+>     size_t si = idx(sx, sy);
+>     g_cost[si] = 0.0;
+>     open.push({heuristic(sx,sy,gx,gy), 0.0, sx, sy});
+>
+>     static const int DX[] = {1,-1,0,0};
+>     static const int DY[] = {0,0,1,-1};
+>
+>     while (!open.empty()) {
+>         State cur = open.top(); open.pop();
+>         int x = cur.x, y = cur.y;
+>         size_t ci = idx(x, y);
+>         if (closed[ci]) continue;
+>         closed[ci] = true;
+>
+>         if (x == gx && y == gy) {
+>             std::vector<std::pair<int,int>> path;
+>             for (int i = idx(gx, gy); i != -1; i = parent[i]) {
+>                 int px = static_cast<int>(i) / cols;
+>                 int py = static_cast<int>(i) % cols;
+>                 path.emplace_back(px, py);
+>             }
+>             std::reverse(path.begin(), path.end());
+>             return path;
+>         }
+>
+>         for (int d = 0; d < 4; ++d) {
+>             int nx = x + DX[d], ny = y + DY[d];
+>             if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) continue;
+>             size_t ni = idx(nx, ny);
+>             if (!grid.walkable_data()[ni]) continue;
+>
+>             double step_cost = grid.cost_data()[ni];
+>             double new_g = g_cost[ci] + step_cost;
+>             if (new_g < g_cost[ni]) {
+>                 g_cost[ni] = new_g;
+>                 parent[ni] = static_cast<int>(ci);
+>                 double f = new_g + heuristic(nx, ny, gx, gy);
+>                 open.push({f, new_g, nx, ny});
+>             }
+>         }
+>     }
+>     return {};
+> }
+> ```
+>
+> **性能变化预期：** SoA 版在 cost 查询时只需一次指针解引用 `cost_data()[ni]`，而 AoS 版需要 `cells[x][y].cost` → 两次间接寻址（外部 vector + 内部 vector）。在 512×512 网格上遍历搜索的 10K-50K 节点时，SoA 版通常比 AoS 版快 1.3-2×（取决于缓存压力）。
+
+> [!tip]- 基础练习 2 参考答案 — 验证 stride 计算
+> **手动计算 4×5×6 3D Grid 的 strides（row-major，最后维度连续）：**
+>
+> - `strides[2]` (最内层维度，dim 2，size=6)：**1** —— 相邻元素在内存中差 1
+> - `strides[1]` (dim 1，size=5)：`strides[2] * extent[2] = 1 * 6 =` **6**
+> - `strides[0]` (dim 0，size=4)：`strides[1] * extent[1] = 6 * 5 =` **30**
+>
+> **内存布局：** `data[0..29]` 第一层，`data[30..59]` 第二层，...，总共 4×5×6=120 元素。
+>
+> **index(i₀, i₁, i₂) = i₀·30 + i₁·6 + i₂·1**
+>
+> **验证代码：**
+>
+> ```cpp
+> GridND<int, 3> g(4, 5, 6);
+> std::cout << "strides[2] (innermost, size 6): "
+>           << g.index(0, 0, 1) - g.index(0, 0, 0) << " (expected 1)\n";
+> std::cout << "strides[1] (middle, size 5):    "
+>           << g.index(0, 1, 0) - g.index(0, 0, 0) << " (expected 6)\n";
+> std::cout << "strides[0] (outermost, size 4):  "
+>           << g.index(1, 0, 0) - g.index(0, 0, 0) << " (expected 30)\n";
+> ```
+>
+> **验证连续分配：** 写入连续值并验证 `g(0,0,0)` 到 `g(0,0,5)` 在内存中地址连续（`raw_data()[0]` 到 `raw_data()[5]`），`g(0,1,0)` 应该在 `raw_data()[6]`。
+
+> [!tip]- 进阶练习 1 参考答案 — SoA 8 方向邻居迭代
+> 在 `GridSoA` 中添加 8 方向迭代，包含对角线 corner-cutting 检查：
+>
+> ```cpp
+> // 添加到 GridSoA 类中
+> void for_each_neighbor_8dir(int x, int y,
+>     std::function<void(int nx, int ny, double step_cost)> callback) const
+> {
+>     static const int DX[] = {1,-1,0,0,  1,1,-1,-1};
+>     static const int DY[] = {0,0,1,-1,  1,-1,1,-1};
+>     static const double BASE_COST[] = {
+>         1.0, 1.0, 1.0, 1.0,
+>         std::sqrt(2.0), std::sqrt(2.0), std::sqrt(2.0), std::sqrt(2.0)
+>     };
+>
+>     for (int d = 0; d < 8; ++d) {
+>         int nx = x + DX[d], ny = y + DY[d];
+>         if (!in_bounds(nx, ny)) continue;
+>         size_t ni = index(nx, ny);
+>         if (!walkable_[ni]) continue;
+>
+>         // Corner-cutting 检查 (d >= 4 是对角线方向)
+>         if (d >= 4) {
+>             int adj1_x = x + DX[d];  // 水平邻居
+>             int adj1_y = y;
+>             int adj2_x = x;
+>             int adj2_y = y + DY[d];  // 垂直邻居
+>
+>             bool adj1_blocked = !in_bounds(adj1_x, adj1_y)
+>                 || !walkable_[index(adj1_x, adj1_y)];
+>             bool adj2_blocked = !in_bounds(adj2_x, adj2_y)
+>                 || !walkable_[index(adj2_x, adj2_y)];
+>
+>             // 两侧都是墙 → 禁止穿越
+>             if (adj1_blocked && adj2_blocked) continue;
+>         }
+>
+>         callback(nx, ny, BASE_COST[d] * cost_[ni]);
+>     }
+> }
+> ```
+>
+> **模板化优化（生产级）：**
+>
+> ```cpp
+> template<typename F>
+> void for_each_neighbor_8dir(int x, int y, F&& callback) const {
+>     // ... 同上逻辑，但 callback 是模板参数，避免 std::function 堆分配
+>     // 在热路径中这是显著的优化
+> }
+> ```
+
+> [!tip]- 进阶练习 2 参考答案 — 分块网格 A\*
+> `ChunkedGrid` 的 key insight：邻居迭代用**全局坐标**，`cost_at(x,y)` 内部处理 chunk 查找。A\* 算法本身无需修改——只需要一致的 `cost_at` 和 `walkable_at` 接口。
+>
+> ```cpp
+> // 为 ChunkedGrid 补充 walkable_at 查询
+> bool walkable_at(int x, int y) const {
+>     if (x < 0 || x >= world_rows || y < 0 || y >= world_cols) return false;
+>     int cx = y / CHUNK_SIZE;  // chunk 列
+>     int cy = x / CHUNK_SIZE;  // chunk 行
+>     Chunk* c = chunk_map_[chunk_index(cx, cy)];
+>     if (!c) return true;  // 未加载 = 默认可通行
+>     int lx = x % CHUNK_SIZE, ly = y % CHUNK_SIZE;
+>     return c->walkable[lx * CHUNK_SIZE + ly];
+> }
+>
+> // 跨 chunk 边界的邻居迭代
+> void for_each_neighbor(int x, int y,
+>     std::function<void(int nx, int ny, double step_cost)> callback) const
+> {
+>     static const int DX[] = {1,-1,0,0};
+>     static const int DY[] = {0,0,1,-1};
+>
+>     for (int d = 0; d < 4; ++d) {
+>         int nx = x + DX[d], ny = y + DY[d];
+>         if (nx < 0 || nx >= world_rows || ny < 0 || ny >= world_cols) continue;
+>         if (!walkable_at(nx, ny)) continue;
+>
+>         // cost_at 内部自动处理 chunk 查找和 chunk 边界
+>         callback(nx, ny, cost_at(nx, ny));
+>     }
+> }
+> ```
+>
+> **Chunked A\* 的完整签名：**
+>
+> ```cpp
+> auto astar_chunked(const ChunkedGrid& grid, int sx, int sy, int gx, int gy,
+>                    std::vector<std::pair<int,int>>& out_path)
+>     -> bool
+> {
+>     // 使用 pair<int,int> 作为 key 的 unordered_map 存储 g_cost 和 parent
+>     // 因为分块网格的活跃区域远小于世界总尺寸
+>     std::unordered_map<size_t, double> g_cost; // key = (x<<32)|y
+>     std::unordered_map<size_t, std::pair<int,int>> parent;
+>
+>     auto hash_xy = [](int x, int y) -> size_t {
+>         return (static_cast<uint64_t>(x) << 32) | static_cast<uint32_t>(y);
+>     };
+>
+>     // ... A* 逻辑同前，但使用 cost_at/walkable_at/world_rows/world_cols
+>     // 而不是 rows/cols/cells
+>     return true; // placeholder
+> }
+> ```
+>
+> **关键设计决策：** 在分块网格上，`closed` 和 `g_cost` 集合不应分配 `world_rows × world_cols` 大小——那会抵消分块的全部好处。使用 `std::unordered_map` 或与 chunk 粒度对齐的稀疏存储。需要 `ensure_chunk` 在探索到未加载 chunk 时自动创建。
+
+> [!tip]- 进阶练习 3 参考答案 — memset vs fill 性能测量
+> `memset` 只能用于 trivially copyable 且不包含非平凡构造的类型。`std::fill` 对 POD 类型通常会优化为 `memset`，但不是保证。
+>
+> ```cpp
+> #include <cstring>
+> #include <chrono>
+>
+> // 在 GridSoA 中添加
+> void fill_cost_memset(double value) {
+>     // 警告：仅对整数零值的 memset 是可移植的
+>     // 对于 double，只有 value == 0.0 时 memset 正确（IEEE 754 零 = 全零位）
+>     if (value == 0.0) {
+>         std::memset(cost_.data(), 0, cost_.size() * sizeof(double));
+>     } else {
+>         // 其他值用 memset 不安全（double 的 bit pattern 不等于字节重复）
+>         std::fill(cost_.begin(), cost_.end(), value);
+>     }
+> }
+>
+> // 基准代码
+> void bench_memset_vs_fill() {
+>     constexpr int SIZE = 512;
+>     constexpr int ITERATIONS = 100;
+>
+>     GridSoA grid(SIZE, SIZE);
+>     size_t n = grid.rows * grid.cols;
+>
+>     // memset 版本 (仅对 0.0 安全)
+>     auto bench_memset = [&]() {
+>         for (int i = 0; i < ITERATIONS; ++i)
+>             std::memset(const_cast<double*>(grid.cost_data()), 0,
+>                         n * sizeof(double));
+>     };
+>
+>     // std::fill 版本
+>     auto bench_fill = [&]() {
+>         for (int i = 0; i < ITERATIONS; ++i)
+>             std::fill(const_cast<double*>(grid.cost_data()),
+>                       const_cast<double*>(grid.cost_data()) + n, 0.0);
+>     };
+>
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     bench_memset();
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     bench_fill();
+>     auto t3 = std::chrono::high_resolution_clock::now();
+>
+>     double ms_memset = std::chrono::duration<double, std::milli>(t2 - t1).count();
+>     double ms_fill   = std::chrono::duration<double, std::milli>(t3 - t2).count();
+>
+>     std::cout << "memset(0): " << ms_memset << " ms ("
+>               << (n * sizeof(double) * ITERATIONS / ms_memset / 1e6) << " GB/s)\n";
+>     std::cout << "fill(0):   " << ms_fill << " ms ("
+>               << (n * sizeof(double) * ITERATIONS / ms_fill / 1e6) << " GB/s)\n";
+>     std::cout << "Ratio: fill/memset = " << ms_fill / ms_memset << "x\n";
+> }
+> ```
+>
+> **预期结果：** 在启用 `-O2` 的现代编译器上，`std::fill` 对 POD 类型会内联为 `__builtin_memset`，两者性能几乎相同（±5%）。差异来自：`memset` 是库函数调用（可能被优化为 REP STOSB），而 `std::fill` 可能被自动向量化为 SSE/AVX 循环。实际测量中两者带宽通常都在 40-60 GB/s 左右。
+
+> [!tip]- 挑战练习 1 参考答案 — 位图 SoA walkable
+> 将 `std::vector<bool>` 替换为 `std::vector<uint64_t>` 位图，提供手写位运算访问。
+>
+> ```cpp
+> class BitmapWalkable {
+>     std::vector<uint64_t> bits_;
+>     size_t total_cells_;
+>
+>     static constexpr int BITS_PER_WORD = 64;
+>
+> public:
+>     BitmapWalkable(size_t total_cells)
+>         : total_cells_(total_cells),
+>           bits_((total_cells + BITS_PER_WORD - 1) / BITS_PER_WORD, ~0ULL)
+>     {}
+>
+>     // 位查询
+>     bool test(size_t idx) const {
+>         size_t word = idx / BITS_PER_WORD;
+>         size_t bit  = idx % BITS_PER_WORD;
+>         return (bits_[word] >> bit) & 1ULL;
+>     }
+>
+>     // 位设置
+>     void set(size_t idx, bool value) {
+>         size_t word = idx / BITS_PER_WORD;
+>         size_t bit  = idx % BITS_PER_WORD;
+>         if (value)
+>             bits_[word] |=  (1ULL << bit);
+>         else
+>             bits_[word] &= ~(1ULL << bit);
+>     }
+>
+>     // 批量操作：一次设置 64 个 cell
+>     void fill_word(size_t word_idx, uint64_t mask) {
+>         bits_[word_idx] = mask;
+>     }
+>
+>     size_t memory_bytes() const {
+>         return bits_.capacity() * sizeof(uint64_t);
+>     }
+>
+>     const uint64_t* raw_bits() const { return bits_.data(); }
+> };
+> ```
+>
+> **内存对比 (4096×4096 = 16M cells)：**
+>
+> | 方案 | 内存占用 | 说明 |
+> |------|---------|------|
+> | `std::vector<bool>` | ~2 MB | 1 bit/cell，但 `data()` 不可用，迭代器代理对象有开销 |
+> | `std::vector<uint8_t>` | 16 MB | 1 byte/cell，简单但浪费 87.5% |
+> | `BitmapWalkable` | ~2 MB | 1 bit/cell，手写位图，可直接访问 `uint64_t*` |
+>
+> **位图 + SoA 的完整 Grid 类：** 将 `BitmapWalkable` 整合进 `GridSoA`，替换 `std::vector<bool> walkable_`，保持 `cost_` 和 `terrain_id_` 不变。寻路时先做便宜的 `walkable` 位测试，再读取 `cost`。
+
+> [!tip]- 挑战练习 2 参考答案 — 流式分块加载
+> 为 `ChunkedGrid` 添加基于视口范围的增量加载/卸载：
+>
+> ```cpp
+> // 添加到 ChunkedGrid 类
+>
+> // 确保指定矩形区域内的所有 chunk 都已加载
+> void load_range(int x0, int y0, int x1, int y1) {
+>     // 裁剪到世界边界
+>     x0 = std::max(0, x0); y0 = std::max(0, y0);
+>     x1 = std::min(world_rows - 1, x1);
+>     y1 = std::min(world_cols - 1, y1);
+>
+>     int cx0 = y0 / CHUNK_SIZE; int cy0 = x0 / CHUNK_SIZE;
+>     int cx1 = y1 / CHUNK_SIZE; int cy1 = x1 / CHUNK_SIZE;
+>
+>     for (int cy = cy0; cy <= cy1; ++cy)
+>         for (int cx = cx0; cx <= cx1; ++cx)
+>             ensure_chunk(cx, cy);
+> }
+>
+> // 卸载指定矩形外面的所有 chunk
+> void unload_outside(int x0, int y0, int x1, int y1,
+>                     int margin_chunks = 2) // 保留边缘的 margin
+> {
+>     x0 = std::max(0, x0); y0 = std::max(0, y0);
+>     x1 = std::min(world_rows - 1, x1);
+>     y1 = std::min(world_cols - 1, y1);
+>
+>     int cx0 = y0 / CHUNK_SIZE - margin_chunks;
+>     int cy0 = x0 / CHUNK_SIZE - margin_chunks;
+>     int cx1 = y1 / CHUNK_SIZE + margin_chunks;
+>     int cy1 = x1 / CHUNK_SIZE + margin_chunks;
+>
+>     // 遍历所有已加载的 chunk，卸载不在视口内的
+>     chunks_.erase(
+>         std::remove_if(chunks_.begin(), chunks_.end(),
+>             [&](const std::unique_ptr<Chunk>& c) {
+>                 if (c->chunk_x < cx0 || c->chunk_x > cx1 ||
+>                     c->chunk_y < cy0 || c->chunk_y > cy1) {
+>                     chunk_map_[chunk_index(c->chunk_x, c->chunk_y)] = nullptr;
+>                     return true;
+>                 }
+>                 return false;
+>             }),
+>         chunks_.end());
+> }
+>
+> // 摄像机移动时调用（每帧或每 N 帧）
+> void update_streaming(const ChunkedGrid& grid,
+>                       int cam_x, int cam_y,
+>                       int view_radius) {
+>     // 加载新的可见 chunk
+>     grid.load_range(cam_x - view_radius, cam_y - view_radius,
+>                     cam_x + view_radius, cam_y + view_radius);
+>     // 卸载远处 chunk（异步可另行处理）
+>     grid.unload_outside(cam_x - view_radius, cam_y - view_radius,
+>                         cam_x + view_radius, cam_y + view_radius,
+>                         /*margin=*/3);
+> }
+> ```
+>
+> **生产级注意事项：**
+> - 每帧只处理有限数量的 chunk 加载/卸载（如 2-3 个），避免帧时间尖峰
+> - 使用 `std::future` 或 job system 异步加载 chunk 数据（从磁盘/网络）
+> - 远端 chunk 可降级为低 LOD（粗粒度路径图），节省内存
+> - chunk 卸载前标记 `loaded = false` 但不立即释放内存——使用 LRU 淘汰策略
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Data-Oriented Design (Richard Fabian)**：整本书都在讲为什么 AoS vs SoA 影响游戏性能。关键章节：Chapter 2 "Data Layout"。

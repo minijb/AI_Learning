@@ -721,6 +721,381 @@ mul result: 24
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <coroutine>
+> #include <iostream>
+> #include <cstddef>
+> #include <vector>
+> #include <cassert>
+> 
+> // --- 简易固定大小内存池 ---
+> class PoolResource {
+>     std::vector<char> pool_;
+>     size_t offset_ = 0;
+> 
+> public:
+>     explicit PoolResource(size_t size) : pool_(size) {}
+> 
+>     void* allocate(size_t size, size_t alignment = alignof(std::max_align_t)) {
+>         // 对齐计算
+>         size_t space = pool_.size();
+>         void* ptr = pool_.data() + offset_;
+>         if (!std::align(alignment, size, ptr, space))
+>             throw std::bad_alloc();
+>         offset_ = static_cast<char*>(ptr) - pool_.data() + size;
+>         ++alloc_count_;
+>         return ptr;
+>     }
+> 
+>     void deallocate(void*, size_t) {
+>         ++free_count_;  // 简化：栈式池不支持单块释放
+>     }
+> 
+>     bool contains(void* ptr) const {
+>         auto* p = static_cast<char*>(ptr);
+>         return p >= pool_.data() && p < pool_.data() + pool_.size();
+>     }
+> 
+>     int alloc_count_ = 0;
+>     int free_count_ = 0;
+> };
+> 
+> // --- 使用自定义池的 Task ---
+> struct Task {
+>     struct promise_type {
+>         // 参数匹配的 operator new：编译器从协程参数中提取 PoolResource*
+>         void* operator new(std::size_t size, PoolResource* pool) {
+>             return pool->allocate(size);
+>         }
+> 
+>         void operator delete(void* ptr, std::size_t size) {
+>             if (auto* pool = PoolResource::current_pool) {
+>                 pool->deallocate(ptr, size);
+>             } else {
+>                 ::operator delete(ptr);
+>             }
+>         }
+> 
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_never initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_void() {}
+>         void unhandled_exception() { std::terminate(); }
+>     };
+> 
+>     std::coroutine_handle<promise_type> handle;
+>     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+>     ~Task() { if (handle) handle.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&&) = default;
+>     Task& operator=(Task&&) = default;
+> };
+> 
+> // 全局池指针（简化）：生产代码应在线程局部或通过 promise 传递
+> PoolResource* PoolResource::current_pool = nullptr;
+> 
+> Task my_coro(PoolResource* pool) {
+>     std::cout << "[coro] 协程执行中...\n";
+>     co_return;
+> }
+> 
+> int main() {
+>     PoolResource pool(4096);
+>     PoolResource::current_pool = &pool;
+> 
+>     // 编译器生成的帧大小可通过日志查看
+>     auto task = my_coro(&pool);
+>     // 验证分配（对象在 main 作用域结束时自动析构）
+> 
+>     std::cout << "池分配次数: " << pool.alloc_count_
+>               << "，释放次数: " << pool.free_count_ << "\n";
+> }
+> ```
+> 
+> **分配器机制说明**：
+> - 编译器检测到 `promise_type` 有带额外参数的 `operator new` 时，从协程参数列表中查找匹配类型（这里是 `PoolResource*`）
+> - `operator delete` 参数签名必须和 `operator new` 的额外参数一致
+> - 栈式池不支持单块释放——生产代码应使用 slab allocator 或 `mimalloc`/`jemalloc`
+> - 通过检查 `frame` 指针是否在池范围内可验证分配来源
+
+> [!tip]- 练习 2 参考答案
+> 以下是三个场景的 promise_type 日志注入：
+> 
+> ```cpp
+> #include <coroutine>
+> #include <cstdio>
+> #include <stdexcept>
+> 
+> struct LoggedTask {
+>     struct promise_type {
+>         LoggedTask get_return_object() {
+>             printf("[P] get_return_object()\n");
+>             return LoggedTask{
+>                 std::coroutine_handle<promise_type>::from_promise(*this)
+>             };
+>         }
+> 
+>         std::suspend_never initial_suspend() {
+>             printf("[P] initial_suspend() → suspend_never\n");
+>             return {};
+>         }
+> 
+>         std::suspend_always final_suspend() noexcept {
+>             printf("[P] final_suspend() → suspend_always\n");
+>             return {};
+>         }
+> 
+>         void return_value(int v) {
+>             printf("[P] return_value(%d)\n", v);
+>             result_ = v;
+>         }
+> 
+>         void return_void() {
+>             printf("[P] return_void()\n");
+>         }
+> 
+>         std::suspend_always yield_value(int v) {
+>             printf("[P] yield_value(%d)\n", v);
+>             return {};
+>         }
+> 
+>         void unhandled_exception() {
+>             printf("[P] unhandled_exception()\n");
+>             try { std::rethrow_exception(std::current_exception()); }
+>             catch (const std::exception& e) {
+>                 printf("[P] 捕获异常: %s\n", e.what());
+>             }
+>         }
+> 
+>         int result_ = 0;
+>     };
+> 
+>     std::coroutine_handle<promise_type> handle;
+>     explicit LoggedTask(std::coroutine_handle<promise_type> h) : handle(h) {}
+>     ~LoggedTask() {
+>         if (handle) {
+>             printf("[~Task] handle.destroy()\n");
+>             handle.destroy();
+>         }
+>     }
+>     LoggedTask(const LoggedTask&) = delete;
+>     LoggedTask& operator=(const LoggedTask&) = delete;
+>     LoggedTask(LoggedTask&&) = default;
+>     LoggedTask& operator=(LoggedTask&&) = default;
+> };
+> 
+> // --- 场景 1：正常完成 ---
+> LoggedTask normal() {
+>     printf("[C] 协程体开始\n");
+>     co_return 42;
+> }
+> 
+> // --- 场景 2：抛出异常 ---
+> LoggedTask throwing() {
+>     printf("[C] 协程体：即将抛出异常\n");
+>     throw std::runtime_error("协程异常测试");
+>     co_return 0;  // 不会执行
+> }
+> 
+> // --- 场景 3：co_yield ---
+> LoggedTask yielding() {
+>     printf("[C] 协程体：yield 前\n");
+>     co_yield 1;
+>     printf("[C] 协程体：yield 后\n");
+>     co_yield 2;
+>     printf("[C] 协程体：结束\n");
+>     co_return 99;
+> }
+> 
+> void test_normal() {
+>     printf("\n=== 场景 1：正常完成 ===\n");
+>     auto task = normal();
+>     // initial_suspend=never → 协程立即执行到结束
+>     // final_suspend=always → 在结束时挂起
+> }
+> 
+> void test_exception() {
+>     printf("\n=== 场景 2：抛出异常 ===\n");
+>     auto task = throwing();
+>     // unhandled_exception 被调用
+> }
+> 
+> void test_yield() {
+>     printf("\n=== 场景 3：co_yield ===\n");
+>     auto task = yielding();
+>     // 协程在 initial_suspend 后立即执行到第一个 yield
+>     // 需要显式 resume 继续
+>     if (!task.handle.done()) {
+>         printf("[main] resume #1\n");
+>         task.handle.resume();
+>     }
+>     if (!task.handle.done()) {
+>         printf("[main] resume #2\n");
+>         task.handle.resume();
+>     }
+> }
+> 
+> int main() {
+>     test_normal();
+>     test_exception();
+>     test_yield();
+> }
+> ```
+> 
+> **场景 1 预期输出顺序分析**：
+> ```
+> [P] get_return_object()
+> [P] initial_suspend() → suspend_never
+> [C] 协程体开始
+> [P] return_value(42)
+> [P] final_suspend() → suspend_always
+> [~Task] handle.destroy()
+> ```
+> 
+> **场景 2 预期输出顺序分析**：
+> ```
+> [P] get_return_object()
+> [P] initial_suspend() → suspend_never
+> [C] 协程体：即将抛出异常
+> [P] unhandled_exception()
+> [P] 捕获异常: 协程异常测试
+> [P] final_suspend() → suspend_always
+> [~Task] handle.destroy()
+> ```
+> 
+> **场景 3 预期输出顺序分析**：
+> ```
+> [P] get_return_object()
+> [P] initial_suspend() → suspend_never
+> [C] 协程体：yield 前
+> [P] yield_value(1)
+> [main] resume #1
+> [C] 协程体：yield 后
+> [P] yield_value(2)
+> [main] resume #2
+> [C] 协程体：结束
+> [P] return_value(99)
+> [P] final_suspend() → suspend_always
+> [~Task] handle.destroy()
+> ```
+> 
+> **状态转换图（状态机视角）**：
+> ```
+> [创建] → get_return_object → initial_suspend
+>    → [执行] → co_return/异常/co_yield
+>       → return_value | unhandled_exception | yield_value
+>          → final_suspend → [挂起/销毁]
+> ```
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> #include <coroutine>
+> #include <memory>
+> #include <mutex>
+> #include <condition_variable>
+> #include <iostream>
+> #include <thread>
+> 
+> template<typename T>
+> class Future {
+>     struct SharedState {
+>         std::shared_ptr<T> result;
+>         std::exception_ptr error;
+>         bool ready = false;
+>         std::mutex mtx;
+>         std::condition_variable cv;
+>     };
+>     std::shared_ptr<SharedState> state_;
+> 
+>     explicit Future(std::shared_ptr<SharedState> s) : state_(std::move(s)) {}
+> 
+> public:
+>     // Future 可复制——多个消费者共享同一结果
+>     Future() = default;
+> 
+>     T get() {
+>         std::unique_lock lk(state_->mtx);
+>         // 阻塞直到结果就绪
+>         state_->cv.wait(lk, [this] { return state_->ready; });
+>         if (state_->error)
+>             std::rethrow_exception(state_->error);
+>         return *state_->result;
+>     }
+> 
+>     struct promise_type {
+>         std::shared_ptr<SharedState> state = std::make_shared<SharedState>();
+> 
+>         Future<T> get_return_object() {
+>             return Future<T>{state};
+>         }
+> 
+>         std::suspend_never initial_suspend() { return {}; }
+> 
+>         std::suspend_always final_suspend() noexcept {
+>             // 通知所有等待者
+>             {
+>                 std::lock_guard lk(state->mtx);
+>                 state->ready = true;
+>             }
+>             state->cv.notify_all();
+>             return {};
+>         }
+> 
+>         void return_value(T value) {
+>             state->result = std::make_shared<T>(std::move(value));
+>         }
+> 
+>         void unhandled_exception() {
+>             state->error = std::current_exception();
+>         }
+>     };
+> };
+> 
+> // --- 使用示例 ---
+> Future<int> compute_async() {
+>     std::cout << "[coro] 开始计算...\n";
+>     co_return 42;
+> }
+> 
+> int main() {
+>     auto f1 = compute_async();
+>     auto f2 = f1;  // 复制——共享同一个 SharedState
+> 
+>     // 两个消费者各自获取结果
+>     std::thread t1([f1] {
+>         int val = f1.get();
+>         std::cout << "[t1] 结果: " << val << "\n";
+>     });
+> 
+>     std::thread t2([f2] {
+>         int val = f2.get();
+>         std::cout << "[t2] 结果: " << val << "\n";
+>     });
+> 
+>     t1.join();
+>     t2.join();
+> 
+>     // 两个线程都打印 "结果: 42"
+> }
+> ```
+> 
+> **设计要点**：
+> 
+> - **SharedState**：由 `shared_ptr` 管理，多个 Future 共享同一份结果
+> - **`final_suspend` 通知**：`cv.notify_all()` 唤醒所有等待中的 `get()` 调用
+> - **异常处理**：`unhandled_exception` 捕获异常，`get()` 时重新抛出
+> - **线程安全**：`mutex + cv` 保证 `get()` 和 `final_suspend` 之间的同步
+> - **注意**：`initial_suspend` 返回 `suspend_never`（热启动）——因为 Future 天然支持延迟读取结果，不需要冷启动
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 常见陷阱
 
 > [!warning] 4.1 final_suspend 返回 suspend_never 导致 UB

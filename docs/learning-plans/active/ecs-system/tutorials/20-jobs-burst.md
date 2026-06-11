@@ -574,6 +574,392 @@ public partial struct EnemyManagerSystem : ISystem
 - 使用 Burst 编译
 - 目标：1000 个体 60 FPS
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Jobs;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> // === 组件定义 ===
+> public struct RandomVelocity : IComponentData
+> {
+>     public float3 Value;
+> }
+>
+> // === IJobEntity 定义 ===
+> [BurstCompile]
+> public partial struct SimpleMoveJob : IJobEntity
+> {
+>     public float DeltaTime;
+>
+>     void Execute(ref LocalTransform transform, in RandomVelocity velocity)
+>     {
+>         transform.Position += velocity.Value * DeltaTime;
+>     }
+> }
+>
+> // === 初始化和调度 System ===
+> [BurstCompile]
+> public partial struct SimpleMovementSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<RandomVelocity>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         var job = new SimpleMoveJob
+>         {
+>             DeltaTime = SystemAPI.Time.DeltaTime
+>         };
+>         state.Dependency = job.ScheduleParallel(state.Dependency);
+>     }
+> }
+>
+> // === 批量创建 10000 个 Entity（在 OnCreate 或 Baking 中） ===
+> // 使用 EntityManager 批量创建：
+> // var archetype = state.EntityManager.CreateArchetype(
+> //     typeof(LocalTransform), typeof(RandomVelocity));
+> // using var entities = new NativeArray<Entity>(10000, Allocator.Temp);
+> // state.EntityManager.CreateEntity(archetype, entities);
+> // 然后用一个 Job 设置随机值：
+>
+> [BurstCompile]
+> public partial struct InitVelocityJob : IJobEntity
+> {
+>     public Unity.Mathematics.Random Random;
+>
+>     void Execute(ref LocalTransform transform, ref RandomVelocity velocity)
+>     {
+>         velocity.Value = Random.NextFloat3Direction() * Random.NextFloat(1f, 5f);
+>         transform.Position = Random.NextFloat3(new float3(-50f), new float3(50f));
+>     }
+> }
+> ```
+>
+> **性能测量方式：**
+> - 使用 Unity Profiler（Window → Analysis → Profiler）查看 `SimpleMoveJob` 的耗时
+> - 或用 `ProfilerMarker` 包裹调度代码：
+>   ```csharp
+>   static readonly ProfilerMarker s_MoveMarker = new("SimpleMoveJob");
+>   s_MoveMarker.Begin();
+>   state.Dependency = job.ScheduleParallel(state.Dependency);
+>   s_MoveMarker.End();
+>   ```
+> - 预期：10000 实体在 Burst + ScheduleParallel 下 < 1ms（取决于 CPU 核心数）
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using Unity.Burst;
+> using Unity.Collections;
+> using Unity.Entities;
+> using Unity.Jobs;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> public struct CollisionCandidate : IComponentData
+> {
+>     public float Radius;
+> }
+>
+> // === 空间哈希碰撞检测 ===
+> [BurstCompile]
+> public partial struct CollisionDetectionSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float cellSize = 2f; // 网格单元大小（应 >= 最大碰撞半径）
+>
+>         // 步骤 1：构建空间哈希表（将实体按网格坐标分组）
+>         var spatialMap = new NativeMultiHashMap<int, Entity>(4096, Allocator.TempJob);
+>
+>         var buildJob = new BuildSpatialMapJob
+>         {
+>             CellSize = cellSize,
+>             SpatialMap = spatialMap.AsParallelWriter()
+>         };
+>         JobHandle buildHandle = buildJob.ScheduleParallel(state.Dependency);
+>
+>         // 步骤 2：查询邻近网格进行碰撞检测
+>         var ecbSingleton = SystemAPI.GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>();
+>         var ecb = ecbSingleton.CreateCommandBuffer(state.WorldUnmanaged);
+>
+>         var queryJob = new SpatialQueryJob
+>         {
+>             CellSize = cellSize,
+>             SpatialMap = spatialMap,
+>             CollisionThreshold = 1.5f,
+>             Ecb = ecb.AsParallelWriter()
+>         };
+>
+>         // queryJob 依赖 buildJob（必须等哈希表构建完成）
+>         state.Dependency = queryJob.ScheduleParallel(buildHandle);
+>
+>         spatialMap.Dispose(state.Dependency);
+>     }
+> }
+>
+> // === Job 1：构建空间哈希 ===
+> [BurstCompile]
+> public partial struct BuildSpatialMapJob : IJobEntity
+> {
+>     public float CellSize;
+>     public NativeMultiHashMap<int, Entity>.ParallelWriter SpatialMap;
+>
+>     void Execute(in LocalTransform transform, in Entity entity)
+>     {
+>         // 计算网格坐标并编码为单个 int（哈希键）
+>         int cellX = (int)math.floor(transform.Position.x / CellSize);
+>         int cellZ = (int)math.floor(transform.Position.z / CellSize);
+>         int hashKey = cellX * 73856093 ^ cellZ * 19349663; // 简单哈希
+>         SpatialMap.Add(hashKey, entity);
+>     }
+> }
+>
+> // === Job 2：查询邻近网格 ===
+> [BurstCompile]
+> [WithAll(typeof(CollisionCandidate))] // 只对可碰撞的实体做查询
+> public partial struct SpatialQueryJob : IJobEntity
+> {
+>     public float CellSize;
+>     [ReadOnly] public NativeMultiHashMap<int, Entity> SpatialMap;
+>     public float CollisionThreshold;
+>     public EntityCommandBuffer.ParallelWriter Ecb;
+>
+>     void Execute(
+>         [ChunkIndexInQuery] int sortKey,
+>         in LocalTransform transform,
+>         in Entity entity)
+>     {
+>         int cellX = (int)math.floor(transform.Position.x / CellSize);
+>         int cellZ = (int)math.floor(transform.Position.z / CellSize);
+>
+>         // 遍历 3x3 邻域网格
+>         for (int dx = -1; dx <= 1; dx++)
+>         {
+>             for (int dz = -1; dz <= 1; dz++)
+>             {
+>                 int hashKey = (cellX + dx) * 73856093 ^ (cellZ + dz) * 19349663;
+>
+>                 if (SpatialMap.TryGetFirstValue(hashKey, out Entity other, out var iterator))
+>                 {
+>                     do
+>                     {
+>                         // 跳过自身
+>                         if (other == entity) continue;
+>
+>                         // 这里需要 other 的位置信息（通过 ComponentLookup 获取）
+>                         // 简化示意：假设已获取 otherPos
+>                         float3 otherPos = float3.zero; // 实际：TransformLookup[other].Position
+>                         float dist = math.distance(transform.Position, otherPos);
+>
+>                         if (dist < CollisionThreshold)
+>                         {
+>                             // 碰撞响应（例：标记碰撞）
+>                             Ecb.AddComponent<CollisionTag>(sortKey, entity);
+>                         }
+>                     }
+>                     while (SpatialMap.TryGetNextValue(out other, ref iterator));
+>                 }
+>             }
+>         }
+>     }
+> }
+>
+> public struct CollisionTag : IComponentData { }
+> ```
+>
+> **设计要点：**
+> - `NativeMultiHashMap` 支持多线程并行写入（`AsParallelWriter()`）和读取
+> - 哈希键 = 网格坐标编码，相邻网格的实体通过哈希键查找
+> - 3×3 邻域查询保证覆盖所有可能的碰撞对（只要 CellSize >= 碰撞阈值）
+> - `TryGetFirstValue` / `TryGetNextValue` 迭代同一哈希桶内的所有实体
+> - 为避免重复检测，可在查询时只检查 `entity.Index > other.Index` 的配对
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> using Unity.Burst;
+> using Unity.Collections;
+> using Unity.Entities;
+> using Unity.Jobs;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> // === Boid 参数 ===
+> public struct BoidParams : IComponentData
+> {
+>     public float SeparationWeight;
+>     public float AlignmentWeight;
+>     public float CohesionWeight;
+>     public float MaxSpeed;
+>     public float NeighborRadius;
+>     public float SeparationRadius;
+> }
+>
+> // Step 1: 收集所有 Boid 的位置和速度到 NativeArray
+> [BurstCompile]
+> public partial struct CollectBoidDataJob : IJobEntity
+> {
+>     public NativeArray<float3> Positions;
+>     public NativeArray<float3> Velocities;
+>
+>     void Execute(
+>         [EntityIndexInChunk] int sortKey,
+>         in LocalTransform transform,
+>         in Velocity velocity)
+>     {
+>         Positions[sortKey] = transform.Position;
+>         Velocities[sortKey] = velocity.Value;
+>     }
+> }
+>
+> // Step 2: Boids 算法核心
+> [BurstCompile]
+> public partial struct BoidUpdateJob : IJobEntity
+> {
+>     [ReadOnly] public NativeArray<float3> Positions;
+>     [ReadOnly] public NativeArray<float3> Velocities;
+>     public float DeltaTime;
+>     public BoidParams Params;
+>
+>     void Execute(
+>         ref LocalTransform transform,
+>         ref Velocity velocity,
+>         in Entity entity)
+>     {
+>         float3 separation = float3.zero;
+>         float3 alignment = float3.zero;
+>         float3 cohesion = float3.zero;
+>         int neighborCount = 0;
+>
+>         int boidIndex = entity.Index; // 简化：假设 Index 对应数组索引
+>
+>         for (int i = 0; i < Positions.Length; i++)
+>         {
+>             if (i == boidIndex) continue;
+>
+>             float3 offset = Positions[i] - transform.Position;
+>             float dist = math.length(offset);
+>
+>             if (dist < Params.NeighborRadius && dist > 0.0001f)
+>             {
+>                 float3 toNeighbor = offset / dist;
+>
+>                 // 1. 分离：远离邻近个体（距离越近排斥力越大）
+>                 if (dist < Params.SeparationRadius)
+>                 {
+>                     separation -= toNeighbor * (1f - dist / Params.SeparationRadius);
+>                 }
+>
+>                 // 2. 对齐：朝向邻近个体的平均方向
+>                 alignment += Velocities[i];
+>
+>                 // 3. 凝聚：移向邻近个体的平均位置
+>                 cohesion += Positions[i];
+>
+>                 neighborCount++;
+>             }
+>         }
+>
+>         if (neighborCount > 0)
+>         {
+>             alignment = alignment / neighborCount;
+>             cohesion = (cohesion / neighborCount - transform.Position);
+>         }
+>
+>         // 合成所有力
+>         float3 steering = separation * Params.SeparationWeight
+>                         + math.normalizesafe(alignment) * Params.AlignmentWeight
+>                         + math.normalizesafe(cohesion) * Params.CohesionWeight;
+>
+>         // 更新速度（限制最大速度）
+>         velocity.Value += steering * DeltaTime;
+>         float speed = math.length(velocity.Value);
+>         if (speed > Params.MaxSpeed)
+>         {
+>             velocity.Value = math.normalize(velocity.Value) * Params.MaxSpeed;
+>         }
+>
+>         // 更新位置和朝向
+>         transform.Position += velocity.Value * DeltaTime;
+>         if (math.lengthsq(velocity.Value) > 0.0001f)
+>         {
+>             transform.Rotation = quaternion.LookRotationSafe(
+>                 math.normalize(velocity.Value), math.up());
+>         }
+>     }
+> }
+>
+> // === 调度 System ===
+> [BurstCompile]
+> public partial struct BoidSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // 获取查询
+>         var query = SystemAPI.QueryBuilder()
+>             .WithAll<LocalTransform, Velocity, BoidTag>()
+>             .Build();
+>
+>         int boidCount = query.CalculateEntityCount();
+>         if (boidCount == 0) return;
+>
+>         // 分配中间数组
+>         var positions = new NativeArray<float3>(boidCount, Allocator.TempJob);
+>         var velocities = new NativeArray<float3>(boidCount, Allocator.TempJob);
+>
+>         // 获取 Boid 参数（假设只有一个单例参数 Entity）
+>         BoidParams params = default;
+>         foreach (var p in SystemAPI.Query<RefRO<BoidParams>>())
+>         {
+>             params = p.ValueRO;
+>             break;
+>         }
+>
+>         float deltaTime = SystemAPI.Time.DeltaTime;
+>
+>         // Step 1: 收集数据
+>         var collectJob = new CollectBoidDataJob
+>         {
+>             Positions = positions,
+>             Velocities = velocities
+>         };
+>         JobHandle collectHandle = collectJob.ScheduleParallel(state.Dependency);
+>
+>         // Step 2: 更新 Boid（依赖 collectHandle）
+>         var updateJob = new BoidUpdateJob
+>         {
+>             Positions = positions,
+>             Velocities = velocities,
+>             DeltaTime = deltaTime,
+>             Params = params
+>         };
+>         state.Dependency = updateJob.ScheduleParallel(collectHandle);
+>
+>         // 清理中间数组（在 Job 完成后）
+>         positions.Dispose(state.Dependency);
+>         velocities.Dispose(state.Dependency);
+>     }
+> }
+>
+> public struct BoidTag : IComponentData { }
+> ```
+>
+> **优化要点：**
+> - O(n²) 遍历在 1000 个体时仍是可行的（每帧约 1M 次 `math.distance` 调用）
+> - 超过 1000 个体推荐使用空间哈希（练习 2）替代全对全比较
+> - 参数建议：`SeparationWeight=1.5, AlignmentWeight=1.0, CohesionWeight=1.0, MaxSpeed=5, NeighborRadius=3, SeparationRadius=1.5`
+> - 边界处理：可在更新后 clamp 位置到有限空间，或在边界处反转速度
 ---
 
 ## 4. 扩展阅读

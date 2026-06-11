@@ -1201,6 +1201,239 @@ return Reconciliation
 - 收敛检测逻辑：连续 3 帧误差 < 0.05 才算收敛（防止震荡误判）
 - 可导出 CSV 数据用于 Excel/Matplotlib 绘图
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1：基础和解模拟器
+> #### 核心步骤
+>
+> **1. 场景搭建与伪服务端**
+>
+> ```csharp
+> // PseudoServer.cs — 挂载在场景空 GameObject 上
+> public class PseudoServer : MonoBehaviour
+> {
+>     [SerializeField] private ReconciliationSystem _recon;
+>     public float snapshotInterval = 0.5f;
+>
+>     void Start() => StartCoroutine(SendSnapshots());
+>
+>     IEnumerator SendSnapshots()
+>     {
+>         while (true)
+>         {
+>             yield return new WaitForSeconds(snapshotInterval);
+>             // 取客户端当前位置 + 随机偏移模拟误差
+>             Vector3 clientPos = _recon.transform.position;
+>             Vector3 fakeAuthorityPos = clientPos + new Vector3(
+>                 Random.Range(-0.3f, 0.3f), 0, Random.Range(-0.3f, 0.3f));
+>             // lastProcessedSeq 故意落后 5 帧模拟网络滞后
+>             uint lastProcessedSeq = _recon.CurrentInputSeq > 5
+>                 ? _recon.CurrentInputSeq - 5 : 0;
+>             // 调用 ReconciliationSystem 的和解入口
+>             _recon.OnServerSnapshotReceived(lastProcessedSeq, fakeAuthorityPos);
+>         }
+>     }
+> }
+> ```
+>
+> **2. ReconciliationSystem 的和解入口**
+>
+> ```csharp
+> public void OnServerSnapshotReceived(uint ackedSeq, Vector3 authorityPos)
+> {
+>     // 找出本地缓存中与 ackedSeq 对应的预测位置
+>     Vector3 predictedAtAck = FindPredictedPosition(ackedSeq);
+>     float error = Vector3.Distance(predictedAtAck, authorityPos);
+>
+>     if (error > 2.0f)
+>     {
+>         // 硬修正
+>         _predictedPosition = authorityPos;
+>         _reconciliationCount++;
+>     }
+>     else if (error > 0.05f)
+>     {
+>         // 回滚 + 重预测：把位置重置为权威位置
+>         _predictedPosition = authorityPos;
+>         // 重放 ackedSeq 之后的所有未确认输入
+>         foreach (var input in _inputHistory)
+>             if (input.sequence > ackedSeq)
+>                 SimulateLocalMovement(input, Time.fixedDeltaTime);
+>         _reconciliationCount++;
+>     }
+>     // error <= 0.05：忽略，不触发和解
+>
+>     _authorityPosition = authorityPos;
+>     _lastAckedSeq = ackedSeq;
+> }
+> ```
+>
+> **3. Gizmos 绘制**
+>
+> ```csharp
+> void OnDrawGizmos()
+> {
+>     Gizmos.color = Color.green;
+>     Gizmos.DrawWireSphere(transform.position, 0.5f);   // 当前预测
+>     Gizmos.color = Color.red;
+>     Gizmos.DrawWireSphere(_authorityPosition, 0.5f);   // 权威位置
+>     if (Vector3.Distance(transform.position, _authorityPosition) > 0.01f)
+>     {
+>         Gizmos.color = Color.blue;
+>         Gizmos.DrawLine(transform.position, _authorityPosition);
+>     }
+> }
+> ```
+>
+> **4. UI 显示**：用 `OnGUI()` 或 TextMeshPro 显示 `predictionError`、`reconciliationCount`、pending 输入帧数。关键：`pendingCount = _inputHistory.Count(i => i.sequence > _lastAckedSeq)`。
+>
+> #### 验证方式
+> 运行后 WASD 移动，观察 Scene 视图中绿球（实时响应）与红球（滞后 0.5s 的权威位置）之间是否出现蓝色误差线。误差 > 0.05 时和解计数递增，> 2.0 时角色瞬间跳回红球位置。
+
+> [!tip]- 练习 2：特效和解系统
+> #### 核心思路
+>
+> 特效和解的关键是把特效生命周期拆成两个阶段：**前摇（可撤销）** 和 **命中（需确认）**。
+>
+> ```csharp
+> public class EffectReconciliation : MonoBehaviour
+> {
+>     private List<PendingEffect> _pendingEffects = new();
+>
+>     // 攻击时调用
+>     public void OnAttackPressed(uint inputSeq)
+>     {
+>         // 阶段1: 立即播放前摇（挥刀动画 + 蓄力光效）
+>         var windupEffect = Instantiate(_windupPrefab, transform);
+>         int effectId = windupEffect.GetInstanceID();
+>
+>         _pendingEffects.Add(new PendingEffect
+>         {
+>             effectId = effectId, inputSeq = inputSeq,
+>             isPredicted = true, isHitPhase = false
+>         });
+>
+>         // 启动协程：前摇结束后等待确认
+>         StartCoroutine(WaitForHitConfirmation(effectId, inputSeq));
+>     }
+>
+>     IEnumerator WaitForHitConfirmation(int effectId, uint inputSeq)
+>     {
+>         yield return new WaitForSeconds(0.3f); // 前摇 0.3s
+>
+>         // 标记进入命中阶段（但还没播放火花）
+>         var fx = _pendingEffects.Find(e => e.effectId == effectId);
+>         if (fx == null) yield break; // 已被撤销
+>         fx.isHitPhase = true;
+>
+>         // 等待服务端确认（轮询 ackedSeq）
+>         while (_lastAckedSeq < inputSeq)
+>             yield return null;
+>
+>         // 收到确认 → 播放命中火花
+>         if (_pendingEffects.Exists(e => e.effectId == effectId))
+>         {
+>             Instantiate(_hitSparksPrefab, transform.position, Quaternion.identity);
+>             _pendingEffects.RemoveAll(e => e.effectId == effectId);
+>         }
+>     }
+>
+>     // 回滚时调用（来自 ReconciliationSystem）
+>     public void OnRollback(uint rollbackToSeq)
+>     {
+>         var toCancel = _pendingEffects
+>             .Where(fx => fx.inputSeq > rollbackToSeq && fx.isPredicted)
+>             .ToList();
+>
+>         foreach (var fx in toCancel)
+>         {
+>             // 找到特效实例并销毁
+>             var go = EditorUtility.InstanceIDToObject(fx.effectId);
+>             if (go != null) Destroy((GameObject)go);
+>         }
+>         _pendingEffects.RemoveAll(fx => fx.inputSeq > rollbackToSeq && fx.isPredicted);
+>     }
+> }
+> ```
+>
+> #### 关键设计点
+> - **前摇不撤销动画，只撤销特效**：挥刀动作是"intent"的表达，即使技能被拒绝，挥刀动作也应该自然过渡到取消动画（如"收刀"），而非直接消失。
+> - **前摇时长 = 网络容错窗口**：前摇 0.3s 给了网络 RTT/2 的时间到达服务器。如果 RTT > 600ms，应考虑延后命中播放而非增大前摇。
+> - **`_lastAckedSeq` 来自 ReconciliationSystem**：每个服务端快照携带的 `lastProcessedSeq` 即为此值。
+>
+> #### 验证方式
+> 按下攻击键后立即看到蓄力光效。如果服务端快照到达时 ackedSeq 覆盖了该 inputSeq → 0.3s 后火花正常播放。如果在 0.3s 内发生了回滚 → 光效被撤销，不播放火花。
+
+> [!tip]- 练习 3：和解策略性能分析
+> #### 测试床架构
+>
+> ```csharp
+> public enum ReconStrategy { HardReset, SoftLerp, Hybrid }
+>
+> public class ReconStrategyTester : MonoBehaviour
+> {
+>     public ReconStrategy strategy;
+>     public float simulatedRtt = 0.1f; // 100ms
+>
+>     // 指标
+>     private float _convergenceStartTime;
+>     private bool _isConverging;
+>     private float _maxJump;
+>     private Vector3 _lastDisplayPos; // 上一帧显示位置
+>
+>     void ApplyCorrection(Vector3 authorityPos, ReconStrategy strat)
+>     {
+>         Vector3 prevDisplay = _lastDisplayPos;
+>
+>         switch (strat)
+>         {
+>             case ReconStrategy.HardReset:
+>                 transform.position = authorityPos;
+>                 break;
+>             case ReconStrategy.SoftLerp:
+>                 transform.position = Vector3.Lerp(
+>                     transform.position, authorityPos, 8f * Time.deltaTime);
+>                 break;
+>             case ReconStrategy.Hybrid:
+>                 float err = Vector3.Distance(transform.position, authorityPos);
+>                 if (err > 2.0f) transform.position = authorityPos;
+>                 else if (err > 0.05f)
+>                     transform.position = Vector3.Lerp(
+>                         transform.position, authorityPos, 8f * Time.deltaTime);
+>                 break;
+>         }
+>
+>         // 记录跳跃
+>         float jump = Vector3.Distance(prevDisplay, transform.position);
+>         if (jump > _maxJump) _maxJump = jump;
+>         _lastDisplayPos = transform.position;
+>     }
+> }
+> ```
+>
+> #### 预期结果分析
+>
+> | RTT | Hard Reset | Soft Lerp | Hybrid |
+> |-----|-----------|-----------|--------|
+> | 50ms | 收敛: 0ms, 跳跃: 3m, 体验差 | 收敛: ~0.4s, 跳跃: 0m, 体验好 | 同 Soft Lerp（误差异常小） |
+> | 100ms | 收敛: 0ms, 跳跃: 3m | 收敛: ~0.4s, 跳跃: 0m | 同 Soft Lerp |
+> | 200ms | 收敛: 0ms, 跳跃: 3m | 收敛: ~0.4s, 跳跃: 0m | 同 Soft Lerp |
+> | 500ms | 收敛: 0ms, 跳跃: 3m | 收敛: ~0.6s, 跳跃: 0m | 同 Soft Lerp |
+>
+> （误差始终 = 3m 的前提是击退距离固定。实际场景中误差随 RTT 增大，因为更长时间未同步 = 更多出错机会。）
+>
+> **结论**：
+> - **Soft Lerp 在视觉体验上始终优于 Hard Reset**，但代价是修正期间玩家位置不准确（对于 < 2m 的误差，玩家感知不到）。
+> - **Hybrid 的关键价值在于大误差场景**：当误差 > 2m（如瞬移、穿墙检测），Hard Reset 虽然体验差，但必须立即修正，否则会导致更严重的游戏性 bug（穿墙 → 掉出地图）。
+> - **收敛检测**：不要用单帧误差 < 0.05 作为收敛条件（可能震荡），用连续 3 帧误差 < 0.05。
+> - **RTT 与平滑速度的适配**：高 RTT 时应降低 `correctionSpeed`，让修正更柔和，避免"过冲 → 振荡"。
+
+> [!note] 答案使用方式
+> 以上参考答案提供的是**实现思路和关键代码片段**，而非可直接复制编译的完整脚本。建议：
+>
+> - 先独立尝试实现，遇到卡点时参考上述代码的思路
+> - 思考"为什么这样做"而非"抄了就能跑"——面试中会被追问设计决策的 trade-off
+> - 参考答案中的阈值（0.05, 2.0, 8f, 0.3s）是经验值，实际项目中应根据你的 TickRate、角色速度、RTT 重新标定
 ---
 
 ## 4. 扩展阅读

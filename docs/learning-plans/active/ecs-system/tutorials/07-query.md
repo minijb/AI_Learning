@@ -524,6 +524,218 @@ void for_each(std::function<void(Entity, Components&...)> fn);
 3. System 记录上次执行时的 `type_version`
 4. 查询时：该 Chunk 的 `change_version > system_last_seen` → 有变化
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **可变参数 `for_each` 实现**——利用 C++17 fold expression 和 `std::index_sequence`：
+>
+> ```cpp
+> class QueryResult {
+>     // ... existing members ...
+>
+> public:
+>     // 通用可变参数版本
+>     template<typename... Components>
+>     void for_each(std::function<void(Entity, Components&...)> fn) {
+>         for (auto& [entity, ptrs] : rows_) {
+>             // ptrs 的顺序与 QueryDesc 中 required+optional 的顺序一致
+>             call_with_ptrs<0, Components...>(fn, entity, ptrs);
+>         }
+>     }
+>
+> private:
+>     // 递归展开：将 ptrs[i] 转换为对应类型的引用并调用 fn
+>     template<size_t I, typename T, typename... Rest>
+>     static void call_with_ptrs(
+>         std::function<void(Entity, Components&...)> const& fn,
+>         Entity e,
+>         const std::vector<void*>& ptrs)
+>     {
+>         if constexpr (sizeof...(Rest) == 0) {
+>             // 基础情况：最后一个组件
+>             fn(e, *static_cast<T*>(ptrs[I]));
+>         } else {
+>             // 递归情况：当前组件 + 剩余组件打包到 lambda
+>             auto bound = [&](Entity e, Rest&... rest) {
+>                 fn(e, *static_cast<T*>(ptrs[I]), rest...);
+>             };
+>             call_with_ptrs<I+1, Rest...>(
+>                 *reinterpret_cast<const std::function<void(Entity, Rest&...)>*>(&bound),
+>                 e, ptrs);
+>         }
+>     }
+> };
+> ```
+>
+> **更简洁的 `std::index_sequence` 方案**（C++17，推荐）：
+>
+> ```cpp
+> template<typename... Components>
+> void for_each(std::function<void(Entity, Components&...)> fn) {
+>     for (auto& [entity, ptrs] : rows_) {
+>         invoke_impl(fn, entity, ptrs,
+>                     std::index_sequence_for<Components...>{});
+>     }
+> }
+>
+> private:
+> template<typename... Cs, size_t... Is>
+> void invoke_impl(std::function<void(Entity, Cs&...)> const& fn,
+>                  Entity e, const std::vector<void*>& ptrs,
+>                  std::index_sequence<Is...>) {
+>     fn(e, *static_cast<Cs*>(ptrs[Is])...);
+> }
+> ```
+>
+> **关键点**：`std::index_sequence_for<Components...>` 生成 `0, 1, 2, ..., N-1`，用 fold expression `*static_cast<Cs*>(ptrs[Is])...` 展开所有参数。指针顺序取决于 QueryDesc 中 required 在前、optional 在后的顺序。
+
+> [!tip]- 练习 2 参考答案
+> **查询缓存 + 自动失效**：
+>
+> ```cpp
+> class World {
+>     // 缓存的查询结果
+>     std::unordered_map<size_t, std::vector<Entity>> query_cache;
+>     size_t query_key(const QueryDesc& desc) const {
+>         size_t h = 0;
+>         for (auto cid : desc.required)  h ^= std::hash<size_t>{}(cid) + 0x9e3779b9 + (h<<6) + (h>>2);
+>         for (auto cid : desc.excluded)  h ^= std::hash<size_t>{}(~cid) + 0x9e3779b9 + (h<<6) + (h>>2);
+>         for (auto cid : desc.optional)  h ^= std::hash<size_t>{}(cid | 0x80000000) + 0x9e3779b9 + (h<<6) + (h>>2);
+>         return h;
+>     }
+>
+> public:
+>     QueryResult query(const QueryDesc& desc) {
+>         auto key = query_key(desc);
+>         auto it = query_cache.find(key);
+>
+>         if (it != query_cache.end()) {
+>             // 缓存命中 —— 直接用缓存的实体列表构建结果
+>             return build_result(it->second, desc);
+>         }
+>
+>         // 缓存未命中 —— 完整扫描
+>         std::vector<Entity> matched;
+>         for (auto& e : alive) {
+>             if (matches(e, desc)) matched.push_back(e);
+>         }
+>
+>         query_cache[key] = matched;
+>         return build_result(matched, desc);
+>     }
+>
+>     // 当实体增删组件时失效所有缓存（简单方案）
+>     template<typename T> void add(Entity e, const T& c) {
+>         store.add<T>(e, c);
+>         invalidate_cache();  // ← 实体签名变化 → 全量失效
+>     }
+>
+>     void invalidate_cache() { query_cache.clear(); }
+>
+> private:
+>     bool matches(Entity e, const QueryDesc& desc) {
+>         for (auto cid : desc.required)
+>             if (!has_component(e, cid)) return false;
+>         for (auto cid : desc.excluded)
+>             if (has_component(e, cid)) return false;
+>         return true;
+>     }
+>
+>     QueryResult build_result(const std::vector<Entity>& ents, const QueryDesc& desc) {
+>         std::vector<std::pair<Entity, std::vector<void*>>> rows;
+>         for (auto e : ents) {
+>             std::vector<void*> ptrs;
+>             for (auto cid : desc.required) ptrs.push_back(get_component_ptr(e, cid));
+>             for (auto cid : desc.optional) ptrs.push_back(get_component_ptr(e, cid));
+>             rows.push_back({e, std::move(ptrs)});
+>         }
+>         return QueryResult(std::move(rows));
+>     }
+> };
+> ```
+>
+> **性能对比**：
+> - 无缓存：每帧 N 次 System × M 个实体 = O(N×M) 扫描
+> - 有缓存：首帧 O(M) 扫描，后续帧 O(R)（R = 匹配实体数）直接构建结果
+> - 全量失效是保守策略——在增删频繁的场景（编辑器）缓存命中率低
+>
+> **精细失效方案**（进阶）：记录每个查询缓存了哪些组件类型。当某个组件被 add/remove 时，只失效引用了该组件类型的缓存查询。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **基于版本号的变更追踪**：
+>
+> ```cpp
+> // 全局组件类型版本号
+> std::unordered_map<ComponentTypeId, std::atomic<uint64_t>> type_versions;
+>
+> // Chunk 内每个组件列的版本号
+> struct Chunk {
+>     uint32_t entity_count;
+>     std::unordered_map<ComponentTypeId, uint64_t> column_versions;
+>     // ... data ...
+> };
+>
+> // 每次写入组件时递增两层版本号
+> template<typename T>
+> void write_component(Entity e, const T& val) {
+>     T* ptr = get_component_ptr(e);
+>     if (!ptr) return;
+>
+>     ComponentTypeId cid = cid<T>();
+>     *ptr = val;
+>
+>     // 递增全局类型版本号
+>     uint64_t new_ver = ++type_versions[cid];
+>
+>     // 更新该实体所在 Chunk 的列版本号
+>     auto* chunk = find_chunk(e, cid);
+>     if (chunk) chunk->column_versions[cid] = new_ver;
+> }
+>
+> // System 状态记录
+> struct SystemState {
+>     // 每个关心的组件类型 → 上次执行时的全局版本号
+>     std::unordered_map<ComponentTypeId, uint64_t> last_seen_versions;
+>
+>     // 检查实体是否有变化
+>     template<typename T>
+>     bool changed(Chunk* chunk) {
+>         ComponentTypeId cid = cid<T>();
+>         auto it = last_seen_versions.find(cid);
+>         uint64_t last = (it != last_seen_versions.end()) ? it->second : 0;
+>         // Chunk 的列版本 > 上次 System 看到的 → 有变化
+>         auto cit = chunk->column_versions.find(cid);
+>         return cit != chunk->column_versions.end() && cit->second > last;
+>     }
+>
+>     void mark_seen() {
+>         for (auto& [cid, ver] : type_versions)
+>             last_seen_versions[cid] = ver.load();
+>     }
+> };
+>
+> // 查询改写：只返回有变化的 Chunk/实体
+> template<typename... Ts>
+> void query_changed(SystemState& state, auto fn) {
+>     for (auto* arch : find_matching_archetypes<Ts...>()) {
+>         for (auto* chunk : arch->chunks) {
+>             // 检查该 Chunk 是否有关心组件的变更
+>             bool has_change = (state.changed<Ts>(chunk) || ...);
+>             if (!has_change) continue;
+>
+>             for (uint32_t i = 0; i < chunk->entity_count; i++)
+>                 fn(chunk->entity_ids[i],
+>                    *chunk->get<Ts>(i)...);
+>         }
+>     }
+>     state.mark_seen();
+> }
+> ```
+>
+> **粒度权衡**：
+> - **Chunk 级别**：空间开销小（每 Chunk 每列 8 字节），但一个实体的修改标记整个 Chunk → 伪变更
+> - **实体级别**：精确无误报，但需要每个实体每列一个版本号 → N × C × 8 字节元数据开销
+> - **折中**：Chunk 级别 + 在 System 中额外检查字段级 hash（对 Chunk 标记为变化的大块做指纹验证）
 ---
 
 ## 4. 扩展阅读

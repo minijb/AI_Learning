@@ -1711,6 +1711,184 @@ public struct TestResult
 - 每个测试用例应该是自包含的（不依赖 Unity Scene），可以在 `[RuntimeInitializeOnLoadMethod]` 中批量运行
 - 测试报告可以用 `StringBuilder` 拼接 Markdown，然后 `Debug.Log` 输出
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1：量化漂移可视化
+> **核心思路**
+>
+> 在 2.1 节 `QuantizationDriftDemo` 的基础上，将纯文本日志升级为实时可视化 + 交互式参数调节 + 漂移统计工具。
+>
+> **实现要点**
+>
+> 1. **三球体可视化**：在 `Update()` 中维护三个 `Vector3` 位置（红色=服务器位置，绿色=客户端不量化位置，蓝色=客户端量化位置），用 `OnDrawGizmos()` 绘制：
+> ```csharp
+> void OnDrawGizmos() {
+>     Gizmos.color = Color.red;   Gizmos.DrawSphere(_serverPos, 0.15f);
+>     Gizmos.color = Color.green; Gizmos.DrawSphere(_clientPos, 0.15f);
+>     Gizmos.color = Color.blue;  Gizmos.DrawSphere(_quantizedPos, 0.15f);
+>     // 连线标注偏差
+>     Gizmos.color = Color.yellow;
+>     Gizmos.DrawLine(_serverPos, _clientPos);
+>     Gizmos.DrawLine(_serverPos, _quantizedPos);
+> }
+> ```
+> 注意：Gizmos 在 Scene 视图绘制，Game 视图不可见。如需 Game 视图可用 `Debug.DrawLine` 或 `LineRenderer`。
+>
+> 2. **折线图**：维护 `List<Vector2> _driftHistory`（x=帧号，y=漂移值），在 `OnGUI` 中用 `GUI.Box` 划定绘图区域，按 `_driftHistory[i].y / maxDrift * graphHeight` 计算 y 偏移，用 `GUI.DrawTexture` 或 `GL.LINES` 绘制折线。或者更简单的——在 `OnGUI` 中逐帧 `GUILayout.Label` 输出 ASCII 折线（用 `|` 和 `-` 拼接）。
+>
+> 3. **量化精度滑块**：用 `GUI.HorizontalSlider` 控制 `_quantizationStep`（0.01f ~ 0.10f）。滑动时立即重置模拟（`InitializeState(); _tickCounter = 0;`）。关键观察：量化步长从 1cm 变到 10cm 后，蓝色球（量化客户端）的漂移速度明显加快。
+>
+> 4. **注入单次回退按钮**：将 `_tickCounter % 30 == 0` 的条件改为"按钮点击时触发"。触发后执行 2.1 节第 793-816 行的和解逻辑（计算 `serverQuantized` → 对比客户端位置 → 用反量化值覆盖客户端位置）。观察红色/蓝色球在回退瞬间的位置跳变。
+>
+> 5. **漂移统计**：在 2.1 节的 600 tick 主循环中收集数据：
+> ```csharp
+> float drift = Mathf.Abs(_serverPosition - _clientQuantizedPosition);
+> _driftSamples.Add(drift);
+> // 循环结束后:
+> float maxDrift = _driftSamples.Max();
+> float avgDrift = _driftSamples.Average();
+> float overThresholdPct = (float)_driftSamples.Count(d => d > 0.5f) / _driftSamples.Count;
+> ```
+> 输出到 `OnGUI` 面板：`最大漂移: {maxDrift:F3}m | 平均漂移: {avgDrift:F3}m | 超 0.5m 占比: {overThresholdPct:P1}`
+>
+> **关键验证**
+> - 关闭"客户端也量化"（`_clientAlsoQuantizes = false`）：600 tick 后漂移应线性增长到 0.2-0.5m
+> - 开启"客户端也量化"（`_clientAlsoQuantizes = true`）：漂移被限制在 ±量化步长范围（< 0.01m）
+> - 这和教材第 1.2 节的结论完全一致：量化漂移不是 bug，只能控制不能消除
+>
+> **常见坑**
+> - `OnDrawGizmos` 在每帧渲染前调用 → 如果模拟在主线程的 `Start()` 中一次性跑完 600 tick，Gizmos 只看到最终状态。应该用 `Update()` 逐 tick 推进（或 `Time.timeScale = 10` 加速）
+> - 滑块改变量化精度后需要重置模拟，否则新旧数据混合 → 漂移统计失真
+> - `List<Vector2>` 无限制增长 → 600 tick 后约 600 个点，OnGUI 全量绘制严重掉帧。应只绘制最近 200 个点或做降采样
+
+> [!tip]- 练习 2：部分快照碰撞检测修复
+> **核心思路**
+>
+> 在 2.2 节 `PartialSnapshotSimulator` 的基础上，添加"物理层隔离"安全网和"Ghost Grouping"对比模式，量化两种方案的碰撞正确率和额外延迟。
+>
+> **实现要点**
+>
+> 1. **物理层隔离实现**：
+> ```csharp
+> class GhostState {
+>     public uint LastAppliedTick; // ← 新增字段
+>     // ... 其他字段
+> }
+> ```
+> 在 `DetectCollisions()` 开头添加守护检查：
+> ```csharp
+> void DetectCollisions() {
+>     // 物理层隔离：不同 tick 的实体不参与碰撞
+>     if (_ghosts[0].LastAppliedTick != _ghosts[2].LastAppliedTick) {
+>         _skippedCollisions++;
+>         _collisionLog.Add($"Tick {_tick:D3}: [跳过] A(T={_ghosts[0].LastAppliedTick}) 与 C(T={_ghosts[2].LastAppliedTick}) tick 不一致");
+>         return; // 不执行碰撞响应
+>     }
+>     // ... 正常碰撞检测
+> }
+> ```
+> 关键：`LastAppliedTick` 在回退逻辑中更新——只有当 `ghost.HasSnapshot && _enableGhostGrouping` 为 true 时，才将 `LastAppliedTick` 设为当前 tick；未收到快照的 Ghost 保持旧的 `LastAppliedTick`。
+>
+> 2. **Ghost Grouping 开关**：在 `RunSimulation()` 的回退前插入检查（2.2 节第 1010-1024 行已有骨架）。核心逻辑：`bool allHaveSnapshot = _ghosts.All(g => g.LastServerTick >= _tick);` 如果为 false → 跳过回退 → 所有 Ghost 继续预测。此时记录"等待延迟" = `_tick - min(各Ghost.LastServerTick)`。
+>
+> 3. **对比表格**：运行两种模式（`_enableGhostGrouping = false/true`）各一次，收集：
+>    - 被跳过碰撞数（物理层隔离模式下）
+>    - 合法碰撞数
+>    - Ghost Grouping 额外延迟 = 平均等待 tick 数
+>    输出 Markdown 格式：
+> ```
+> | 模式 | 总碰撞 | 有效碰撞 | 跳过碰撞 | 平均等待(tick) |
+> |------|--------|---------|---------|---------------|
+> | 无分组 | 12 | 7 | 5 | 0 |
+> | Ghost Grouping | 8 | 8 | 0 | 4.2 |
+> ```
+>
+> 4. **自动化 100 次测试**：`PartialSnapshotTestRunner` 伪代码：
+> ```csharp
+> for (int run = 0; run < 100; run++) {
+>     Random.InitState(run); // 确定性随机
+>     // 随机化：丢包率 [0.05, 0.10, 0.20]、分包延迟 [3, 5, 8]、快照大小 [3-6 Ghost]
+>     RunSimulation();
+>     // 记录：碰撞正确率 = 客户端判定碰撞且服务端也碰撞的次数 / 客户端判定碰撞次数
+> }
+> // 输出均值 ± 标准差
+> ```
+> 服务端"真实碰撞"的判断基准：假设服务器在每个 tick 对所有 Ghost 做瞬时碰撞检测（无网络延迟），将结果作为 ground truth。
+>
+> **关键验证**
+> - Ghost Grouping 关闭 + 丢包率 > 10%：跨 tick 碰撞事件应明显增多（碰撞日志中频繁出现 `[警告: C未回退，时间不一致!]`）
+> - Ghost Grouping 开启：跨 tick 碰撞应消失，但模拟延迟增加（客户端等待最慢分包，平均等待 3-5 tick）
+> - 物理层隔离作为安全网：即使忘记开 Ghost Grouping，物理层隔离也能兜底——被跳过的碰撞不会产生错误的物理响应
+>
+> **常见坑**
+> - `LastAppliedTick` 只在回退时更新，忘记在"初始收到完整快照"时也更新 → 首次碰撞就被跳过
+> - Ghost Grouping 的等待是"等到所有 Ghost 都有当前 tick 快照"，但网络抖动可能导致某个 Ghost 的快照永远不到 → 需要超时兜底（如等待超过 10 tick 则跳过等待，同时记录 warning）
+> - "碰撞正确率"的定义需要明确：是 (true positive + true negative) / total，还是 precision（TP / (TP + FP)）？题目第 1661 行暗示用 precision（客户端判定碰撞中服务端也判定的比例）
+
+> [!tip]- 练习 3：构建预测系统边缘情况测试框架
+> **核心思路**
+>
+> 设计一个"接口 + 配置 + Runner"三层架构的测试框架，将 4 个测试用例（量化漂移、部分快照碰撞、输入去重、预测生成物冲突）统一到相同的执行模式中：确定性种子 → 网络条件配置 → 运行模拟 → 判定通过/失败 → 生成 Markdown 报告。
+>
+> **实现要点**
+>
+> 1. **接口实现**（题目已给出骨架）：
+> ```csharp
+> public interface IEdgeCaseTest {
+>     string TestName { get; }
+>     string Description { get; }
+>     TestResult Run(int seed, NetworkCondition network);
+> }
+> ```
+> 每个测试用例实现该接口。`Run` 方法内部：(a) 用 `new Random(seed)` 创建确定性的随机源；(b) 根据 `NetworkCondition` 配置模拟参数；(c) 运行预定义 tick 数；(d) 返回 `TestResult`。
+>
+> 2. **4 个测试用例的实现概要**：
+>    - **QuantizationDriftTest**：复用 2.1 节的逻辑，但用 `TestResult.MaxDrift` 记录最终漂移值。通过条件：`MaxDrift < threshold`（threshold = 量化步长的 2 倍，如 0.02m）。在不同量化精度下各验证一次。
+>    - **PartialSnapshotTest**：复用 2.2 节逻辑，开启物理层隔离。通过条件：跨 tick 碰撞被正确隔离（即没有未被跳过的跨 tick 碰撞产生物理响应）。另验证 Ghost Grouping 模式下碰撞正确率 ≥ 某个阈值（如 95%）。
+>    - **InputDedupTest**：复用 2.3 节 `InputDedupSystem`。注入 N 个重复输入（每 10 tick 注入一个已知重复的序列号），断言 `TryProcessSequence` 全部返回 false。通过条件：去重正确率 100%。
+>    - **PredictedSpawnTest**：复用 2.4 节 `PredictedSpawnResolver`。对三种策略各运行一次，记录生成物是否在预期的位置和时间存在。通过条件：(a) AllowRollbackToSpawn 下生成物回退后位置为 SpawnTick 时的位置；(b) Freeze 下生成物位置不变但可能有碰撞错误日志；(c) DeleteAndRespawn 下生成物被删除后正确重新创建。
+>
+> 3. **TestRunner 框架**：
+> ```csharp
+> public class EdgeCaseTestRunner {
+>     public void RunAll() {
+>         var tests = new IEdgeCaseTest[] {
+>             new QuantizationDriftTest(),
+>             new PartialSnapshotTest(),
+>             new InputDedupTest(),
+>             new PredictedSpawnTest()
+>         };
+>         var report = new StringBuilder();
+>         report.AppendLine("| 测试名称 | 网络条件 | 通过 | 最大漂移 | 异常数 | 详情 |");
+>         report.AppendLine("|----------|---------|------|---------|--------|------|");
+>         foreach (var test in tests) {
+>             // 对每个测试运行多个网络条件组合
+>             foreach (var network in new[] { ideal, average, poor }) {
+>                 var result = test.Run(42, network); // seed=42 确保确定性
+>                 report.AppendLine($"| {test.TestName} | RTT={network.RttMs}ms | {result.Passed} | {result.MaxDrift:F4} | {result.AnomalyCount} | {result.Details} |");
+>             }
+>         }
+>         Debug.Log(report.ToString());
+>     }
+> }
+> ```
+>
+> 4. **确定性保证**：`Random(seed)` 确定性只保证随机序列相同，不代表整个模拟确定——`Time.deltaTime`、`Application.targetFrameRate` 都可能影响结果。解决方案：(a) 测试中不使用 `Time.deltaTime`，用固定 `_tickDt`（如 1/60f）；(b) 不使用 `Update()`，在 `Run` 中纯循环推进。
+>
+> 5. **报告格式**：目标输出为 Markdown 表格，写入 `StreamingAssets/TestReport_{date}.md`。每行 = 一个 (test, network) 组合的结果。通过的行用 `🟢` 前缀，失败的行用 `🔴`，并附带失败原因（如 `MaxDrift=0.35m > threshold=0.02m`）。
+>
+> **关键验证**
+> - 改变 seed 后重跑——测试结果应不同（因为随机序列不同），但"通过/失败"的阈值判断应在各种 seed 下都通过（除非 seed 恰好触发极端情况——这就是为什么要多 seed 验证）
+> - 如果不开启物理层隔离，`PartialSnapshotTest` 应在高丢包率下失败（跨 tick 碰撞未被隔离）→ 验证测试框架能正确地捕获 bug
+>
+> **常见坑**
+> - 接口的 `Run(int seed, NetworkCondition network)` 是同步方法——但 2.1/2.2/2.4 节代码都在 `Start()` 中直接运行。在 `[RuntimeInitializeOnLoadMethod]` 场景下没问题，但在 Play Mode 中需要注意：测试可能在场景加载前就执行完了。建议用 `[RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]` 确保场景就绪
+> - `NetworkCondition` 结构体中的 `TickRate` 字段：不同测试对 tick rate 含义不同。帧同步测试中 tick rate = 逻辑帧率（固定）；状态同步测试中 tick rate = 服务端快照频率。统一约定为"服务端权威步进频率"（server tick rate），避免歧义
+> - 预测生成物测试中，`DeleteAndRespawn` 策略会产生视觉闪烁——但测试框架验证的是**逻辑正确性**（生成物最终是否在正确位置），不验证视觉效果
+
+> [!note] 答案使用方式
+> 以上答案提供了实现思路和关键代码片段，**不是复制粘贴的成品**。建议先独立完成每个练习（至少要动手写过一遍核心逻辑），再对照答案检查：是否遗漏了关键步骤？是否踩了"常见坑"？测试框架的设计是否覆盖了所有边缘情况？参考答案的价值在于验证你的思路，而非替代你的实践。
 ---
 
 ## 4. 扩展阅读

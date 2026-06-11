@@ -1341,6 +1341,818 @@ public interface IMementoDelta
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：Command + Memento 实现 Undo/Redo
+>   
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> 
+> // ============================================
+> // Editor（Originator）— 文本编辑器
+> // ============================================
+> public class Editor
+> {
+>     public string Text { get; private set; } = string.Empty;
+> 
+>     public void Insert(int position, string text)
+>     {
+>         Text = Text.Insert(position, text);
+>     }
+> 
+>     public void Delete(int position, int length)
+>     {
+>         Text = Text.Remove(position, length);
+>     }
+> 
+>     public void Replace(int position, int length, string newText)
+>     {
+>         Text = Text.Remove(position, length).Insert(position, newText);
+>     }
+> 
+>     public void Display() => Console.WriteLine($"  文本: \"{Text}\"");
+> 
+>     // Memento 创建/恢复
+>     public EditorMemento CreateMemento() => new(Text);
+> 
+>     public void SetMemento(EditorMemento m) => Text = m.Text;
+> 
+>     // Memento（不可变快照）
+>     public record EditorMemento(string Text);
+> }
+> 
+> // ============================================
+> // ICommand 接口
+> // ============================================
+> public interface ICommand
+> {
+>     void Execute(Editor editor);
+>     void Undo(Editor editor);
+>     string Description { get; }
+> }
+> 
+> // ============================================
+> // 具体命令
+> // ============================================
+> public class InsertCommand : ICommand
+> {
+>     private readonly int _position;
+>     private readonly string _text;
+>     public string Description => $"插入 \"{_text}\" @位置{_position}";
+> 
+>     public InsertCommand(int position, string text)
+>     {
+>         _position = position;
+>         _text = text;
+>     }
+> 
+>     public void Execute(Editor editor)
+>     {
+>         editor.Insert(_position, _text);
+>         Console.WriteLine($"  [执行] {Description}");
+>     }
+> 
+>     public void Undo(Editor editor)
+>     {
+>         editor.Delete(_position, _text.Length);
+>         Console.WriteLine($"  [撤销] {Description}");
+>     }
+> }
+> 
+> public class DeleteCommand : ICommand
+> {
+>     private readonly int _position;
+>     private readonly int _length;
+>     private string _deletedText = string.Empty; // 执行时保存，用于撤销
+>     public string Description => $"删除 {_length} 字符 @位置{_position}";
+> 
+>     public DeleteCommand(int position, int length)
+>     {
+>         _position = position;
+>         _length = length;
+>     }
+> 
+>     public void Execute(Editor editor)
+>     {
+>         _deletedText = editor.Text.Substring(_position, _length);
+>         editor.Delete(_position, _length);
+>         Console.WriteLine($"  [执行] {Description} (删除内容: \"{_deletedText}\")");
+>     }
+> 
+>     public void Undo(Editor editor)
+>     {
+>         editor.Insert(_position, _deletedText);
+>         Console.WriteLine($"  [撤销] {Description} (恢复: \"{_deletedText}\")");
+>     }
+> }
+> 
+> public class ReplaceCommand : ICommand
+> {
+>     private readonly int _position;
+>     private readonly int _length;
+>     private readonly string _newText;
+>     private string _oldText = string.Empty;
+>     public string Description => $"替换 \"{_newText}\" @位置{_position}";
+> 
+>     public ReplaceCommand(int position, int length, string newText)
+>     {
+>         _position = position;
+>         _length = length;
+>         _newText = newText;
+>     }
+> 
+>     public void Execute(Editor editor)
+>     {
+>         _oldText = editor.Text.Substring(_position, _length);
+>         editor.Replace(_position, _length, _newText);
+>         Console.WriteLine($"  [执行] {Description} (旧: \"{_oldText}\")");
+>     }
+> 
+>     public void Undo(Editor editor)
+>     {
+>         editor.Replace(_position, _newText.Length, _oldText);
+>         Console.WriteLine($"  [撤销] {Description} (恢复: \"{_oldText}\")");
+>     }
+> }
+> 
+> // ============================================
+> // MacroCommand：将一组命令合并为一个事务
+> // ============================================
+> public class MacroCommand : ICommand
+> {
+>     private readonly List<ICommand> _commands;
+>     public string Description { get; }
+> 
+>     public MacroCommand(string description, params ICommand[] commands)
+>     {
+>         Description = description;
+>         _commands = new List<ICommand>(commands);
+>     }
+> 
+>     public void Execute(Editor editor)
+>     {
+>         Console.WriteLine($"  [宏] 开始: {Description}");
+>         foreach (var cmd in _commands)
+>             cmd.Execute(editor);
+>         Console.WriteLine($"  [宏] 完成: {Description}");
+>     }
+> 
+>     public void Undo(Editor editor)
+>     {
+>         Console.WriteLine($"  [宏_撤销] 开始: {Description}");
+>         // 逆序撤销
+>         for (int i = _commands.Count - 1; i >= 0; i--)
+>             _commands[i].Undo(editor);
+>         Console.WriteLine($"  [宏_撤销] 完成: {Description}");
+>     }
+> }
+> 
+> // ============================================
+> // CommandHistory（Caretaker）— 管理 undo/redo
+> // ============================================
+> public class CommandHistory
+> {
+>     private readonly Stack<(ICommand command, Editor.EditorMemento beforeState)> _undoStack = new();
+>     private readonly Stack<ICommand> _redoStack = new();
+> 
+>     public void ExecuteCommand(ICommand command, Editor editor)
+>     {
+>         // 执行前保存状态快照
+>         var beforeState = editor.CreateMemento();
+>         command.Execute(editor);
+>         _undoStack.Push((command, beforeState));
+>         _redoStack.Clear();
+>     }
+> 
+>     public bool Undo(Editor editor)
+>     {
+>         if (_undoStack.Count == 0)
+>         {
+>             Console.WriteLine("  无可撤销操作");
+>             return false;
+>         }
+> 
+>         var (command, beforeState) = _undoStack.Pop();
+>         // 恢复执行前的状态 + 执行命令的逆操作
+>         editor.SetMemento(beforeState);
+>         // 注意：这里的策略是"快照恢复"——直接回到执行前的状态
+>         // 另一种策略是"逆操作"——command.Undo(editor)
+>         _redoStack.Push(command);
+>         Console.WriteLine($"  [Undo] 撤销: {command.Description}");
+>         return true;
+>     }
+> 
+>     public bool Redo(Editor editor)
+>     {
+>         if (_redoStack.Count == 0)
+>         {
+>             Console.WriteLine("  无可重做操作");
+>             return false;
+>         }
+> 
+>         var command = _redoStack.Pop();
+>         var beforeState = editor.CreateMemento();
+>         command.Execute(editor);
+>         _undoStack.Push((command, beforeState));
+>         Console.WriteLine($"  [Redo] 重做: {command.Description}");
+>         return true;
+>     }
+> }
+> 
+> // ============================================
+> // 验证：5 个操作后 Undo 5 次回到初始状态
+> // ============================================
+> static void TestCommandMemento()
+> {
+>     Console.WriteLine("=== Command + Memento Undo/Redo ===\n");
+> 
+>     var editor = new Editor();
+>     var history = new CommandHistory();
+> 
+>     // 初始文本
+>     editor.Insert(0, "Hello");
+>     Console.WriteLine("初始状态:");
+>     editor.Display();
+>     Console.WriteLine();
+> 
+>     // 操作 1：插入 " World"
+>     history.ExecuteCommand(new InsertCommand(5, " World"), editor);
+>     editor.Display();
+>     Console.WriteLine();
+> 
+>     // 操作 2：替换 "World" → "C#"
+>     history.ExecuteCommand(new ReplaceCommand(6, 5, "C#"), editor);
+>     editor.Display();
+>     Console.WriteLine();
+> 
+>     // 操作 3：插入 " Design"
+>     history.ExecuteCommand(new InsertCommand(8, " Design"), editor);
+>     editor.Display();
+>     Console.WriteLine();
+> 
+>     // 操作 4：删除 " Design"
+>     history.ExecuteCommand(new DeleteCommand(8, 7), editor);
+>     editor.Display();
+>     Console.WriteLine();
+> 
+>     // 操作 5：MacroCommand — 批量操作
+>     history.ExecuteCommand(new MacroCommand("格式化文本",
+>         new InsertCommand(0, "» "),
+>         new InsertCommand(editor.Text.Length + 3, " «")
+>     ), editor);
+>     editor.Display();
+>     Console.WriteLine();
+> 
+>     // Undo 5 次回到初始状态
+>     Console.WriteLine("--- 连续 Undo 5 次 ---");
+>     for (int i = 0; i < 5; i++)
+>     {
+>         history.Undo(editor);
+>         editor.Display();
+>     }
+> 
+>     // Redo 3 次
+>     Console.WriteLine("\n--- Redo 3 次 ---");
+>     for (int i = 0; i < 3; i++)
+>     {
+>         history.Redo(editor);
+>         editor.Display();
+>     }
+> }
+> ```
+>
+> **关键设计要点：**
+> - 每个 Command 在执行前自动调用 `editor.CreateMemento()` 保存快照
+> - Undo 时恢复快照（全量恢复策略，比逐条逆操作更简单可靠）
+> - `MacroCommand` 将多个操作合并为一个事务——Undo 时逆序撤销子命令
+> - `DeleteCommand` 在执行时保存被删除的文本，确保 Undo 能恢复
+> - 新操作执行后清空 `_redoStack`——防止状态树分叉
+
+> [!tip]- 练习 2 参考答案：多槽位游戏存档系统
+>   
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Linq;
+> 
+> // 复用 2.2 节中的 Player 和 PlayerSnapshot 类（Originator + Memento）
+> // 这里只展示扩展的 SaveManager（Caretaker）
+> 
+> // ============================================
+> // 扩展：SaveManager — 多槽位 + 覆盖确认 + 快速存档
+> // ============================================
+> public class SaveManager
+> {
+>     private readonly Dictionary<string, PlayerSnapshot> _slots = new();
+>     private const string QuickSaveSlot = "__QUICK_SAVE__";
+> 
+>     // 存档（带覆盖确认回调）
+>     public bool Save(Player player, string slotName, Func<string, bool>? confirmOverwrite = null)
+>     {
+>         if (string.IsNullOrWhiteSpace(slotName))
+>         {
+>             Console.WriteLine("  [SaveManager] 槽位名不能为空");
+>             return false;
+>         }
+> 
+>         // 覆盖确认
+>         if (_slots.ContainsKey(slotName))
+>         {
+>             if (confirmOverwrite != null && !confirmOverwrite(slotName))
+>             {
+>                 Console.WriteLine($"  [SaveManager] 取消覆盖槽位 \"{slotName}\"");
+>                 return false;
+>             }
+>             Console.WriteLine($"  [SaveManager] 覆盖槽位 \"{slotName}\"");
+>         }
+> 
+>         var snapshot = player.CreateSnapshot(slotName);
+>         _slots[slotName] = snapshot;
+>         Console.WriteLine($"  [SaveManager] 已保存至槽位 \"{slotName}\": {GetPreview(snapshot)}");
+>         return true;
+>     }
+> 
+>     // 加载
+>     public bool Load(Player player, string slotName)
+>     {
+>         if (!_slots.TryGetValue(slotName, out var snapshot))
+>         {
+>             Console.WriteLine($"  [SaveManager] 槽位 \"{slotName}\" 不存在");
+>             return false;
+>         }
+> 
+>         player.RestoreSnapshot(snapshot);
+>         Console.WriteLine($"  [SaveManager] 已从槽位 \"{slotName}\" 加载: {GetPreview(snapshot)}");
+>         return true;
+>     }
+> 
+>     // 删除槽位
+>     public bool DeleteSlot(string slotName)
+>     {
+>         if (_slots.Remove(slotName))
+>         {
+>             Console.WriteLine($"  [SaveManager] 已删除槽位 \"{slotName}\"");
+>             return true;
+>         }
+>         Console.WriteLine($"  [SaveManager] 槽位 \"{slotName}\" 不存在");
+>         return false;
+>     }
+> 
+>     // 快速存档（绑定 F5）
+>     public void QuickSave(Player player)
+>     {
+>         Console.WriteLine("  [F5] 快速存档...");
+>         // 快速存档不询问覆盖确认
+>         Save(player, QuickSaveSlot);
+>     }
+> 
+>     // 快速读档（绑定 F9）
+>     public bool QuickLoad(Player player)
+>     {
+>         Console.WriteLine("  [F9] 快速读档...");
+>         return Load(player, QuickSaveSlot);
+>     }
+> 
+>     // 预览信息——不暴露全部内部状态
+>     public void ListSlots()
+>     {
+>         Console.WriteLine("  存档列表:");
+>         if (_slots.Count == 0)
+>         {
+>             Console.WriteLine("    (空)");
+>             return;
+>         }
+>         foreach (var (name, snap) in _slots.OrderBy(kv => kv.Key))
+>         {
+>             Console.WriteLine($"    {GetPreview(snap)}");
+>         }
+>     }
+> 
+>     // 预览：只展示等级、血量、位置——不暴露背包和任务详情
+>     private static string GetPreview(PlayerSnapshot snap)
+>         => $"[{snap.SlotName}] Lv.{snap.Level} HP:{snap.Health}/{snap.MaxHealth} " +
+>            $"@({snap.PositionX:F1},{snap.PositionY:F1}) " +
+>            $"任务:{snap.CurrentQuest} " +
+>            $"{snap.SavedAt:MM-dd HH:mm}";
+> 
+>     public bool HasSlot(string slotName) => _slots.ContainsKey(slotName);
+> }
+> 
+> // ============================================
+> // 验证：3 个槽位不同进度
+> // ============================================
+> static void TestMultiSlotSaves()
+> {
+>     Console.WriteLine("=== 多槽位游戏存档系统 ===\n");
+> 
+>     var saves = new SaveManager();
+> 
+>     // 存档 1：游戏初期
+>     var p1 = new Player();
+>     Console.WriteLine("--- 存档 1：游戏初期 ---");
+>     p1.MoveTo(10, 20);
+>     p1.AddItem("铁剑");
+>     saves.Save(p1, "Slot1");
+>     Console.WriteLine();
+> 
+>     // 存档 2：中期
+>     var p2 = new Player();
+>     p2.MoveTo(150, 300);
+>     p2.TakeDamage(40);
+>     p2.LevelUp();
+>     p2.LevelUp();
+>     p2.AddItem("龙鳞盾");
+>     p2.SetQuest("第三章：深海之谜");
+>     Console.WriteLine("--- 存档 2：中期进度 ---");
+>     saves.Save(p2, "Slot2");
+>     Console.WriteLine();
+> 
+>     // 存档 3：后期
+>     var p3 = new Player();
+>     p3.MoveTo(999, 888);
+>     p3.LevelUp(); p3.LevelUp(); p3.LevelUp();
+>     p3.AddItem("圣剑");
+>     p3.AddItem("魔法披风");
+>     p3.AddItem("传送戒指");
+>     p3.SetQuest("终章：最终决战");
+>     Console.WriteLine("--- 存档 3：后期进度 ---");
+>     saves.Save(p3, "Slot3");
+>     Console.WriteLine();
+> 
+>     // 列出所有存档
+>     Console.WriteLine("=== 全部存档预览 ===");
+>     saves.ListSlots();
+>     Console.WriteLine();
+> 
+>     // 依次加载每个槽位并打印状态
+>     var currentPlayer = new Player();
+>     foreach (var slot in new[] { "Slot1", "Slot2", "Slot3" })
+>     {
+>         Console.WriteLine($"=== 加载 {slot} ===");
+>         saves.Load(currentPlayer, slot);
+>         currentPlayer.Display();
+>     }
+> 
+>     // 覆盖确认测试
+>     Console.WriteLine("--- 覆盖确认测试 ---");
+>     saves.Save(currentPlayer, "Slot1", slotName =>
+>     {
+>         Console.Write($"  槽位 \"{slotName}\" 已有存档，是否覆盖？(y/n): ");
+>         return true; // 模拟用户输入 y
+>     });
+>     Console.WriteLine();
+> 
+>     // 删除测试
+>     Console.WriteLine("--- 删除槽位 Slot2 ---");
+>     saves.DeleteSlot("Slot2");
+>     saves.ListSlots();
+>     Console.WriteLine();
+> 
+>     // 快速存档/读档
+>     Console.WriteLine("--- 快速存档/读档 ---");
+>     currentPlayer.MoveTo(42, 42);
+>     saves.QuickSave(currentPlayer);
+>     currentPlayer.TakeDamage(99); // 模拟死亡
+>     Console.WriteLine("  (玩家遭受重创...)");
+>     currentPlayer.Display();
+>     saves.QuickLoad(currentPlayer); // F9 读档恢复
+>     currentPlayer.Display();
+> }
+> ```
+>
+> **关键设计要点：**
+> - 预览信息 `GetPreview()` 只展示等级/血量/位置——**不暴露**背包内容、完整任务日志等内部状态（窄接口原则）
+> - 覆盖确认用 `Func<string, bool>` 回调模式——游戏 UI 可弹出确认对话框
+> - 快速存档使用专用槽位 `__QUICK_SAVE__`，与三个手动槽位隔离
+> - 删除槽位后 `Dictionary.Remove` 即可——简单直接
+
+> [!tip]- 练习 3 参考答案：差分存储 Memento（属性比较方案）
+>   
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Reflection;
+> using System.Linq;
+> 
+> // ============================================
+> // ProjectMemento — 项目快照（Baseline 用）
+> // ============================================
+> public class ProjectMemento
+> {
+>     internal string Name { get; }
+>     internal List<TaskItem> Tasks { get; }
+>     internal Dictionary<string, string> Metadata { get; }
+>     public DateTime Timestamp { get; }
+> 
+>     internal ProjectMemento(string name, List<TaskItem> tasks,
+>         Dictionary<string, string> metadata, DateTime timestamp)
+>     {
+>         Name = name;
+>         // 深拷贝
+>         Tasks = tasks.Select(t => t with { }).ToList();
+>         Metadata = new Dictionary<string, string>(metadata);
+>         Timestamp = timestamp;
+>     }
+> 
+>     public override string ToString()
+>         => $"[Memento {Timestamp:HH:mm:ss}] 项目:{Name}, 任务数:{Tasks.Count}";
+> 
+>     public int EstimatedSizeBytes()
+>     {
+>         int size = System.Text.Encoding.UTF8.GetByteCount(Name);
+>         size += Tasks.Count * 200; // 粗略估计
+>         size += Metadata.Count * 100;
+>         return size;
+>     }
+> }
+> 
+> public record TaskItem(string Title, string Status, int EstimatedHours);
+> 
+> // ============================================
+> // DeltaMemento — 只存储与前一个快照的差异
+> // ============================================
+> public class DeltaMemento
+> {
+>     public bool IsBaseline { get; }
+>     public ProjectMemento? Baseline { get; } // 仅基线时非 null
+>     public Dictionary<string, object?> Changes { get; } = new();
+>     public DateTime Timestamp { get; }
+> 
+>     // 基线构造
+>     public DeltaMemento(ProjectMemento baseline)
+>     {
+>         IsBaseline = true;
+>         Baseline = baseline;
+>         Timestamp = baseline.Timestamp;
+>     }
+> 
+>     // 差分构造
+>     public DeltaMemento(Dictionary<string, object?> changes, DateTime timestamp)
+>     {
+>         IsBaseline = false;
+>         Changes = changes;
+>         Timestamp = timestamp;
+>     }
+> 
+>     public int EstimatedSizeBytes()
+>     {
+>         if (IsBaseline)
+>             return Baseline!.EstimatedSizeBytes();
+> 
+>         return Changes.Sum(kv =>
+>             System.Text.Encoding.UTF8.GetByteCount(kv.Key) +
+>             (kv.Value?.ToString()?.Length * 2 ?? 0) + 16);
+>     }
+> 
+>     public override string ToString()
+>         => IsBaseline
+>             ? $"[Delta-Baseline {Timestamp:HH:mm:ss}]"
+>             : $"[Delta {Timestamp:HH:mm:ss}] 变更字段: {Changes.Count}";
+> }
+> 
+> // ============================================
+> // ProjectOriginator — 项目
+> // ============================================
+> public class Project
+> {
+>     public string Name { get; set; } = "";
+>     public List<TaskItem> Tasks { get; set; } = new();
+>     public Dictionary<string, string> Metadata { get; set; } = new();
+> 
+>     public void Display()
+>     {
+>         Console.WriteLine($"  项目: {Name}, 任务数: {Tasks.Count}, 元数据: {Metadata.Count} 项");
+>         foreach (var t in Tasks.Take(5))
+>             Console.WriteLine($"    [{t.Status}] {t.Title} ({t.EstimatedHours}h)");
+>         if (Tasks.Count > 5)
+>             Console.WriteLine($"    ... 还有 {Tasks.Count - 5} 个任务");
+>     }
+> 
+>     // 创建基线 Memento
+>     public ProjectMemento CreateBaseline()
+>         => new(Name, Tasks, Metadata, DateTime.Now);
+> 
+>     // 计算与 reference 的差异
+>     public DeltaMemento CreateDelta(ProjectMemento reference)
+>     {
+>         var changes = new Dictionary<string, object?>();
+> 
+>         if (Name != reference.Name)
+>             changes["Name"] = Name;
+> 
+>         // 比较任务列表（简化：比较 JSON 序列化结果）
+>         var tasksJson = System.Text.Json.JsonSerializer.Serialize(Tasks);
+>         var refTasksJson = System.Text.Json.JsonSerializer.Serialize(reference.Tasks);
+>         if (tasksJson != refTasksJson)
+>             changes["Tasks"] = Tasks.Select(t => t with { }).ToList();
+> 
+>         // 比较元数据
+>         foreach (var (key, value) in Metadata)
+>         {
+>             if (!reference.Metadata.TryGetValue(key, out var refValue) || refValue != value)
+>                 changes[$"Meta.{key}"] = value;
+>         }
+>         foreach (var key in reference.Metadata.Keys)
+>         {
+>             if (!Metadata.ContainsKey(key))
+>                 changes[$"Meta.{key}"] = null; // 标记为删除
+>         }
+> 
+>         return new DeltaMemento(changes, DateTime.Now);
+>     }
+> 
+>     // 从 Baseline 应用差分链恢复到最新状态
+>     public void RestoreFromBaseline(ProjectMemento baseline)
+>     {
+>         Name = baseline.Name;
+>         Tasks = baseline.Tasks.Select(t => t with { }).ToList();
+>         Metadata = new Dictionary<string, string>(baseline.Metadata);
+>     }
+> 
+>     // 应用单个 Delta
+>     public void ApplyDelta(DeltaMemento delta)
+>     {
+>         foreach (var (key, value) in delta.Changes)
+>         {
+>             if (key == "Name")
+>                 Name = (string)value!;
+>             else if (key == "Tasks")
+>                 Tasks = ((List<TaskItem>)value!).Select(t => t with { }).ToList();
+>             else if (key.StartsWith("Meta."))
+>             {
+>                 var metaKey = key[5..];
+>                 if (value == null)
+>                     Metadata.Remove(metaKey);
+>                 else
+>                     Metadata[metaKey] = (string)value;
+>             }
+>         }
+>     }
+> }
+> 
+> // ============================================
+> // DeltaHistory（Caretaker）— 管理差分链
+> // ============================================
+> public class DeltaHistory
+> {
+>     private readonly List<DeltaMemento> _history = new();
+>     private int _currentIndex = -1;
+> 
+>     public void Save(Project project)
+>     {
+>         DeltaMemento delta;
+>         if (_history.Count == 0)
+>         {
+>             // 第一个快照 = Baseline
+>             delta = new DeltaMemento(project.CreateBaseline());
+>             Console.WriteLine($"  [DeltaHistory] 创建基线: {delta}");
+>         }
+>         else
+>         {
+>             var lastBaseline = GetEffectiveBaseline();
+>             delta = project.CreateDelta(lastBaseline);
+>             Console.WriteLine($"  [DeltaHistory] 保存差分: {delta}");
+>         }
+> 
+>         // 如果当前位置不在末尾，丢弃之后的快照（类似 redo 栈清空）
+>         if (_currentIndex < _history.Count - 1)
+>             _history.RemoveRange(_currentIndex + 1, _history.Count - _currentIndex - 1);
+> 
+>         _history.Add(delta);
+>         _currentIndex = _history.Count - 1;
+>     }
+> 
+>     public bool Undo(Project project)
+>     {
+>         if (_currentIndex <= 0)
+>         {
+>             Console.WriteLine("  [DeltaHistory] 无可撤销操作");
+>             return false;
+>         }
+> 
+>         _currentIndex--;
+>         RestoreToCurrent(project);
+>         Console.WriteLine($"  [DeltaHistory] 撤销至快照 #{_currentIndex + 1}");
+>         return true;
+>     }
+> 
+>     public bool Redo(Project project)
+>     {
+>         if (_currentIndex >= _history.Count - 1)
+>         {
+>             Console.WriteLine("  [DeltaHistory] 无可重做操作");
+>             return false;
+>         }
+> 
+>         _currentIndex++;
+>         RestoreToCurrent(project);
+>         Console.WriteLine($"  [DeltaHistory] 重做至快照 #{_currentIndex + 1}");
+>         return true;
+>     }
+> 
+>     private void RestoreToCurrent(Project project)
+>     {
+>         var baseline = _history[0].Baseline!;
+>         project.RestoreFromBaseline(baseline);
+> 
+>         // 依次应用差分 1..currentIndex
+>         for (int i = 1; i <= _currentIndex; i++)
+>         {
+>             project.ApplyDelta(_history[i]);
+>         }
+>     }
+> 
+>     private ProjectMemento GetEffectiveBaseline()
+>     {
+>         // 从 Baseline 开始，依次应用所有 Delta 得到当前有效状态
+>         var tempProject = new Project();
+>         tempProject.RestoreFromBaseline(_history[0].Baseline!);
+>         for (int i = 1; i < _history.Count; i++)
+>             tempProject.ApplyDelta(_history[i]);
+>         return tempProject.CreateBaseline();
+>     }
+> 
+>     public void PrintSizeStats()
+>     {
+>         int totalSize = 0;
+>         Console.WriteLine("\n  差分存储统计:");
+>         for (int i = 0; i < _history.Count; i++)
+>         {
+>             var delta = _history[i];
+>             int size = delta.EstimatedSizeBytes();
+>             totalSize += size;
+>             Console.WriteLine($"    #{i + 1}: {delta} — ~{size} bytes");
+>         }
+>         int fullSize = _history.Count * (_history[0].Baseline?.EstimatedSizeBytes() ?? 0);
+>         Console.WriteLine($"  总计: ~{totalSize} bytes (全量方案: ~{fullSize} bytes)");
+>         Console.WriteLine($"  节省: ~{Math.Max(0, fullSize - totalSize)} bytes ({100.0 * (fullSize - totalSize) / Math.Max(1, fullSize):F1}%)");
+>     }
+> }
+> 
+> // ============================================
+> // 验证：100 个任务的 Baseline + 修改 1 个任务的 Delta
+> // ============================================
+> static void TestDeltaMemento()
+> {
+>     Console.WriteLine("=== 差分存储 Memento ===\n");
+> 
+>     var project = new Project { Name = "大型企业ERP系统" };
+> 
+>     // 创建 100 个任务
+>     for (int i = 1; i <= 100; i++)
+>     {
+>         project.Tasks.Add(new TaskItem($"任务 #{i}", "Todo", i % 8 + 1));
+>     }
+>     project.Metadata["Owner"] = "张三";
+>     project.Metadata["Deadline"] = "2026-12-31";
+> 
+>     Console.WriteLine("初始状态:");
+>     project.Display();
+> 
+>     var history = new DeltaHistory();
+> 
+>     // 保存 Baseline（100 个任务）
+>     history.Save(project);
+> 
+>     // 只修改 1 个任务的状态
+>     Console.WriteLine("\n修改任务 #50 的状态...");
+>     project.Tasks[49] = project.Tasks[49] with { Status = "InProgress" };
+>     history.Save(project); // Delta —— 只存差异
+> 
+>     // 再修改项目名
+>     Console.WriteLine("\n修改项目名...");
+>     project.Name = "大型企业ERP系统 v2.0";
+>     history.Save(project); // Delta —— 只存差异
+> 
+>     // 统计
+>     history.PrintSizeStats();
+> 
+>     // Undo 两次
+>     Console.WriteLine("\n--- Undo x2 ---");
+>     history.Undo(project);
+>     project.Display();
+>     history.Undo(project);
+>     project.Display();
+> 
+>     // 验证：回到初始状态
+>     Console.WriteLine("\n--- 验证：任务 #50 已恢复为 Todo ---");
+>     var task50 = project.Tasks[49];
+>     Console.WriteLine($"  任务 #50: [{task50.Status}] {task50.Title}");
+>     Console.WriteLine($"  项目名: {project.Name}");
+> }
+> ```
+>
+> **关键设计要点：**
+> - **Baseline + Delta 链**：第一个快照保存全量（Baseline），后续只存字段差异
+> - **Undo 实现**：从 Baseline 开始依次应用 Delta 直到目标位置——O(n) 但 n 通常很小
+> - **内存节省**：100 个任务的 Baseline ≈ 20KB，Delta 只存 1 个字段变更 ≈ 50 bytes——节省 >99%
+> - **深拷贝注意**：Delta 中存储的引用类型（如 `List<TaskItem>`）必须在保存时深拷贝，防止后续被修改
+> - **备选方案**：JSON Patch（RFC 6902）使用 `System.Text.Json.JsonSerializer` + `JsonDocument` 对比——更通用但计算成本更高
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 相关模式

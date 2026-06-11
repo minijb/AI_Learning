@@ -677,6 +677,342 @@ public struct FlowFieldMoveJob : IJobParallelFor
 
 5. **多目标 Flow Field**：如果你有 5 个不同的目标（5 个资源点），构建 5 个积分场。每个 agent 选择一个目标，使用对应场的 flow 移动。实现一个简单的分配策略：agent 选择 `integration[agent_position]` 最小的目标（即离自己最近的）。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 将沼泽代价从 3.0 改为 10.0：agent 绕行距离增加，因为代价为 10 的格子相比绕行的额外路径长度不再划算。
+>
+> ```cpp
+> // 修改 build_cost_field() 中的一行：
+> //   grid.at(x, y) = 3.0f;  →  grid.at(x, y) = 10.0f;
+>
+> void build_cost_field_swamp10() {
+>     for (int y = 0; y < grid.h; ++y) {
+>         for (int x = 0; x < grid.w; ++x) {
+>             if (grid.is_wall(x, y)) continue;
+>             float dx = x - grid.w/2.0f;
+>             float dy = y - grid.h/2.0f;
+>             if (std::abs(dx) < 8 && std::abs(dy) < 8)
+>                 grid.at(x, y) = 10.0f;  // 改为 10.0
+>         }
+>     }
+> }
+>
+> // 对比打印：调用 build_integration_field() 后输出两个版本的积分场
+> void compare_integration(Grid& grid_low, Grid& grid_high,
+>                          int goal_x, int goal_y) {
+>     FlowField ff_low(grid_low), ff_high(grid_high);
+>     ff_low.build(goal_x, goal_y);   // 代价 3.0
+>     ff_high.build(goal_x, goal_y);  // 代价 10.0
+>
+>     int diff_count = 0;
+>     for (int y = 0; y < grid_low.h; ++y) {
+>         for (int x = 0; x < grid_low.w; ++x) {
+>             int idx = y * grid_low.w + x;
+>             float d = std::abs(ff_low.integration[idx] - ff_high.integration[idx]);
+>             if (d > 1.0f) diff_count++;  // 代价差异 >1 的格子
+>         }
+>     }
+>     std::cout << "积分场差异格子数 (>1 cost): " << diff_count
+>               << " / " << grid_low.w * grid_low.h << "\n";
+> }
+> ```
+>
+> **核心解释**：Dijkstra 沿最小累积代价传播。代价 3.0×16 格 ≈ 48 累积代价；绕行 32 格 × 1.0 ≈ 32。48 > 32 → 绕行更优。代价 10.0×16 ≈ 160 vs 绕行 32 → 差距更大，agent 会绕得更远（甚至贴着墙走如果有更宽的平地区域）。代价设为 INF 则是不可通过墙。
+
+> [!tip]- 练习 2 参考答案
+> 高斯衰减 avoidance field：在代价场上叠加一个以危险点为中心的径向衰减"惩罚峰"，离危险越近代价越高，产生平滑的绕行行为。
+>
+> ```cpp
+> // 在 FlowField 类中添加
+> void add_avoidance_field(float center_x, float center_y, float radius, float peak_cost) {
+>     float sigma = radius / 3.0f;  // 3σ 在半径边缘衰减到接近 0
+>     float two_sigma2 = 2.0f * sigma * sigma;
+>
+>     for (int y = 0; y < grid.h; ++y) {
+>         for (int x = 0; x < grid.w; ++x) {
+>             if (grid.is_wall(x, y)) continue;
+>
+>             float dx = x - center_x;
+>             float dy = y - center_y;
+>             float dist2 = dx*dx + dy*dy;
+>
+>             // 高斯衰减：峰值在中心，半径外趋近 0
+>             float avoidance = peak_cost * std::exp(-dist2 / two_sigma2);
+>
+>             // 叠加到地形代价上（而非替换）
+>             grid.at(x, y) += avoidance;
+>         }
+>     }
+> }
+>
+> // 使用示例（在 build_cost_field 中或 main 中调用）
+> // ff.add_avoidance_field(30.0f, 15.0f, 6.0f, 5.0f);
+> ```
+>
+> **完整替换 build_cost_field()**（结合练习 1 的沼泽区域）：
+>
+> ```cpp
+> void build_cost_field_with_avoidance() {
+>     // 1. 基础地形
+>     for (int y = 0; y < grid.h; ++y) {
+>         for (int x = 0; x < grid.w; ++x) {
+>             if (grid.is_wall(x, y)) continue;
+>             float dx = x - grid.w/2.0f, dy = y - grid.h/2.0f;
+>             if (std::abs(dx) < 8 && std::abs(dy) < 8)
+>                 grid.at(x, y) = 3.0f;
+>         }
+>     }
+>     // 2. 叠加 avoidance 峰
+>     add_avoidance_field(30.0f, 15.0f, 6.0f, 5.0f);
+> }
+> ```
+>
+> **观察要点**：
+> - 危险区域内梯度渐变（不是突变），agent 逐渐偏离而非急转
+> - 若危险区域完全阻断最佳路径，agent 会选择绕行（积分场的 Dijkstra 自动计算绕行代价是否低于穿越代价）
+> - `peak_cost` 设太高（>50）相当于墙壁，太低（<1）则 agent 几乎不理会
+> - 高斯 σ 决定了过渡带的宽度——σ 越大，agent 在更远处就开始偏转
+
+> [!tip]- 练习 3 参考答案
+> 场组合：构建两个独立的 Flow Field，对它们的 flow 向量做加权平均——agent 同时被两个目标吸引，权重决定偏向。
+>
+> ```cpp
+> // 在主程序中（或作为自由函数）
+> struct CombinedFlow {
+>     FlowField& primary;
+>     FlowField& secondary;
+>     float w1, w2;
+>
+>     CombinedFlow(FlowField& p, FlowField& s, float w1_, float w2_)
+>         : primary(p), secondary(s), w1(w1_), w2(w2_) {}
+>
+>     // 组合查询：两个场的 flow 向量加权求和后归一化
+>     Vec2 sample_flow(float x, float y) const {
+>         Vec2 f1 = primary.sample_flow(x, y);
+>         Vec2 f2 = secondary.sample_flow(x, y);
+>
+>         // 如果某个场在该位置不可达（零向量），只用另一个
+>         if (f1.len() < 0.01f) return f2;
+>         if (f2.len() < 0.01f) return f1;
+>
+>         Vec2 combined = f1 * w1 + f2 * w2;
+>         return combined.norm();
+>     }
+> };
+>
+> // 使用示例
+> // FlowField ff1(grid), ff2(grid);
+> // ff1.build(goal1_x, goal1_y);
+> // ff2.build(goal2_x, goal2_y);
+> // CombinedFlow cf(ff1, ff2, 0.7f, 0.3f);
+> //
+> // for (auto& a : agents)
+> //     a.pos += cf.sample_flow(a.x, a.y) * a.speed * dt;
+> ```
+>
+> **组合场的行为特征**：
+> - `w1=1.0, w2=0.0` → 纯主要目标（等同于单个 Flow Field）
+> - `w1=0.7, w2=0.3` → 主要目标主导，次要目标轻微吸引——agent 会略微偏离直线路径，朝向次要目标方向弯曲
+> - `w1=0.5, w2=0.5` → 两个目标等权重——agent 会走向两个目标的**中间方向**（几何平均），接近中点时方向可能剧烈变化
+> - **关键限制**：加权平均不是真正的多目标规划——agent 可能被困在两个目标之间的"拉锯区域"（两个方向的合力为零）。解决方案：仅在 agent 不在任一目标附近时使用组合，接近某一目标后切换到该目标的纯场
+
+> [!tip]- 练习 4 参考答案
+> 动态目标更新：模拟移动目标，每 20 帧重建积分场和流向场（代价场只建一次），测量重建开销。
+>
+> ```cpp
+> // 动态目标追踪
+> void simulate_dynamic_target() {
+>     constexpr int W = 60, H = 40;
+>     Grid grid(W, H);
+>
+>     // 放置墙壁（同教程示例）
+>     for (int x = 10; x < 25; ++x) grid.at(x, 20) = INF;
+>     for (int x = 35; x < 50; ++x) grid.at(x, 20) = INF;
+>
+>     FlowField ff(grid);
+>
+>     // 代价场只建一次
+>     ff.build_cost_field();
+>
+>     // 移动目标：从左上走到右下
+>     float goal_x = 5.0f, goal_y = 5.0f;
+>     float goal_vx = 0.25f, goal_vy = 0.2f;
+>
+>     constexpr int NUM_AGENTS = 1000;
+>     std::vector<Agent> agents(NUM_AGENTS);
+>     // ... (spawn agents 与教程相同，省略) ...
+>
+>     constexpr int REBUILD_INTERVAL = 20;
+>     constexpr int TOTAL_FRAMES = 200;
+>
+>     long long total_rebuild_us = 0;
+>     int rebuild_count = 0;
+>
+>     for (int frame = 0; frame < TOTAL_FRAMES; ++frame) {
+>         // 移动目标
+>         goal_x += goal_vx;
+>         goal_y += goal_vy;
+>         if (goal_x >= W-1 || goal_x <= 0) goal_vx *= -1;
+>         if (goal_y >= H-1 || goal_y <= 0) goal_vy *= -1;
+>
+>         // 每 REBUILD_INTERVAL 帧重建积分场和流向场
+>         if (frame % REBUILD_INTERVAL == 0) {
+>             auto t1 = std::chrono::high_resolution_clock::now();
+>
+>             ff.goal_x = (int)goal_x;
+>             ff.goal_y = (int)goal_y;
+>             ff.build_integration_field();  // 只重建积分场和流向场
+>             ff.build_flow_field();
+>
+>             auto t2 = std::chrono::high_resolution_clock::now();
+>             total_rebuild_us += std::chrono::duration_cast
+>                 <std::chrono::microseconds>(t2 - t1).count();
+>             rebuild_count++;
+>         }
+>
+>         // agent 移动（同教程）
+>         for (auto& a : agents) {
+>             if (a.arrived) continue;
+>             float dx_g = a.x - goal_x, dy_g = a.y - goal_y;
+>             if (dx_g*dx_g + dy_g*dy_g < 0.5f) { a.arrived = true; continue; }
+>             Vec2 dir = ff.sample_flow(a.x, a.y);
+>             if (dir.len() < 0.01f) { a.arrived = true; continue; }
+>             a.x += dir.x * a.speed * 0.15f;
+>             a.y += dir.y * a.speed * 0.15f;
+>         }
+>     }
+>
+>     std::cout << "动态目标: 重建 " << rebuild_count << " 次\n";
+>     std::cout << "  平均重建: " << total_rebuild_us / (double)rebuild_count
+>               << " us\n";
+>     std::cout << "  总重建:   " << total_rebuild_us / 1000.0 << " ms\n";
+>
+>     // 对比：1000 次 A* 重建
+>     // 假设每次 A* 平均 150us → 1000 × 150us = 150ms/帧
+>     // Flow Field: 每 20 帧重建一次 ~200us → 10us/帧 均摊
+>     std::cout << "  对比 1000×A*: 每帧 ~150ms → Flow Field 快 ~"
+>               << 150000.0 / (total_rebuild_us / rebuild_count / REBUILD_INTERVAL)
+>               << "x\n";
+> }
+> ```
+>
+> **关键性能数据参考**（60×40 地图 ≈ 2400 格子）：
+> - 积分场重建：~150-300μs（Dijkstra 扫描大部分格子）
+> - 流向场重建：~10-30μs（一次全图遍历）
+> - 合计：~200μs/次，每 20 帧一次 → 均摊 10μs/帧
+> - 对比 1000 次 A*：~150ms/帧 → **15000x 加速**
+> - 地图越大，优势越明显（Flow Field 的 V log V 对 N×V log V）
+
+> [!tip]- 练习 5 参考答案
+> 多目标 Flow Field：为每个目标独立构建积分场，agent 选择离自己最近的目标（对应积分值最小的场），然后沿该场的 flow 移动。
+>
+> ```cpp
+> // 多目标 Flow Field 管理器
+> struct MultiTargetFlowField {
+>     Grid& grid;
+>     std::vector<FlowField> fields;  // 每个目标一个 FlowField
+>     std::vector<std::pair<int,int>> goals;  // (goal_x, goal_y)
+>
+>     MultiTargetFlowField(Grid& g, const std::vector<std::pair<int,int>>& target_positions)
+>         : grid(g) {
+>         for (auto& [gx, gy] : target_positions) {
+>             fields.emplace_back(g);
+>             fields.back().build_cost_field();  // 所有场共享同一代价场（只需建一次）
+>             goals.push_back({gx, gy});
+>         }
+>     }
+>
+>     // 重建所有积分场和流向场（目标位置变化时调用）
+>     void rebuild_all() {
+>         for (size_t i = 0; i < fields.size(); ++i) {
+>             fields[i].goal_x = goals[i].first;
+>             fields[i].goal_y = goals[i].second;
+>             fields[i].build_integration_field();
+>             fields[i].build_flow_field();
+>         }
+>     }
+>
+>     // 为 agent 分配目标：选择 integration[agent_pos] 最小的目标
+>     int assign_target(float agent_x, float agent_y) const {
+>         int best_target = -1;
+>         float best_cost = INF;
+>
+>         int cx = (int)agent_x, cy = (int)agent_y;
+>         if (!grid.in_bounds(cx, cy)) return -1;
+>
+>         int idx = cy * grid.w + cx;
+>
+>         for (size_t i = 0; i < fields.size(); ++i) {
+>             float cost = fields[i].integration[idx];
+>             if (cost < best_cost) {
+>                 best_cost = cost;
+>                 best_target = (int)i;
+>             }
+>         }
+>         return best_target;
+>     }
+>
+>     // 采样：先分配目标，再查对应场的 flow
+>     Vec2 sample_flow(float agent_x, float agent_y) const {
+>         int target = assign_target(agent_x, agent_y);
+>         if (target < 0) return Vec2();
+>         return fields[target].sample_flow(agent_x, agent_y);
+>     }
+> };
+>
+> // 使用示例
+> // std::vector<std::pair<int,int>> resource_points = {
+> //     {10, 30}, {30, 10}, {50, 35}, {55, 5}, {25, 25}
+> // };
+> // MultiTargetFlowField mff(grid, resource_points);
+> // mff.rebuild_all();
+> //
+> // for (auto& a : agents) {
+> //     Vec2 dir = mff.sample_flow(a.x, a.y);
+> //     a.x += dir.x * a.speed * dt;
+> //     a.y += dir.y * a.speed * dt;
+> // }
+> ```
+>
+> **分配策略增强**（可选，用于防止所有 agent 涌向同一目标）：
+>
+> ```cpp
+> // 带容量限制的分配
+> struct AssignmentState {
+>     std::vector<int> target_counts;  // 每个目标已分配的 agent 数
+>     int max_per_target;
+> };
+>
+> int assign_target_balanced(float ax, float ay,
+>                             const MultiTargetFlowField& mff,
+>                             AssignmentState& state) {
+>     int best = -1;
+>     float best_score = INF;
+>     int cx = (int)ax, cy = (int)ay;
+>     int idx = cy * mff.grid.w + cx;
+>
+>     for (size_t i = 0; i < mff.fields.size(); ++i) {
+>         if (state.target_counts[i] >= state.max_per_target) continue;
+>         float cost = mff.fields[i].integration[idx];
+>         // 距离代价 + 拥挤惩罚
+>         float penalty = 1.0f + 0.1f * state.target_counts[i];
+>         float score = cost * penalty;
+>         if (score < best_score) { best_score = score; best = (int)i; }
+>     }
+>     if (best >= 0) state.target_counts[best]++;
+>     return best;
+> }
+> ```
+>
+> **注意事项**：
+> - 代价场只需构建一次（所有场共享同一地形/障碍配置）
+> - 每帧需要重建所有积分场（如果目标位置改变）或按需重建（仅目标移动时）
+> - 5 个目标的积分场内存：5 × 2400 × 4B = 48KB——完全可以接受
+> - 如果目标数 > 20，考虑用分层策略：先粗粒度确定"大致方向"，再细粒度修正
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Supreme Commander 寻路系统**：Gas Powered Games 的 Flow Field 实现细节。整篇 GDC 演讲解释了他们如何处理水陆地形、动态障碍和单位间避让。关键词：`"Supreme Commander pathfinding GDC"`

@@ -621,6 +621,266 @@ int main() {
 - 提示：使用拓扑排序或简单的 `std::set<std::string>` 列表。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **引用计数资源缓存实现：**
+>
+> ```cpp
+> class ResourceCache {
+>     struct CacheEntry {
+>         Resource* resource = nullptr;
+>         uint64_t  last_access_frame = 0;  // 用于 LRU 驱逐
+>     };
+>
+>     std::unordered_map<std::string, CacheEntry> cache_;
+>     uint64_t current_frame_ = 0;
+>
+>     // 驱逐阈值：资源未被访问超过 N 帧
+>     static constexpr uint64_t EVICT_AFTER_FRAMES = 300;  // 5 秒 @60fps
+>
+> public:
+>     // 尝试从缓存获取；如果命中返回资源并增加引用计数
+>     Resource* get(const std::string& key) {
+>         auto it = cache_.find(key);
+>         if (it != cache_.end()) {
+>             it->second.resource->add_ref();
+>             it->second.last_access_frame = current_frame_;
+>             ++hit_count_;
+>             return it->second.resource;
+>         }
+>         ++miss_count_;
+>         return nullptr;
+>     }
+>
+>     // 将新加载的资源插入缓存
+>     void put(const std::string& key, Resource* resource) {
+>         cache_[key] = {resource, current_frame_};
+>     }
+>
+>     // 每帧调用：驱逐引用计数为 0 且长时间未访问的资源
+>     void evict() {
+>         auto it = cache_.begin();
+>         while (it != cache_.end()) {
+>             auto& entry = it->second;
+>             if (entry.resource->ref_count.load() <= 1  // 仅缓存持有引用
+>                 && current_frame_ - entry.last_access_frame > EVICT_AFTER_FRAMES) {
+>                 entry.resource->release();  // 释放缓存持有的引用 → 可能 delete
+>                 it = cache_.erase(it);
+>                 ++evict_count_;
+>             } else {
+>                 ++it;
+>             }
+>         }
+>     }
+>
+>     void next_frame() { ++current_frame_; }
+>
+>     double hit_rate() const {
+>         size_t total = hit_count_ + miss_count_;
+>         return total > 0 ? double(hit_count_) / total : 0.0;
+>     }
+>
+> private:
+>     size_t hit_count_ = 0;
+>     size_t miss_count_ = 0;
+>     size_t evict_count_ = 0;
+> };
+>
+> // 集成到 StreamingWorld::request_load
+> Resource* StreamingWorld::request_load_cached(const std::string& path) {
+>     // 1. 先查缓存
+>     Resource* cached = cache_.get(path);
+>     if (cached) return cached;  // 缓存命中
+>
+>     // 2. 缓存未命中 → 提交异步加载
+>     uint64_t req_id = loader_.request_load(path, Priority::Normal,
+>         [this](Resource* res) {
+>             cache_.put(res->name, res);  // 加载完成后插入缓存
+>         });
+>     return loader_.wait_for(req_id);
+> }
+> ```
+>
+> **缓存命中率的影响因素：**
+> - 玩家移动慢 + 区域重叠大 → 命中率 > 80%
+> - 玩家快速移动（如传送）→ 命中率 < 20%
+> - 可配合预加载（预测玩家下个区域）提升命中率
+
+> [!tip]- 练习 2 参考答案
+> **带宽受限的多级调度实现：**
+>
+> ```cpp
+> class BandwidthLimitedScheduler {
+>     static constexpr size_t MAX_LOADS_PER_FRAME = 3;  // 每帧最多处理 N 个 IO
+>     static constexpr size_t MAX_PENDING = 50;          // 最大排队请求数
+>
+>     struct ScheduledRequest {
+>         uint64_t request_id;
+>         Priority priority;
+>         uint64_t age_frames = 0;  // 排队等待的帧数 → 饥饿预防
+>     };
+>
+>     std::priority_queue<ScheduledRequest, std::vector<ScheduledRequest>,
+>         /* 自定义比较：优先级优先，同优先级按年龄（先来先服务）*/> pending_;
+>     size_t loads_this_frame_ = 0;
+>
+> public:
+>     uint64_t schedule(const std::string& path, Priority priority,
+>                       AsyncFileLoader& loader) {
+>         // 如果超过排队上限，拒绝最低优先级的请求
+>         if (pending_.size() >= MAX_PENDING) {
+>             // 仅当新请求优先级更高时才替换
+>             auto lowest = pending_.top();  // 最低优先级在堆顶
+>             if (priority < lowest.priority) {
+>                 pending_.pop();
+>                 // 取消被替换的请求...
+>             } else {
+>                 return 0;  // 拒绝
+>             }
+>         }
+>
+>         uint64_t req_id = next_id_++;
+>         pending_.push({req_id, priority, 0});
+>         return req_id;
+>     }
+>
+>     // 每帧初调用：从队列中取出最多 MAX_LOADS_PER_FRAME 个请求提交给 IO
+>     void dispatch_frame(AsyncFileLoader& loader) {
+>         loads_this_frame_ = 0;
+>
+>         // 临时取出所有请求并增加年龄
+>         std::vector<ScheduledRequest> all;
+>         while (!pending_.empty()) {
+>             auto req = pending_.top(); pending_.pop();
+>             req.age_frames++;
+>             // 饥饿预防：等待超过 60 帧（1秒）→ 临时提升到 Critical
+>             if (req.age_frames > 60) {
+>                 req.priority = Priority::Critical;
+>             }
+>             all.push_back(req);
+>         }
+>
+>         // 按优先级排序
+>         std::sort(all.begin(), all.end(),
+>             [](const auto& a, const auto& b) {
+>                 if (a.priority != b.priority) return a.priority < b.priority;
+>                 return a.age_frames > b.age_frames;  // 同龄等待久的优先
+>             });
+>
+>         // 提交前 MAX_LOADS_PER_FRAME 个
+>         for (size_t i = 0; i < all.size(); ++i) {
+>             if (i < MAX_LOADS_PER_FRAME) {
+>                 loader.submit(all[i].request_id);  // 提交到 IO
+>                 ++loads_this_frame_;
+>             } else {
+>                 pending_.push(all[i]);  // 重新排队
+>             }
+>         }
+>     }
+> };
+> ```
+>
+> **HDD vs SSD 场景对比：**
+> - SSD (1GB/s, ~50μs 延迟)：`MAX_LOADS_PER_FRAME = 10-20`，队列短，所有请求能在 1-2 帧内完成。
+> - HDD (100MB/s, ~10ms 延迟)：`MAX_LOADS_PER_FRAME = 2-3`，低优先级请求可能排队数百帧。饥饿预防机制关键——否则远处资源永远加载不到。
+
+> [!tip]- 练习 3 参考答案
+> **依赖感知加载管理器：**
+>
+> ```cpp
+> class DependencyAwareLoader {
+>     // 依赖图: key → 其依赖的资源列表
+>     std::unordered_map<std::string, std::vector<std::string>> dependencies_;
+>
+>     // 反向依赖: key → 依赖它的资源列表（用于引用计数管理）
+>     std::unordered_map<std::string, std::set<std::string>> reverse_deps_;
+>
+>     // 正在加载中的资源（防止重复请求）
+>     std::set<std::string> in_flight_;
+>
+>     AsyncFileLoader& loader_;
+>     ResourceCache& cache_;
+>
+> public:
+>     void add_dependency(const std::string& resource,
+>                         const std::string& depends_on) {
+>         dependencies_[resource].push_back(depends_on);
+>         reverse_deps_[depends_on].insert(resource);
+>     }
+>
+>     uint64_t request_with_deps(const std::string& path, Priority priority) {
+>         // BFS/DFS 收集所有依赖（循环检测略）
+>         std::set<std::string> all_required = collect_dependencies(path);
+>
+>         // 按拓扑顺序提交：依赖先于被依赖者
+>         // 简化：对每个依赖递归提交
+>         return request_recursive(path, priority);
+>     }
+>
+> private:
+>     uint64_t request_recursive(const std::string& path, Priority priority) {
+>         // 1. 检查缓存
+>         Resource* cached = cache_.get(path);
+>         if (cached) return 0;  // 已加载
+>
+>         // 2. 检查是否已在加载中
+>         if (in_flight_.count(path)) return 0;  // 去重
+>
+>         // 3. 先加载依赖
+>         if (dependencies_.count(path)) {
+>             for (const auto& dep : dependencies_[path]) {
+>                 request_recursive(dep, priority);  // 依赖优先级与被依赖者相同
+>             }
+>         }
+>
+>         // 4. 加载自身
+>         in_flight_.insert(path);
+>         return loader_.request_load(path, priority,
+>             [this, path](Resource* res) {
+>                 in_flight_.erase(path);
+>                 cache_.put(path, res);
+>             });
+>     }
+>
+>     // 递归收集依赖（含循环检测）
+>     std::set<std::string> collect_dependencies(const std::string& path) {
+>         std::set<std::string> result;
+>         std::set<std::string> visited;
+>         std::function<void(const std::string&)> dfs =
+>             [&](const std::string& node) {
+>                 if (visited.count(node)) return;  // 已处理
+>                 visited.insert(node);
+>                 if (dependencies_.count(node)) {
+>                     for (const auto& dep : dependencies_[node]) {
+>                         if (dep != node) {  // 跳过自依赖
+>                             result.insert(dep);
+>                             dfs(dep);
+>                         }
+>                     }
+>                 }
+>             };
+>         dfs(path);
+>         return result;
+>     }
+> };
+>
+> // 使用示例：
+> // loader.add_dependency("zone_00.dat", "shared_textures.dat");
+> // loader.add_dependency("zone_00.dat", "common_audio.dat");
+> // loader.add_dependency("zone_01.dat", "shared_textures.dat");
+> // → request_with_deps("zone_00.dat") 会自动先加载 shared_textures.dat + common_audio.dat
+> ```
+>
+> **关键设计点：**
+> 1. **引用计数由缓存管理**：`shared_textures.dat` 被 `zone_00` 和 `zone_01` 都依赖。只要任一引用者还在，就不会被驱逐。
+> 2. **去重**：`in_flight_` 防止同时发起多个相同的加载请求。
+> 3. **循环依赖检测**：DFS 中用 `visited` 集合防止无限递归。真实项目中可以预先验证依赖图是 DAG。
+> 4. **加载顺序**：先加载依赖后加载主资源，确保主资源加载完成时所有依赖已就绪。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **UE 文档 — World Composition**: https://docs.unrealengine.com/en-US/world-composition/ — UE 的大型世界加载方案。

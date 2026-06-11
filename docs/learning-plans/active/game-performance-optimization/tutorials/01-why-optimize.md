@@ -352,6 +352,335 @@ void AnalyzeBudget(double target_fps,
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // frame_budget_tiered.cpp — 带分级警告的帧预算监控器
+> // 编译: g++ -std=c++17 -O2 frame_budget_tiered.cpp -o frame_budget_tiered && ./frame_budget_tiered
+> #include <chrono>
+> #include <vector>
+> #include <algorithm>
+> #include <numeric>
+> #include <iostream>
+> #include <iomanip>
+> #include <random>
+>
+> enum class WarningLevel { None, Yellow, Red };
+>
+> class TieredFrameBudget {
+> public:
+>     using Clock = std::chrono::high_resolution_clock;
+>     using TimePoint = Clock::time_point;
+>     using Duration = std::chrono::duration<double, std::milli>;
+>
+>     explicit TieredFrameBudget(double target_fps = 60.0, size_t history_size = 300)
+>         : target_frame_time_(1000.0 / target_fps), history_size_(history_size) {
+>         frame_times_.reserve(history_size_);
+>     }
+>
+>     void BeginFrame() { frame_start_ = Clock::now(); }
+>
+>     double EndFrame() {
+>         auto frame_end = Clock::now();
+>         double elapsed = Duration(frame_end - frame_start_).count();
+>         frame_times_.push_back(elapsed);
+>         if (frame_times_.size() > history_size_)
+>             frame_times_.erase(frame_times_.begin());
+>
+>         frame_count_++;
+>
+>         if (elapsed > target_frame_time_) {
+>             consecutive_over_++;
+>             over_budget_count_++;
+>
+>             double excess_pct = (elapsed - target_frame_time_) / target_frame_time_ * 100.0;
+>             WarningLevel level = WarningLevel::None;
+>             const char* msg = "";
+>
+>             if (excess_pct > 50.0) {
+>                 level = WarningLevel::Red;
+>                 msg = "严重超预算";
+>                 severe_count_++;
+>             } else if (excess_pct > 10.0) {
+>                 level = WarningLevel::Yellow;
+>                 msg = "轻微超预算";
+>                 minor_count_++;
+>             }
+>
+>             if (level != WarningLevel::None) {
+>                 std::string color = (level == WarningLevel::Red) ? "\033[31m" : "\033[33m";
+>                 std::cerr << color << "[FrameBudget] " << msg
+>                           << " | 帧#" << frame_count_
+>                           << " | 实际: " << std::fixed << std::setprecision(2)
+>                           << elapsed << "ms | 预算: " << target_frame_time_ << "ms"
+>                           << " | 超出: " << std::setprecision(1) << excess_pct << "%"
+>                           << "\033[0m\n";
+>             }
+>
+>             if (consecutive_over_ >= 5) {
+>                 std::cerr << "\033[31m[FrameBudget] 持续降帧报警! "
+>                           << "连续 " << consecutive_over_ << " 帧超预算!\033[0m\n";
+>             }
+>         } else {
+>             consecutive_over_ = 0;
+>         }
+>
+>         return elapsed;
+>     }
+>
+>     void PrintSummary() const {
+>         std::cout << "\n========== 分级警告统计 ==========\n"
+>                   << "总帧数:       " << frame_count_ << "\n"
+>                   << "超预算帧:     " << over_budget_count_ << "\n"
+>                   << "  轻微超预算: " << minor_count_ << "\n"
+>                   << "  严重超预算: " << severe_count_ << "\n";
+>     }
+>
+> private:
+>     TimePoint frame_start_;
+>     std::vector<double> frame_times_;
+>     size_t history_size_;
+>     size_t frame_count_ = 0;
+>     size_t over_budget_count_ = 0;
+>     size_t minor_count_ = 0;
+>     size_t severe_count_ = 0;
+>     size_t consecutive_over_ = 0;
+>     double target_frame_time_;
+> };
+>
+> int main() {
+>     TieredFrameBudget budget(60.0);
+>     std::mt19937 rng(42);
+>     std::uniform_real_distribution<double> dist(10.0, 30.0);
+>
+>     std::cout << "模拟 500 帧 (每 20 帧随机峰值 10-30ms)...\n";
+>     for (int i = 0; i < 500; i++) {
+>         budget.BeginFrame();
+>         double work = (i % 20 == 0) ? dist(rng) : 8.0;
+>         auto start = std::chrono::high_resolution_clock::now();
+>         while (std::chrono::duration<double, std::milli>(
+>                    std::chrono::high_resolution_clock::now() - start).count() < work) {}
+>         budget.EndFrame();
+>     }
+>     budget.PrintSummary();
+>     return 0;
+> }
+> ```
+>
+> **设计要点：**
+> - 分级阈值 10% 和 50% 分别对应黄色（轻微）和红色（严重）警告
+> - `consecutive_over_` 计数器在帧未超预算时归零，连续 5 帧超预算触发持续降帧报警
+> - 使用 ANSI 颜色码区分黄色/红色警告级别
+> - 每 20 帧注入随机峰值（10-30ms），覆盖三种警告场景
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // budget_calculator.cpp — 性能预算计算器
+> // 编译: g++ -std=c++17 budget_calculator.cpp -o budget_calc && ./budget_calc
+> #include <iostream>
+> #include <vector>
+> #include <string>
+> #include <iomanip>
+> #include <algorithm>
+>
+> void AnalyzeBudget(double target_fps,
+>                    const std::vector<std::pair<std::string, double>>& systems) {
+>     double total_budget = 1000.0 / target_fps;
+>     double total_used = 0.0;
+>     for (auto& [name, ms] : systems) total_used += ms;
+>     double slack = total_budget - total_used;
+>
+>     std::cout << "\n╔══════════════════════════════════════╗\n"
+>               << "║     性能预算分析 (目标 " << std::setw(3) << (int)target_fps << "fps)     ║\n"
+>               << "╠══════════════════════════════════════╣\n"
+>               << "║ 总预算:    " << std::setw(6) << std::fixed << std::setprecision(2)
+>               << total_budget << " ms             ║\n"
+>               << "║ 已使用:    " << std::setw(6) << total_used << " ms             ║\n"
+>               << "║ 剩余:      " << std::setw(6) << slack << " ms             ║\n"
+>               << "╠══════════════════════════════════════╣\n";
+>
+>     // 找出最长的名称用于对齐
+>     size_t max_name = 0;
+>     for (auto& [name, _] : systems) max_name = std::max(max_name, name.size());
+>
+>     const int bar_width = 30;
+>     for (auto& [name, ms] : systems) {
+>         double pct = ms / total_budget * 100.0;
+>         int bar_len = static_cast<int>(pct / 100.0 * bar_width);
+>         if (bar_len > bar_width) bar_len = bar_width;
+>         if (bar_len < 1 && ms > 0) bar_len = 1; // 至少显示一点
+>
+>         bool warn = pct > 50.0;
+>         std::cout << "║ " << std::setw(max_name) << std::left << name
+>                   << " " << std::setw(6) << std::setprecision(2) << ms
+>                   << "ms " << std::string(bar_len, '#')
+>                   << std::string(bar_width - bar_len, ' ')
+>                   << " " << std::setw(5) << std::setprecision(1) << pct << "%";
+>         if (warn) std::cout << " ⚠️  超出 50%!";
+>         std::cout << " ║\n";
+>     }
+>
+>     std::cout << "╚══════════════════════════════════════╝\n";
+>
+>     if (slack < 0) {
+>         std::cout << "\n\033[31m❌ 预算超支 " << std::setprecision(2)
+>                   << -slack << "ms! 帧率无法达到 " << (int)target_fps << "fps.\033[0m\n";
+>     } else {
+>         std::cout << "\n\033[32m✅ 剩余 " << std::setprecision(2)
+>                   << slack << "ms slack time.\033[0m\n";
+>     }
+> }
+>
+> int main() {
+>     // 正常场景
+>     AnalyzeBudget(60.0, {
+>         {"Render", 8.0}, {"Physics", 3.0}, {"AI", 2.0}, {"Audio", 1.0}, {"UI", 1.0}
+>     });
+>
+>     // 超预算场景
+>     AnalyzeBudget(60.0, {
+>         {"Render", 12.0}, {"Physics", 8.0}, {"AI", 3.0}, {"Audio", 1.0}, {"UI", 2.0}
+>     });
+>
+>     return 0;
+> }
+> ```
+>
+> **设计要点：**
+> - 使用 ASCII 条形图直观显示各项占比，`#` 字符长度正比于百分比
+> - 超过 50% 预算的项用 ⚠️ 标记红色警告
+> - 最底部给出总体超支/有裕量的判定
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // frame_variance.cpp — 帧方差分析器
+> // 编译: g++ -std=c++17 frame_variance.cpp -o frame_variance && ./frame_variance
+> #include <chrono>
+> #include <vector>
+> #include <algorithm>
+> #include <numeric>
+> #include <cmath>
+> #include <iostream>
+> #include <iomanip>
+> #include <random>
+>
+> struct VarianceStats {
+>     double mean_ms;
+>     double std_dev_ms;
+>     double jank_rate;       // 连续帧差 > 8ms 的比例
+>     std::vector<size_t> histogram; // 10 个桶
+>     double bucket_min, bucket_width;
+> };
+>
+> VarianceStats AnalyzeFrames(const std::vector<double>& frame_times) {
+>     VarianceStats s = {};
+>     if (frame_times.size() < 2) return s;
+>
+>     size_t n = frame_times.size();
+>     s.mean_ms = std::accumulate(frame_times.begin(), frame_times.end(), 0.0) / n;
+>
+>     // 标准差
+>     double sq_sum = 0.0;
+>     for (double t : frame_times)
+>         sq_sum += (t - s.mean_ms) * (t - s.mean_ms);
+>     s.std_dev_ms = std::sqrt(sq_sum / n);
+>
+>     // Jank rate: 连续帧时间差超过 8ms 的比例
+>     int jank_count = 0;
+>     for (size_t i = 1; i < n; i++) {
+>         if (std::abs(frame_times[i] - frame_times[i-1]) > 8.0)
+>             jank_count++;
+>     }
+>     s.jank_rate = (double)jank_count / (n - 1) * 100.0;
+>
+>     // Histogram: 10 buckets from min to max
+>     double t_min = *std::min_element(frame_times.begin(), frame_times.end());
+>     double t_max = *std::max_element(frame_times.begin(), frame_times.end());
+>     double range = t_max - t_min;
+>     if (range < 0.001) range = 0.001; // avoid div by zero
+>     s.bucket_min = t_min;
+>     s.bucket_width = range / 10.0;
+>     s.histogram.resize(10, 0);
+>     for (double t : frame_times) {
+>         int idx = static_cast<int>((t - t_min) / s.bucket_width);
+>         if (idx >= 10) idx = 9;
+>         s.histogram[idx]++;
+>     }
+>     return s;
+> }
+>
+> void PrintHistogram(const VarianceStats& s) {
+>     if (s.histogram.empty()) return;
+>     size_t max_count = *std::max_element(s.histogram.begin(), s.histogram.end());
+>     const int bar_width = 40;
+>     std::cout << "\n=== ASCII 直方图 (帧时间分布) ===\n";
+>     for (int i = 0; i < 10; i++) {
+>         double low = s.bucket_min + i * s.bucket_width;
+>         double high = low + s.bucket_width;
+>         int bars = (max_count > 0) ? (int)((double)s.histogram[i] / max_count * bar_width) : 0;
+>         std::cout << std::fixed << std::setprecision(1)
+>                   << std::setw(5) << low << "-" << std::setw(5) << high << "ms |"
+>                   << std::string(bars, '#') << std::string(bar_width - bars, ' ')
+>                   << "| " << s.histogram[i] << "\n";
+>     }
+> }
+>
+> std::vector<double> GenerateUniform(int frames) {
+>     return std::vector<double>(frames, 10.0);
+> }
+>
+> std::vector<double> GeneratePeriodic(int frames) {
+>     std::vector<double> v(frames, 10.0);
+>     for (int i = 0; i < frames; i += 15) v[i] = 30.0;
+>     return v;
+> }
+>
+> std::vector<double> GenerateRandom(int frames) {
+>     std::mt19937 rng(42);
+>     std::uniform_real_distribution<double> dist(5.0, 20.0);
+>     std::vector<double> v(frames);
+>     for (auto& t : v) t = dist(rng);
+>     return v;
+> }
+>
+> int main() {
+>     const int FRAMES = 300;
+>     const char* modes[] = {"均匀负载", "周期峰值", "随机抖动"};
+>     auto generators = {GenerateUniform, GeneratePeriodic, GenerateRandom};
+>
+>     int idx = 0;
+>     for (auto gen : generators) {
+>         auto data = gen(FRAMES);
+>         auto stats = AnalyzeFrames(data);
+>         std::cout << "\n======== " << modes[idx++] << " ========\n"
+>                   << "均值:    " << std::fixed << std::setprecision(2) << stats.mean_ms << " ms\n"
+>                   << "标准差:  " << stats.std_dev_ms << " ms\n"
+>                   << "Jank率:  " << std::setprecision(1) << stats.jank_rate << "%\n";
+>         PrintHistogram(stats);
+>     }
+>
+>     // 对比总结
+>     std::cout << "\n======== 三种模式 Jank 率对比 ========\n"
+>               << "均匀负载: Jank 率 = 0%   — 最理想，无卡顿\n"
+>               << "周期峰值: Jank 率 ≈ 13% — 每 15 帧有 2 次 jank（峰值出入各一次）\n"
+>               << "随机抖动: Jank 率取决于分布宽度 — "
+>               << "5-20ms 范围内约 40-60% 的相邻帧差超过 8ms\n"
+>               << "\n结论: 帧时间方差比平均帧率更能反映玩家体验。\n";
+>     return 0;
+> }
+> ```
+>
+> **关键发现：**
+> - **均匀负载**：标准差 ≈ 0，jank rate = 0% — 帧率完全稳定
+> - **周期峰值**：jank rate ≈ 13%（每 15 帧峰值产生 2 次 jank：进入和离开峰值）
+> - **随机抖动**：5-20ms 均匀分布中，相邻帧差超 8ms 的概率约 40-60%
+> - Google Android 的 jank 标准：连续帧差 > 8ms 即计为一次 jank，这与用户感知卡顿高度相关
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [The Performance Budget — Addy Osmani](https://addyosmani.com/blog/performance-budgets/) (Web 视角，但预算概念通用)

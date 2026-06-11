@@ -181,6 +181,95 @@ if (memcmp(&s1, &s2, sizeof(S)) == 0) {
 为一个 `struct Vertex { float pos[3]; uint32_t color; float uv[2]; }` 写一个 `serialize()` 函数，将其写入 `std::vector<uint8_t>`，保证结果不包含 padding 字节。再写一个 `deserialize()` 从字节流还原。注意处理大小端问题。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 重排规则：按对齐要求从大到小排列成员，减少 padding。
+>
+> - `double d`：alignof=8，需求最大，放最前
+> - `int b`：alignof=4，紧接其后（offset 8，恰好是 4 的倍数）
+> - `char a, c, e`：alignof=1，放最后，三个 char 连续占用 3 字节
+> - 尾部需填充到 8 的倍数 → +5 字节 padding
+>
+> ```cpp
+> struct Optimized {
+>     double d;   // offset 0, 8 bytes
+>     int    b;   // offset 8, 4 bytes
+>     char   a;   // offset 12, 1 byte
+>     char   c;   // offset 13, 1 byte
+>     char   e;   // offset 14, 1 byte
+>     // padding: 1 byte (tail to alignof=8)
+> };
+> ```
+>
+> `sizeof(Optimized) = 16`（8 + 4 + 3 + 1 tail padding）。
+>
+> 对比原始 `Messy`：`char a(1) + pad(3) + int b(4) + char c(1) + pad(3) + double d(8) + char e(1) + pad(7) = 28`。节省 12 字节（43%）。
+
+> [!tip]- 练习 2 参考答案
+> **原因：padding 字节的值是未定义的。**
+>
+> `struct S { char a; int b; }` 中，`char a` 之后有 3 字节 padding（因为 `int` 必须对齐到 4 的倍数）。`s1` 和 `s2` 是栈上的局部变量，这 3 字节 padding 可能包含栈上的残留值（垃圾数据）。即使 `s1.a == s2.a == 'x'` 且 `s1.b == s2.b == 42`，`memcmp` 会逐字节比较包括 padding 在内的全部 8 字节——padding 不同 → "not equal"。
+>
+> **正确做法：**
+> ```cpp
+> // 方案 1：逐字段比较（最安全，推荐）
+> bool equal = (s1.a == s2.a) && (s1.b == s2.b);
+>
+> // 方案 2：memset 清零后再赋值，然后 memcmp
+> S s1{}, s2{};  // 值初始化把 padding 也清零
+> s1.a = 'x'; s1.b = 42;
+> s2.a = 'x'; s2.b = 42;
+> // 现在 memcmp(&s1, &s2, sizeof(S)) == 0 是安全的
+>
+> // 方案 3（C++20）：默认 operator== 对平凡类型也安全
+> bool equal = (s1 == s2);  // 编译器生成的逐字段比较
+> ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> #include <cstdint>
+> #include <vector>
+> #include <cstring>
+>
+> struct Vertex {
+>     float pos[3];
+>     uint32_t color;
+>     float uv[2];
+> };
+>
+> // 序列化：逐字段写入，不写入 padding
+> std::vector<uint8_t> serialize(const Vertex& v) {
+>     // sizeof(Vertex) = 12 + 4 + 8 = 24，无 padding（所有成员自然对齐）
+>     // 但为健壮性，不依赖 sizeof，显式逐字段写入
+>     std::vector<uint8_t> buf;
+>     buf.resize(sizeof(v.pos) + sizeof(v.color) + sizeof(v.uv));
+>
+>     uint8_t* dst = buf.data();
+>     memcpy(dst, v.pos, sizeof(v.pos));              dst += sizeof(v.pos);
+>     memcpy(dst, &v.color, sizeof(v.color));         dst += sizeof(v.color);
+>     memcpy(dst, v.uv, sizeof(v.uv));
+>
+>     return buf;
+> }
+>
+> Vertex deserialize(const uint8_t* data, size_t len) {
+>     const size_t expected = sizeof(float)*3 + sizeof(uint32_t) + sizeof(float)*2;
+>     // 实际生产中应检查 len >= expected
+>     Vertex v;
+>     const uint8_t* src = data;
+>     memcpy(v.pos, src, sizeof(v.pos));              src += sizeof(v.pos);
+>     memcpy(&v.color, src, sizeof(v.color));         src += sizeof(v.color);
+>     memcpy(v.uv, src, sizeof(v.uv));
+>     return v;
+> }
+> ```
+>
+> **大小端处理：** 以上代码未处理大小端——`color` 字段在不同端序机器上字节顺序不同。解决方案：序列化时用 `htonl`/`htons` 将多字节整数转为网络字节序（大端），反序列化时用 `ntohl`/`ntohs` 转回本地序。浮点数可先用 `memcpy` 转 `uint32_t` 再处理，或约定使用 IEEE 754 并处理端序。更好的做法是使用 Protobuf 或 FlatBuffers——它们已内置处理端序和对齐。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 
 ## 4. 扩展阅读
 

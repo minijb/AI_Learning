@@ -742,6 +742,131 @@ BehaviorTree BuildEnemyBT() {
 4. 树中是否有"自己受攻击但基地也在被攻击"的冲突？你如何处理？
 5. 这个场景下 BT 相比 FSM 的最大优势是什么？最大劣势是什么？
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **(A) 行为树结构：**
+>
+> ```
+> Selector (根)
+> ├── Sequence (Priority 1: 生存 — 血量 < 30% 逃跑)
+> │   ├── Condition: IsHealthLow? (health < 30%)
+> │   └── Action: Flee
+> ├── Sequence (Priority 2: 战斗 — 发现玩家)
+> │   ├── Condition: HasTarget? (玩家在视野内)
+> │   ├── Decorator: UntilFailure (包裹: 玩家脱离视野 > 3s)
+> │   │   └── Sequence (攻击/追击链)
+> │   │       ├── Condition: IsInAttackRange?
+> │   │       └── Action: Attack
+> │   └── Action: Chase (向目标移动)
+> └── Action: Patrol (Priority 3: 默认巡逻)
+> ```
+>
+> 说明："追击中玩家进入攻击范围 → 攻击"由 Selector 内部逻辑自动处理——Chase 的成功条件设计为"到达攻击范围"，Chase 返回 Success 后，下一帧根 Selector 重新评估，Sequence 战斗链重新从 IsInAttackRange 开始检查，自然进入 Attack。"脱离视野 3 秒"通过 UntilFailure 装饰器实现——如果 Condition(HasTarget) 每帧返回 Success，UntilFailure 持续 tick Attack/Chase 子序列；一旦 HasTarget 返回 Failure 且持续 3 秒，UntilFailure 返回 Failure，整个战斗 Sequence 失败，Selector fall-through 到 Patrol。
+>
+> **(B) 逐帧追踪（10 帧简化）：**
+>
+> | 帧 | 世界状态 | tick 路径 | 节点返回值 |
+> |:---:|---------|-----------|----------|
+> | 1 | 无玩家 | Selector → Seq1(HasTarget?→F) → Seq2(HasTarget?→F) → **Patrol** | Patrol → Running |
+> | 2 | 无玩家 (Patrol 持续 Running) | Selector 直接从 Patrol 继续(或重评估) → Patrol | Patrol → Running |
+> | 3-5 | 同帧2 | 同上 | Patrol → Running |
+> | 6 | 玩家进入视野(不在攻击范围) | Selector → Seq1(HasTarget?→F, 如血量>30%) → Seq2(HasTarget?→S, IsInRange?→F) → **Chase** | Chase → Running |
+> | 7 | 追击中 | Selector → Seq2(HasTarget?→S, IsInRange?→F) → Chase(续) | Chase → Running |
+> | 8 | 追击中 | 同上 | Chase → Running |
+> | 9 | 追击中 | 同上 | Chase → Running |
+> | 10 | 玩家进入攻击范围 | Selector → Seq2(HasTarget?→S, IsInRange?→S) → **Attack** | Attack → Running |
+> | 11 | 攻击中 | Selector → Seq2(HasTarget?→S, IsInRange?→S) → Attack(续) | Attack → Running |
+> | 12-13 | 攻击中 | 同上 | Attack → Running |
+> | 14 | 玩家脱离视野 | Selector → Seq2(HasTarget?→F) → 战斗 Sequence 失败 → **Patrol** | Patrol → Running |
+> | 15-17 | 巡逻(3 秒超时后) | 如玩家仍未出现，继续 Patrol | Patrol → Running |
+>
+> 注意第 14 帧的关键行为：HasTarget 条件变为 false → 战斗 Sequence 立刻返回 Failure（或 UntilFailure 包裹后等待 3 秒才失败）。如果用 UntilFailure 包裹，则在帧 14-16 HasTarget 持续 false，UntilFailure 在第 17 帧返回 Failure，Selector 才 fall-through 到 Patrol。这是"脱离视野 3 秒"的实现方式。
+
+> [!tip]- 练习 2 参考答案
+> **FSM 等价实现（转移图表示）：**
+>
+> ```
+>                    ┌──────────┐
+>     ┌──────────────│  Patrol  │◄───────────────────────┐
+>     │    ┌─────────│          │─────────┐              │
+>     │    │         └──────────┘         │              │
+>     │    │ HasTarget                   │ !HasTarget   │ (任意状态
+>     │    ▼                            │  > 3s        │  Health<30%)
+>     │ ┌──────────┐                    │              │
+>     │ │  Chase   │                    │              │
+>     │ │          │────────────────────┘              │
+>     │ └────┬─────┘                                   │
+>     │      │ IsInRange                               │
+>     │      ▼                                         │
+>     │ ┌──────────┐                                   │
+>     │ │  Attack  │───────────────────────────────────┤
+>     │ │          │──── Health<30% ───────────────────┤
+>     │ └──────────┘                                   ▼
+>     │                                        ┌──────────┐
+>     └────────────────────────────────────────│   Flee   │
+>                          !HasTarget          │          │
+>                          (危险解除)           └──────────┘
+> ```
+>
+> FSM 等价转移边（显式编码）：
+> 1. Patrol → Chase (HasTarget)
+> 2. Chase → Attack (IsInRange)
+> 3. Chase → Patrol (!HasTarget > 3s)
+> 4. Attack → Chase (!IsInRange)
+> 5. Attack → Patrol (!HasTarget > 3s)
+> 6. Patrol → Flee (Health < 30%)
+> 7. Chase → Flee (Health < 30%)
+> 8. Attack → Flee (Health < 30%)
+> 9. Flee → Patrol (!HasTarget)
+>
+> **对比指标：**
+>
+> | 指标 | FSM | BT |
+> |------|-----|----|
+> | 状态/节点数量 | 4 状态 | 10 节点（1 Selector + 2 Sequence + 2 Condition + 3 Action + 1 Decorator + 1 可选） |
+> | 转移边/连接数 | 9 条显式转移边 | 0 条显式转移边（通过树结构隐式表达） |
+> | 需显式处理的中断/回归逻辑 | 每条跨状态转移边 ← 手动维护 | Selector fall-through 自动处理"条件不满足时做什么" |
+> | 新增"低血量逃跑"改动量 | **4 处**：Patrol、Chase、Attack 各加一条转移边 + 新增 Flee 状态 | **1 处**：在根 Selector 最左侧插入 Flee Sequence |
+> | 新增"警惕状态"改动量 | **5+ 处**：需要新状态 + 从 Patrol 的转移 + 从 Chase 的转移 + 从 Attack 的转移 + 回到 Patrol 的转移 | **1 处**：在根 Selector 中插入新的 Sequence |
+>
+> **BT 的相对劣势**：FSM 的 "Any-State Transition"（如"任意状态 → Dead"）在 FSM 中是一条全局规则，但在标准 BT 中需要在每个子树中都加入 Condition 判断——如果要在"任意行为中"插入一个高优先级中断，BT 不如 FSM 简洁。这是 UE5 的 Observer Aborts 要解决的问题。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **(A) RTS 工人 BT：**
+>
+> ```
+> Selector (根)
+> ├── Sequence (Priority 1: 生存 — 自己受攻击)
+> │   ├── Condition: IsUnderAttack? (自身血量降低 / 被锁定)
+> │   └── Action: Retreat (移动到指定安全点)
+> ├── Sequence (Priority 2: 基地维修 — 基地血量 < 80%)
+> │   ├── Condition: IsBaseDamaged? (基地 HP < 80%)
+> │   └── Action: RepairBase
+> ├── Sequence (Priority 3: 建筑指令)
+> │   ├── Condition: HasBuildOrder? (有建筑队列)
+> │   └── Action: Build
+> ├── Sequence (Priority 4: 采集)
+> │   ├── Condition: ResourceNeeded?
+> │   └── Action: Gather
+> └── Action: MoveToIdlePoint (Priority 5: 待命)
+> ```
+>
+> **(B) 问题讨论：**
+>
+> 1. **"受到攻击时逃跑"放在树的最左侧（最高优先级）**。理由：生命存活是最基本的前提——一个死亡的工人无法做任何事情。行为树 Selector 从左到右的优先级递减语义天然适合这种"安全 > 任务"的决策。
+>
+> 2. **"自己受攻击时逃跑"优先级高于"基地受攻击时维修"**。理由：死了的工人不能维修——先保住自己，再考虑基地。但这也取决于设计意图：如果设计意图是"工人应舍生取义保卫基地"，则维修优先级应高于逃跑。行为树表达这个很简单——交换两个 Sequence 在 Selector 中的顺序即可。
+>
+> 3. **FSM 状态数 vs BT 节点数**：FSM 约需要 `4 行为 × 3 条件 ≈ 12` 个状态（含 Retreat_Gather、Retreat_Build、Repair_Idle 等复合状态）。BT 使用约 12-15 个节点，但维护成本远低于 FSM——因为每个行为是独立子树，不需要跨行为复制转移边。
+>
+> 4. **"自己受攻击 + 基地被攻击"冲突处理**：根据优先级，工人先 Retreat（自己受攻击优先级更高）。Retreat 完成后（到达安全点），下一帧重新评估根 Selector——此时 IsUnderAttack 不再满足，Select fall-through 到 IsBaseDamaged 检查。如果基地仍在受损，工人会移动到基地进行维修。这是 BT 的自然行为，无需特殊处理。
+>
+> 5. **BT 最大优势与劣势**：优势——**行为组合性**：每个行为（Gather/Build/Retreat/Repair）是独立子树，可被任意重组和复用，不需要修改已有子系统。新增"警戒巡逻"只需在 Selector 中插入一个新 Sequence。劣势——**性能**：每帧从根重新评估所有 Condition，对于 200 个工人意味着 200 × 5+ 条件检查/帧。FSM 只在状态切换时评估转移条件，每帧只执行当前状态的 Update——在大规模场景下 FSM 更省 CPU。可通过降低部分工人的 tick 频率（如每 5 帧评估一次）来缓解。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

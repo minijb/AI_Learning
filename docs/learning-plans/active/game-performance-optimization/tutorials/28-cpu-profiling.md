@@ -520,6 +520,297 @@ Superluminal 的核心优势：**直接告诉你"CPU 时间花在了哪个函数
 
 **验收标准**：Tracy Server 中可见 GPU 时间线，且 CPU 和 GPU Zone 有正确的先后关系（CPU Submit 后 GPU 才执行）。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Tracy 基础集成 — 完整代码与步骤**
+> 
+> ```cpp
+> // main.cpp — Tracy 最小集成示例
+> #include "Tracy.hpp"
+> #include <iostream>
+> #include <thread>
+> #include <chrono>
+> #include <cmath>
+> 
+> void ExpensiveComputation() {
+>     ZoneScoped;  // Zone: "ExpensiveComputation"
+>     double result = 0.0;
+>     for (int i = 0; i < 10'000'000; ++i) {
+>         result += std::sin(i * 0.001) * std::cos(i * 0.002);
+>     }
+>     // 使用 ZoneText 附加运行时信息
+>     ZoneTextF("Result so far: %.3f", result);
+> }
+> 
+> void SimulateGameLogic() {
+>     ZoneScopedN("GameLogic");  // Zone: "GameLogic" (自定义名称)
+>     // 模拟 AI 更新
+>     {
+>         ZoneScopedN("AI Update");
+>         std::this_thread::sleep_for(std::chrono::milliseconds(3));
+>     }
+>     // 模拟物理更新
+>     {
+>         ZoneScopedN("Physics");
+>         std::this_thread::sleep_for(std::chrono::milliseconds(5));
+>     }
+> }
+> 
+> int main() {
+>     // 可选: 等待 Tracy Server 连接（调试时有用）
+>     // while (!tracy::GetProfiler().IsConnected()) {
+>     //     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+>     // }
+> 
+>     std::cout << "Tracy client started. Connect Tracy Server..." << std::endl;
+> 
+>     for (int frame = 0; frame < 300; ++frame) {
+>         FrameMark;  // ← 关键！标记帧边界
+> 
+>         {
+>             ZoneScopedN("Main Loop");  // 包裹整帧逻辑
+>             SimulateGameLogic();
+>             ExpensiveComputation();
+>         }
+> 
+>         // 模拟 30 FPS
+>         std::this_thread::sleep_for(std::chrono::milliseconds(33));
+>     }
+> 
+>     return 0;
+> }
+> ```
+> 
+> **CMakeLists.txt**：
+> ```cmake
+> cmake_minimum_required(VERSION 3.16)
+> project(TracyDemo)
+> add_compile_definitions(TRACY_ENABLE TRACY_ON_DEMAND)
+> add_library(tracy_client STATIC tracy/public/TracyClient.cpp)
+> target_include_directories(tracy_client PUBLIC tracy/public)
+> add_executable(tracy_demo main.cpp)
+> target_link_libraries(tracy_demo PRIVATE tracy_client)
+> if(WIN32)
+>     target_link_libraries(tracy_demo PRIVATE ws2_32 dbghelp)
+> endif()
+> ```
+> 
+> **验收要点**：
+> 1. 编译后运行 `tracy_demo.exe`
+> 2. 启动 `Tracy.exe`（tracy/profiler/build/win32/）
+> 3. Tracy Server 左侧列表出现你的程序 → 点击连接
+> 4. Timeline 面板显示 `Frame` 分段，展开可见 `Main Loop` → `GameLogic` → `AI Update`/`Physics` 和 `ExpensiveComputation`
+> 5. Zone Statistics 面板显示各 Zone 的平均/最大/最小耗时
+
+> [!tip]- 练习 2 参考答案
+> **多线程 Job System 的 Tracy 分析**
+> 
+> ```cpp
+> #include "Tracy.hpp"
+> #include <thread>
+> #include <vector>
+> #include <queue>
+> #include <mutex>
+> #include <condition_variable>
+> #include <random>
+> #include <algorithm>
+> 
+> struct Job {
+>     int id;
+>     int durationMs;
+> };
+> 
+> class SimpleJobSystem {
+>     std::vector<std::thread> workers;
+>     std::queue<Job> jobQueue;
+>     std::mutex mtx;
+>     std::condition_variable cv;
+>     bool shutdown = false;
+>     int jobsCompleted = 0;
+>     int totalJobs = 0;
+>     std::mutex completionMtx;
+>     std::condition_variable completionCv;
+> 
+> public:
+>     SimpleJobSystem(int numWorkers) {
+>         for (int i = 0; i < numWorkers; ++i) {
+>             workers.emplace_back([this, i]() {
+>                 // 设置 Tracy 线程名
+>                 tracy::SetThreadNameF("Worker-%d", i);
+>                 while (true) {
+>                     Job job;
+>                     {
+>                         std::unique_lock<std::mutex> lock(mtx);
+>                         cv.wait(lock, [this] {
+>                             return shutdown || !jobQueue.empty();
+>                         });
+>                         if (shutdown && jobQueue.empty()) return;
+>                         job = jobQueue.front();
+>                         jobQueue.pop();
+>                     }
+>                     {
+>                         ZoneScopedN("Execute Job");
+>                         ZoneTextF("Job #%d (%d ms)", job.id, job.durationMs);
+>                         std::this_thread::sleep_for(
+>                             std::chrono::milliseconds(job.durationMs));
+>                     }
+>                     {
+>                         std::lock_guard<std::mutex> lock(completionMtx);
+>                         jobsCompleted++;
+>                     }
+>                     completionCv.notify_one();
+>                 }
+>             });
+>         }
+>     }
+> 
+>     void SubmitJobs(const std::vector<Job>& jobs) {
+>         totalJobs = jobs.size();
+>         jobsCompleted = 0;
+>         {
+>             std::lock_guard<std::mutex> lock(mtx);
+>             for (auto& j : jobs) jobQueue.push(j);
+>         }
+>         cv.notify_all();
+>     }
+> 
+>     void WaitAll() {
+>         std::unique_lock<std::mutex> lock(completionMtx);
+>         completionCv.wait(lock, [this] {
+>             return jobsCompleted >= totalJobs;
+>         });
+>     }
+> 
+>     ~SimpleJobSystem() {
+>         { std::lock_guard<std::mutex> lock(mtx); shutdown = true; }
+>         cv.notify_all();
+>         for (auto& w : workers) w.join();
+>     }
+> };
+> 
+> int main() {
+>     SimpleJobSystem js(4); // 4 Worker Threads + Main Thread = 5 线程
+>     std::mt19937 rng(42);
+>     std::uniform_int_distribution<int> dist(5, 50); // 5-50ms per job
+> 
+>     for (int frame = 0; frame < 10; ++frame) {
+>         FrameMark;
+>         ZoneScopedN("Frame");
+> 
+>         std::vector<Job> jobs(100);
+>         for (int i = 0; i < 100; ++i) {
+>             jobs[i] = {i, dist(rng)};
+>         }
+> 
+>         {
+>             ZoneScopedN("Submit + Wait Jobs");
+>             js.SubmitJobs(jobs);
+>             js.WaitAll();
+>         }
+>     }
+>     return 0;
+> }
+> ```
+> 
+> **Tracy 分析流程**：
+> 1. 在 Tracy Server 中打开这次捕获
+> 2. Timeline：观察 5 个线程的 Zone 分布
+> 3. 找到最忙和最闲的 Worker：
+>    - Zone Statistics → 按线程过滤 → 记录每个 Worker 的总 Zone 时间
+>    - 假设 Worker-0: 245ms, Worker-1: 230ms, Worker-2: 270ms, Worker-3: 195ms
+>    - 平均 = (245+230+270+195)/4 = 235ms
+>    - **负载不均衡度** = (270 - 195) / 235 = **31.9%**
+> 4. **改进策略**：将 Job 按持续时间降序排序后分配
+>    - 排序前：随机分配 → 大 Job 可能集中在同一 Worker
+>    - 排序后：大 Job 先分配（各 Worker 抢到大 Job 后，小 Job 均衡填补）
+>    - 重新测量：不均衡度降到 5-10%
+>
+> **为什么排序能改善？**
+> - 问题本质是 Bin Packing 的贪心近似：大到小排序 → 每个 Worker 的"剩余容量"更均匀
+> - 不排序时，可能出现 Worker A 拿了 5 个 3ms Job（15ms total），Worker B 拿了一个 50ms Job（50ms total），导致 B 成为瓶颈
+
+> [!tip]- 练习 3 参考答案（可选）
+> **GPU Zone 集成 — Vulkan/D3D12 代码框架**
+> 
+> **Vulkan 方案**：
+> ```cpp
+> #include "TracyVulkan.hpp"
+> 
+> // 初始化（在 VkDevice 创建后）
+> TracyVkCtx g_tracyCtx;
+> void InitTracyVulkan(VkPhysicalDevice physDev, VkDevice device,
+>                      VkQueue gfxQueue, VkCommandBuffer cmdBuf) {
+>     g_tracyCtx = TracyVkContext(physDev, device, gfxQueue, cmdBuf);
+> }
+> 
+> // 在渲染循环中使用
+> void RenderFrame(VkCommandBuffer cmdBuf) {
+>     // Zone 1: Shadow Pass
+>     {
+>         TracyVkZone(g_tracyCtx, cmdBuf, "ShadowPass");
+>         vkCmdBeginRenderPass(cmdBuf, &shadowRPInfo, VK_SUBPASS_CONTENTS_INLINE);
+>         // ... draw shadow casters ...
+>         vkCmdEndRenderPass(cmdBuf);
+>     } // TracyVkZone 自动在 cmdBuf 中插入 GPU timestamp
+> 
+>     // Zone 2: G-Buffer Pass
+>     {
+>         TracyVkZone(g_tracyCtx, cmdBuf, "GBufferPass");
+>         vkCmdBeginRenderPass(cmdBuf, &gbufferRPInfo, VK_SUBPASS_CONTENTS_INLINE);
+>         // ...
+>         vkCmdEndRenderPass(cmdBuf);
+>     }
+> 
+>     // Zone 3: Lighting Pass
+>     {
+>         TracyVkZone(g_tracyCtx, cmdBuf, "LightingPass");
+>         vkCmdBeginRenderPass(cmdBuf, &lightingRPInfo, VK_SUBPASS_CONTENTS_INLINE);
+>         // ...
+>         vkCmdEndRenderPass(cmdBuf);
+>     }
+> 
+>     // 每帧结束时收集 GPU timestamp
+>     TracyVkCollect(g_tracyCtx, cmdBuf);
+> }
+> 
+> // 清理
+> void DestroyTracyVulkan() { TracyVkDestroy(g_tracyCtx); }
+> ```
+> 
+> **D3D12 方案**：
+> ```cpp
+> #include "TracyD3D12.hpp"
+> 
+> TracyD3D12Ctx g_tracyCtx;
+> 
+> void InitTracyD3D12(ID3D12Device* device, ID3D12CommandQueue* queue) {
+>     g_tracyCtx = TracyD3D12Context(device, queue);
+> }
+> 
+> void RenderFrame(ID3D12GraphicsCommandList* cmdList) {
+>     TracyD3D12Zone(g_tracyCtx, cmdList, "ShadowPass");
+>     // ... shadow rendering ...
+> 
+>     TracyD3D12Zone(g_tracyCtx, cmdList, "GBufferPass");
+>     // ... G-Buffer ...
+> 
+>     TracyD3D12Zone(g_tracyCtx, cmdList, "LightingPass");
+>     // ... lighting ...
+> 
+>     TracyD3D12Collect(g_tracyCtx);
+> }
+> ```
+> 
+> **Tracy Server 中的关键观察**：
+> - **CPU Timeline**：显示 `vkQueueSubmit` / `ExecuteCommandLists` 的 CPU 提交时间
+> - **GPU Timeline**：显示各 Pass 的 GPU 实际执行起止时间
+> - **CPU→GPU 延迟** = GPU Zone 开始时间 - CPU Submit 时间（通常 0.5~3ms，取决于 GPU 负载和队列深度）
+> - 如果 CPU→GPU 延迟很大（>5ms），说明 GPU 被前序工作塞满，需要考虑减少 GPU 负载或提前提交
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

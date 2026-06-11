@@ -1460,6 +1460,110 @@ namespace ArenaAI
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 里程碑 1 参考答案
+> **关键实现要点**：
+>
+> 1. **Blackboard 初始化在 Awake 中**：`_blackboard = new Blackboard();` 确保每个 AIController 拥有独立实例（非 static）。在 `Awake` 中注册所有必要 key：
+> ```csharp
+> _blackboard.Set("patrol_index", 0);
+> _blackboard.Set("waypoints", _patrolWaypoints);
+> _blackboard.Set("move_target", transform.position);
+> _blackboard.Set("target", null);
+> _blackboard.Set("sight_range", 20f);
+> _blackboard.Set("sight_angle", 120f);
+> _blackboard.Set("target_memory_time", 3f);
+> ```
+>
+> 2. **巡逻 Action 的 Running 语义**：移动中返回 `Running`，到达 waypoint（distance < 1m）后切换索引返回 `Success`。`Success` 使父 Sequence 推进到下一个子节点——等待帧（Wait 装饰器）或直接下一轮 Tick。
+>
+> 3. **目标记忆机制**：当目标离开视觉锥，不立即清除 `target` Blackboard key。启动记忆倒计时：`_targetMemoryTimer -= dt`。记忆到期后才清除 target 并返回 Patrol。这避免了"目标在视觉锥边缘来回进出导致行为频繁切换"的抖动问题。
+>
+> 4. **Gizmos 绘制**：视觉锥用 `Handles.DrawSolidArc`（半透明扇形）+ `Handles.DrawWireArc`（边框）。听觉半径用 `Gizmos.DrawWireSphere`。巡逻路径点用 `Gizmos.DrawLine` 连线 + `Gizmos.DrawSphere` 标记。
+>
+> **常见问题及解决**：
+> - 巡逻索引越界 → `patrolIndex = (patrolIndex + 1) % waypoints.Count` 而非简单 `++`
+> - Agent 旋转不面向移动方向 → NavMeshAgent 的 `updateRotation = true` 自动处理
+> - 追击时 NavMeshAgent 卡在障碍物后 → 每 3 秒重新计算路径：`navAgent.SetDestination(targetPos)`
+
+> [!tip]- 里程碑 2 参考答案
+> **关键实现要点**：
+>
+> 1. **攻击 Cooldown**：ActionNode 的 Tick 中维护 `_attackTimer` 字段。攻击时设置为 cooldown 值，每帧递减。`_attackTimer > 0` 时返回 `Running`（等待冷却），`<= 0` 时执行攻击逻辑并重置 cooldown。
+>
+> 2. **动画驱动模式**：BT 不直接操作 Animator。攻击 Action 写入 Blackboard：`bb.Set("is_attacking", true)`。AIController 的 `ApplyAnimation()` 方法读取并设置 `animator.SetBool("IsAttacking", ...)`。攻击 Action 在 EnterState 设置为 true，ExitState 重置为 false。
+>
+> 3. **撤退方向计算**：
+> ```csharp
+> Vector3 retreatDir = (agentPos - target.transform.position).normalized;
+> Vector3 retreatPos = agentPos + retreatDir * 15f; // 远离玩家 15m
+> // 投影到 NavMesh
+> NavMesh.SamplePosition(retreatPos, out NavMeshHit hit, 10f, NavMesh.AllAreas);
+> bb.Set("move_target", hit.position);
+> ```
+>
+> 4. **Squad Blackboard 传播**：使用 static `Dictionary<int, SquadData>` 按 squadId 分组。发现玩家的 agent 写入 `squadData.hasThreat = true` + `squadData.threatPosition`。所有 squad 成员的 Service 节点（每 0.5s 执行）检查自己 squadId 对应的数据。注意：Service 不应直接修改 BT 结构——它只更新自己 agent 的 Blackboard（如设置 `hasThreat = true`），由 Decorator 的 Condition 检查触发 Abort。
+>
+> 5. **死亡处理**：Death Sequence 完成后 → `navAgent.enabled = false`、`collider.enabled = false`、`this.enabled = false`（禁用 AIController）。Animator 通过 Trigger 而非 Bool 触发死亡动画（一次性的）。
+
+> [!tip]- 里程碑 3 参考答案
+> **关键实现要点**：
+>
+> 1. **Sniper 换掩体**：射击后调用 `Action_FindCover` → EQS 查询（或简化版：在 NavMesh 上随机采样玩家反方向 20-30m 范围的 N 个点，选最近且 line-of-sight 被阻挡的点）。移动到掩体后进行 cooldown（3s 射击冷却）后重新评估。
+>
+> 2. **Heavy AoE 攻击**：攻击 Action 的 Execute 中使用 `Physics.OverlapSphere(agentPos, 4f, targetLayer)` 检测范围内的所有玩家单位，对每个应用伤害。无撤退 Condition——`retreat_threshold = 0` 或对应 Condition 始终返回 Failure。
+>
+> 3. **Boss HSM 集成**：
+> ```csharp
+> // Boss BT 根 Selector
+> new Selector("BossRoot",
+>     // 优先级 1: 死亡
+>     new Sequence("DeathSeq",
+>         new Condition("HpZero", bb => bb.Get<float>("hp_percent") <= 0),
+>         new Action("DeathAnim", ...)
+>     ),
+>     // 优先级 2: Phase2 (hp < 50%)
+>     new Sequence("Phase2",
+>         new Condition("IsPhase2", bb => bb.Get<string>("phase") == "Phase2"),
+>         BuildPhase2Subtree()  // MeleeCombo, Charge, LeapSmash
+>     ),
+>     // 优先级 3: Phase1 (default)
+>     BuildPhase1Subtree()  // RangedAttack, SpawnMinions, Evade
+> )
+> ```
+>    阶段转移在 HSM 的 `OnHealthChanged` 中处理：当 `hp_percent < 50%` → 设置 `bb.Set("phase", "Phase2")` → 触发 `speed_multiplier = 2x` 等参数变化。BT 的 `IsPhase2` Decorator 检测到标签变化 → Abort Phase1 → 进入 Phase2 子树。
+>
+> 4. **WaveManager 波次系统**：
+> - 配置结构：`[WaveConfig] { enemyTypes: [{prefab, count}], spawnDelay: 2f, interWaveDelay: 15f }`
+> - 波间倒计时：`Coroutine` 更新 UI Text → 倒计时归零时 `SpawnWave()`
+> - 胜负检测：`Update()` 中检查 `activeEnemies.Count == 0 && currentWave >= totalWaves` → 胜利；`player.health <= 0` → 失败
+
+> [!tip]- 里程碑 4 参考答案（可选）
+> **关键实现要点**：
+>
+> 1. **AI LOD**：在 AIController 的 `Update()` 开头计算距离 → 确定 tick 频率。
+> ```csharp
+> float dist = Vector3.Distance(transform.position, player.position);
+> if (dist > 100f) _tickIntervalFrames = 10;
+> else if (dist > 50f) _tickIntervalFrames = 5;
+> else _tickIntervalFrames = 1;
+> _frameCounter++;
+> if (_frameCounter % _tickIntervalFrames != 0) return; // 跳过本帧
+> // 完整 AI tick 逻辑
+> ```
+>    NavMeshAgent 的 `updatePosition` 可在远距离关闭（手动插值），节省寻路开销。
+>
+> 2. **调试可视化**：用 `StringBuilder` 在 BT Tick 中累积当前活跃节点名称。`OnDrawGizmos` 中 `Handles.Label(headPos + Vector3.up * 2f, _debugInfo.ToString())`。使用 `#if UNITY_EDITOR` 包裹避免构建中浪费。
+>
+> 3. **自定义 Inspector**：实现 `EditorWindow` 或 `CustomEditor` 在选中 agent 时显示 Blackboard 内容。使用 `EditorGUILayout.LabelField` 遍历 `_blackboard` 的 key-value 对。
+>
+> 4. **BT 单步执行**：添加 `_pauseBT` flag。当 flag 为 true 时，`Tick()` 不执行。通过 Unity Editor 自定义按钮（`[MenuItem]`）手动触发一帧 Tick。
+>
+> **扩展方向选做提示**：
+> - 可视化 BT 编辑器：研究 `GraphView` API（`UIElements`）——创建 Node 、连线、Inspector 面板。保存为 `ScriptableObject`
+> - BT 回放系统：维护 `Queue<FrameSnapshot>` 环形缓冲区（最近 600 帧 = 10s @ 60fps），每帧推送 `{activeNodeName, blackboardStates}`。在 Inspector 中显示时间轴滑块
+> - 性能基准：使用 `Stopwatch` 测量 `AI_Total = Perceive + TickBT + ApplyMovement`。输出 100/200/500 agent 时的平均/中位数/P99 耗时
 ## 4. 扩展阅读
 
 ### 开源游戏 AI 项目学习

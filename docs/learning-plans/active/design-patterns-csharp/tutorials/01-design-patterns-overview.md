@@ -318,6 +318,295 @@ public decimal GetDiscount(string type, decimal amount)
 - 不强迫实现不需要的方法（ISP）
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 这段代码至少违反了三项 SOLID 原则：
+>
+> **1. SRP（单一职责）**：`UserService` 同时负责输入验证、数据库持久化和邮件发送 — 三个完全不同的变化原因。验证规则调整、数据库切换或邮件服务变更都会导致这个类被修改。
+>
+> **2. DIP（依赖倒置）**：方法内部直接 `new SqlConnection(...)` 和 `new SmtpClient(...)`，高层业务逻辑强依赖低层具体实现。无法替换数据库或邮件服务，也难以进行单元测试。
+>
+> **3. OCP（开闭原则）**：如果需要在创建用户时额外发送短信通知，只能修改 `CreateUser` 方法内部代码——无法通过扩展来新增行为。
+>
+> **修正后的代码：**
+>
+> ```csharp
+> // ===== 拆分职责（SRP）=====
+> public class User
+> {
+>     public string Name { get; set; } = string.Empty;
+>     public string Email { get; set; } = string.Empty;
+> }
+>
+> public class UserValidator
+> {
+>     public void Validate(User user)
+>     {
+>         if (string.IsNullOrEmpty(user.Name))
+>             throw new ArgumentException("Name is required.");
+>         if (!user.Email.Contains('@'))
+>             throw new ArgumentException("Invalid email format.");
+>     }
+> }
+>
+> // ===== 依赖抽象（DIP）=====
+> public interface IUserRepository
+> {
+>     void Save(User user);
+> }
+>
+> public interface INotificationService
+> {
+>     void SendWelcome(string name, string email);
+> }
+>
+> // ===== 具体实现 =====
+> public class SqlUserRepository : IUserRepository
+> {
+>     private readonly string _connectionString;
+>     public SqlUserRepository(string connectionString) => _connectionString = connectionString;
+>
+>     public void Save(User user)
+>     {
+>         using var connection = new SqlConnection(_connectionString);
+>         connection.Open();
+>         using var command = new SqlCommand("INSERT INTO Users ...", connection);
+>         command.ExecuteNonQuery();
+>     }
+> }
+>
+> public class EmailNotificationService : INotificationService
+> {
+>     public void SendWelcome(string name, string email)
+>     {
+>         using var smtp = new SmtpClient("smtp.example.com");
+>         smtp.Send("welcome@example.com", email, "Welcome", $"Hi {name}!");
+>     }
+> }
+>
+> // ===== 重构后的 UserService（依赖注入）=====
+> public class UserService
+> {
+>     private readonly UserValidator _validator;
+>     private readonly IUserRepository _repository;
+>     private readonly IEnumerable<INotificationService> _notificationServices;
+>
+>     public UserService(
+>         UserValidator validator,
+>         IUserRepository repository,
+>         IEnumerable<INotificationService> notificationServices)
+>     {
+>         _validator = validator;
+>         _repository = repository;
+>         _notificationServices = notificationServices;
+>     }
+>
+>     public void CreateUser(User user)
+>     {
+>         _validator.Validate(user);           // SRP: 验证独立
+>         _repository.Save(user);              // SRP: 持久化独立
+>         foreach (var service in _notificationServices)  // OCP: 可扩展通知
+>             service.SendWelcome(user.Name, user.Email);
+>     }
+> }
+> ```
+>
+> **关键改进：** 每个类只有一个变化原因；高层依赖抽象而非具体类；新增通知方式只需实现 `INotificationService` 并注册到 DI 容器。
+
+> [!tip]- 练习 2 参考答案
+> 引入 `IDiscountStrategy` 接口，每种折扣类型实现一个策略类，通过字典或 DI 容器选择策略：
+>
+> ```csharp
+> // 策略接口
+> public interface IDiscountStrategy
+> {
+>     decimal Apply(decimal amount);
+> }
+>
+> // 具体策略
+> public class StudentDiscount : IDiscountStrategy
+> {
+>     public decimal Apply(decimal amount) => amount * 0.8m;
+> }
+>
+> public class SeniorDiscount : IDiscountStrategy
+> {
+>     public decimal Apply(decimal amount) => amount * 0.7m;
+> }
+>
+> public class NoDiscount : IDiscountStrategy
+> {
+>     public decimal Apply(decimal amount) => amount;
+> }
+>
+> // 折扣计算器 — 对扩展开放，对修改关闭
+> public class DiscountCalculator
+> {
+>     private static readonly Dictionary<string, IDiscountStrategy> _strategies = new()
+>     {
+>         ["Student"] = new StudentDiscount(),
+>         ["Senior"]  = new SeniorDiscount(),
+>     };
+>
+>     // 允许运行时注册新策略（无需修改已有代码）
+>     public static void Register(string type, IDiscountStrategy strategy)
+>         => _strategies[type] = strategy;
+>
+>     public decimal GetDiscount(string type, decimal amount)
+>     {
+>         return _strategies.TryGetValue(type, out var strategy)
+>             ? strategy.Apply(amount)
+>             : amount;  // 无折扣
+>     }
+> }
+>
+> // === 使用示例 ===
+> var calc = new DiscountCalculator();
+> Console.WriteLine(calc.GetDiscount("Student", 100m)); // 80
+> Console.WriteLine(calc.GetDiscount("Senior", 100m));  // 70
+>
+> // 扩展：新增 VIP 折扣，无需修改 DiscountCalculator
+> DiscountCalculator.Register("VIP", new VipDiscount());
+> Console.WriteLine(calc.GetDiscount("VIP", 100m));     // 85
+> ```
+>
+> **OCP 体现：** 新增折扣类型只需实现 `IDiscountStrategy` 并注册，`GetDiscount` 方法无需任何修改。如果使用 DI 容器，还可将策略注册移到启动配置中。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 综合重构完整 `UserService`，满足所有 SOLID 原则：
+>
+> ```csharp
+> // ==================== 领域模型 ====================
+> public record User(string Name, string Email);
+>
+> // ==================== SRP: 独立验证 ====================
+> public interface IValidator<T>
+> {
+>     void Validate(T entity);
+> }
+>
+> public class UserValidator : IValidator<User>
+> {
+>     public void Validate(User user)
+>     {
+>         if (string.IsNullOrWhiteSpace(user.Name))
+>             throw new ArgumentException("Name is required.");
+>         if (string.IsNullOrWhiteSpace(user.Email) || !user.Email.Contains('@'))
+>             throw new ArgumentException("Invalid email.");
+>     }
+> }
+>
+> // ==================== DIP + ISP: 小接口 ====================
+> public interface IUserRepository
+> {
+>     void Save(User user);
+> }
+>
+> public interface INotificationService
+> {
+>     void Send(string recipient, string subject, string body);
+> }
+>
+> public interface IAuditLogger
+> {
+>     void Log(string action, string detail);
+> }
+>
+> // ==================== 具体实现 ====================
+> public class SqlUserRepository : IUserRepository
+> {
+>     private readonly string _connStr;
+>     public SqlUserRepository(string connStr) => _connStr = connStr;
+>     public void Save(User user)
+>     {
+>         using var conn = new SqlConnection(_connStr);
+>         conn.Open();
+>         using var cmd = new SqlCommand(
+>             "INSERT INTO Users (Name, Email) VALUES (@n, @e)", conn);
+>         cmd.Parameters.AddWithValue("@n", user.Name);
+>         cmd.Parameters.AddWithValue("@e", user.Email);
+>         cmd.ExecuteNonQuery();
+>     }
+> }
+>
+> public class EmailService : INotificationService
+> {
+>     public void Send(string recipient, string subject, string body)
+>     {
+>         // 实际 SMTP 发送逻辑
+>         Console.WriteLine($"[Email] To: {recipient}, Subj: {subject}");
+>     }
+> }
+>
+> public class SmsService : INotificationService
+> {
+>     public void Send(string recipient, string subject, string body)
+>     {
+>         // 实际 SMS 发送逻辑
+>         Console.WriteLine($"[SMS] To: {recipient}, Body: {body}");
+>     }
+> }
+>
+> public class ConsoleAuditLogger : IAuditLogger
+> {
+>     public void Log(string action, string detail)
+>         => Console.WriteLine($"[AUDIT] {action}: {detail}");
+> }
+>
+> // ==================== 重构后的服务 ====================
+> public class UserService
+> {
+>     private readonly IValidator<User> _validator;
+>     private readonly IUserRepository _repository;
+>     private readonly IEnumerable<INotificationService> _notifiers;  // OCP
+>     private readonly IAuditLogger _audit;
+>
+>     public UserService(
+>         IValidator<User> validator,
+>         IUserRepository repository,
+>         IEnumerable<INotificationService> notifiers,
+>         IAuditLogger audit)
+>     {
+>         _validator = validator;
+>         _repository = repository;
+>         _notifiers = notifiers;
+>         _audit = audit;
+>     }
+>
+>     public void CreateUser(User user)
+>     {
+>         _validator.Validate(user);
+>         _repository.Save(user);
+>
+>         // OCP: 遍历所有通知服务，新增渠道无需修改此方法
+>         foreach (var notifier in _notifiers)
+>             notifier.Send(user.Email, "Welcome!", $"Hi {user.Name}!");
+>
+>         _audit.Log("UserCreated", user.Email);
+>     }
+> }
+>
+> // ==================== DI 注册（Program.cs）====================
+> // var builder = Host.CreateApplicationBuilder();
+> // builder.Services.AddSingleton<IValidator<User>, UserValidator>();
+> // builder.Services.AddSingleton<IUserRepository>(
+> //     _ => new SqlUserRepository("Server=.;Database=App"));
+> // builder.Services.AddSingleton<INotificationService, EmailService>();
+> // builder.Services.AddSingleton<INotificationService, SmsService>();
+> // builder.Services.AddSingleton<IAuditLogger, ConsoleAuditLogger>();
+> // builder.Services.AddSingleton<UserService>();
+> ```
+>
+> **SOLID 覆盖分析：**
+> - **SRP**：验证（`UserValidator`）、持久化（`SqlUserRepository`）、通知（各 `INotificationService`）、审计（`ConsoleAuditLogger`）各有其类
+> - **OCP**：新增通知渠道只需实现 `INotificationService` 并注册到 DI；新增持久化方式只需实现 `IUserRepository`
+> - **LSP**：所有 `INotificationService` 实现可互相替换，不会破坏 `UserService` 行为
+> - **ISP**：三个小接口（`IUserRepository`、`INotificationService`、`IAuditLogger`），使用者只依赖自己需要的
+> - **DIP**：`UserService` 只依赖抽象接口，具体实现通过 DI 注入
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

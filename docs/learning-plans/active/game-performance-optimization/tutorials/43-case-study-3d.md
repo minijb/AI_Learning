@@ -420,6 +420,175 @@ Budget remaining: 1.4ms headroom  ✅
 3. 找出新的瓶颈是什么——它是 CPU Bound 还是 GPU Bound？
 4. 写一个简短的优化计划：你会怎么修？
 
+
+## 4.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **复现测量流程的操作步骤：**
+>
+> 1. **场景准备**：使用 UE5 的 City Sample 或自行搭建包含 50+ Skeletal Mesh 角色、大量 Static Mesh 建筑、多个动态光源（点光源+聚光灯）的场景。
+>
+> 2. **集成 Tracy**：
+>    ```cpp
+>    // 在项目的 Build.cs 中添加 Tracy 依赖
+>    // 在 GameMode/Actor 中添加 ZoneScoped
+>    #include "Tracy.hpp"
+>
+>    void AMyGameMode::Tick(float DeltaTime)
+>    {
+>        ZoneScoped;  // 整个 GameMode Tick 计时
+>        Super::Tick(DeltaTime);
+>    }
+>
+>    void UMyAnimationSystem::UpdateAnimation(float DT)
+>    {
+>        ZoneScopedN("AnimationUpdate");
+>        for (auto& Entity : AnimatedEntities)
+>        {
+>            ZoneScopedN("SingleEntityAnim");
+>            EvaluateSkeleton(Entity);
+>        }
+>    }
+>    ```
+>
+> 3. **Tracy 时间线截图标注**（典型输出）：
+>    ```
+>    Frame 33.4ms
+>    ├── Gameplay Update: 19.2ms  ← CPU #1
+>    │   ├── Animation: 8.1ms      ← CPU #2
+>    │   ├── Physics: 6.3ms        ← CPU #3
+>    │   └── AI: 4.8ms
+>    ├── Render Submission: 8.7ms
+>    └── GPU Frame: 14.2ms
+>    ```
+>    前三耗时：Gameplay Update (19.2ms)、Render Submission (8.7ms)、GPU Frame (14.2ms GPU side)
+>
+> 4. **RenderDoc 抓帧统计**：
+>    - 打开 RenderDoc → Launch Application → 选择 UE5 Editor
+>    - F12 捕获一帧 → Event Browser 中查看 Draw Call 分布
+>    - 统计主分类：
+>      ```
+>      StaticMesh: 3,200 DC (45 种材质)
+>      SkeletalMesh: 1,500 DC (12 种材质)
+>      Particles: 800 DC
+>      Decals: 247 DC
+>      Total: 5,847 DC
+>      ```
+>    - GPU Timeline (Performance Counter Viewer)：Shadow Pass 5.8ms, Base Pass 4.3ms, Post Process 3.1ms
+>
+> **验收标准**：能画出类似案例中的帧时间分解图，标注出前 3 大 CPU 耗时和 GPU 各 Pass 耗时。
+
+> [!tip]- 练习 2 参考答案
+> **三项优化实施模板：**
+>
+> ### 优化 1: 动画 LOD（基于距离的骨骼更新频率）
+> ```cpp
+> // 在 AnimationSystem 中实现
+> struct FAnimLODConfig
+> {
+>     float Distance;
+>     float UpdateInterval;  // 秒
+>     int32 MaxBoneCount;
+> };
+>
+> static const FAnimLODConfig AnimLODs[] = {
+>     {  20.0f, 1.0f/60.0f, 64 },  // LOD0: 近处全精度
+>     {  50.0f, 1.0f/30.0f, 32 },  // LOD1: 30fps 更新
+>     { 100.0f, 1.0f/15.0f, 16 },  // LOD2: 15fps 更新
+>     { 200.0f, 1.0f/5.0f,   0 },  // LOD3: 停用骨骼
+> };
+>
+> void UpdateAnimationLODed(float DT)
+> {
+>     for (auto& Entity : AnimatedEntities)
+>     {
+>         float Dist = FVector::Dist(CameraPos, Entity.Transform.GetLocation());
+>         int32 LOD = SelectLOD(Dist);
+>         Entity.TimeAccum += DT;
+>         if (Entity.TimeAccum < AnimLODs[LOD].UpdateInterval)
+>             continue;
+>         Entity.TimeAccum = 0.0f;
+>         EvaluateSkeleton(Entity, AnimLODs[LOD].MaxBoneCount);
+>     }
+> }
+> ```
+> 预期：Animation 8.1ms → 1.9ms
+>
+> ### 优化 2: GPU Instancing（合并相同 Mesh+Material 的绘制）
+> ```cpp
+> // StaticMesh 建筑：收集所有使用相同 Mesh+Material 的实例
+> // 使用 Instance Buffer 一次 Draw Call 绘制全部
+> TMap<FMeshMaterialKey, TArray<FTransform>> InstanceGroups;
+> for (auto& StaticMesh : SceneStaticMeshes)
+> {
+>     FMeshMaterialKey Key(StaticMesh.Mesh, StaticMesh.Material);
+>     InstanceGroups.FindOrAdd(Key).Add(StaticMesh.Transform);
+> }
+> for (auto& [Key, Transforms] : InstanceGroups)
+> {
+>     RHICmdList.DrawPrimitiveInstanced(Key.Mesh, Transforms.Num(),
+>         Transforms.GetData());
+> }
+> ```
+> 预期：建筑类 Draw Call 3,200 → 120；Render Submission 8.7ms → 1.8ms
+>
+> ### 优化 3: Shadow 优化（降低 Cascade 数量 + 分辨率）
+> ```cpp
+> // 控制台命令或 Console Variable
+> r.Shadow.CSM.MaxCascades 2          // 从 4 降到 2
+> r.Shadow.MaxResolution 1024         // 从 2048 降到 1024
+> r.Shadow.CachedShadows 1            // 启用阴影缓存（静态物体不每帧渲染阴影）
+> r.Shadow.DistanceScale 0.7          // 阴影距离缩小到 70%
+> ```
+> 预期：Shadow Pass 5.8ms → 2.1ms
+>
+> **优化前后对比表**：
+>
+> | 优化项 | 操作前 | 操作后 | 节省 |
+> |--------|--------|--------|------|
+> | 动画 LOD | 8.1ms | 1.9ms | 6.2ms |
+> | GPU Instancing | 5,847 DC / 8.7ms | 487 DC / 1.8ms | 6.9ms |
+> | Shadow 优化 | 5.8ms | 2.1ms | 3.7ms |
+> | **总计** | **~33ms** | **~15ms** | **~18ms** |
+
+> [!tip]- 练习 3 参考答案（可选）
+> **120fps 场景瓶颈分析：**
+>
+> 1. **将场景优化到 60fps**（~15ms/frame）后，提高目标到 120fps（~8.3ms/frame）。
+>
+> 2. **找出新瓶颈的方法**：
+>    - 重新运行 Tracy：所有耗时 > 1ms 的子系统都是候选
+>    - 典型 120fps 场景的新瓶颈分布：
+>      ```
+>      Frame 8.3ms budget
+>      ├── Culling: 2.1ms         ← 🔴 占比 25%，新瓶颈
+>      ├── Render Submission: 1.8ms
+>      ├── GPU Frame: 6.1ms       ← 🔴 接近极限
+>      └── Gameplay Update: 5.5ms
+>      ```
+>
+> 3. **瓶颈类型判定**：
+>    - Culling 2.1ms 接近 CPU 预算 → **CPU Bound**（CPU 侧剔除算法太慢）
+>    - GPU 6.1ms < 8.3ms → GPU 有 2.2ms 余量
+>
+> 4. **优化计划**：
+>    ```
+>    优先级 1: Culling 优化（预计节省 1.2ms）
+>      - 使用空间哈希/八叉树替代线性遍历
+>      - 启用 GPU Occlusion Culling（将部分剔除工作移到 GPU）
+>      - 粗粒度 LOD 剔除（远处物体用更松的包围盒批量剔除）
+>
+>    优先级 2: GPU 端为 120fps 做准备（预计节省 2ms）
+>      - 降低后处理分辨率（Upscaling）
+>      - Shader 复杂度审查（移除不必要的指令）
+>      - 考虑使用 Variable Rate Shading
+>
+>    优先级 3: 如果前两项不够，降低视觉保真度
+>      - 将目标锁定在 90fps 作为妥协（VR/高刷显示器的 sweet spot）
+>      ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 5. 扩展阅读

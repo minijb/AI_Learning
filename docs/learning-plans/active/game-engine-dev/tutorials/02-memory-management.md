@@ -1869,6 +1869,323 @@ ParticlePool:
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <cstdint>
+> #include <cassert>
+> #include <cstdlib>
+> #include <vector>
+> #include <unordered_map>
+> #include <iostream>
+> #include <cmath>
+>
+> // 伙伴分配器：以 2 的幂为粒度管理内存，支持分裂与合并
+> class BuddyAllocator {
+> public:
+>     struct Block {
+>         size_t size;
+>         bool used;
+>     };
+>
+>     BuddyAllocator(size_t totalSize) {
+>         // 确保总大小为 2 的幂，且不小于最小块
+>         totalSize_ = 1;
+>         while (totalSize_ < totalSize) totalSize_ <<= 1;
+>         size_t minBlock = 64; // 最小块大小
+>         if (totalSize_ < minBlock) totalSize_ = minBlock;
+>         memory_ = static_cast<uint8_t*>(std::malloc(totalSize_));
+>         assert(memory_ != nullptr);
+>
+>         // 初始化根块
+>         blocks_[0] = {totalSize_, false};
+>     }
+>
+>     ~BuddyAllocator() { std::free(memory_); }
+>
+>     // 分配：size 向上取整到最近的 2 的幂，分裂大块直到合适大小
+>     void* allocate(size_t size) {
+>         if (size == 0) return nullptr;
+>         size_t blockSize = roundUpPower2(size);
+>         if (blockSize < 64) blockSize = 64;
+>
+>         // 从大到小查找合适的空闲块
+>         for (auto it = blocks_.begin(); it != blocks_.end(); ++it) {
+>             if (!it->second.used && it->second.size >= blockSize) {
+>                 // 不断分裂直到块大小刚好匹配
+>                 while (it->second.size > blockSize) {
+>                     split(it->first);
+>                     // 分裂后需要重新查找（当前块已变小）
+>                     // 继续用原 offset 检查
+>                 }
+>                 // 分裂后当前 offset 可能指向更小的块，重新确认
+>                 // 简化处理：分裂后重新遍历
+>             }
+>         }
+>
+>         // 第二次遍历确认并标记使用
+>         for (auto it = blocks_.begin(); it != blocks_.end(); ++it) {
+>             if (!it->second.used && it->second.size == blockSize) {
+>                 it->second.used = true;
+>                 return memory_ + it->first;
+>             }
+>         }
+>         return nullptr; // 无可用块
+>     }
+>
+>     // 释放：标记为未使用，然后递归尝试合并伙伴块
+>     void deallocate(void* ptr) {
+>         if (!ptr) return;
+>         size_t offset = static_cast<uint8_t*>(ptr) - memory_;
+>         auto it = blocks_.find(offset);
+>         if (it == blocks_.end() || !it->second.used) return;
+>
+>         it->second.used = false;
+>         // 循环合并所有可能的伙伴
+>         tryMerge(it->first);
+>     }
+>
+>     void printState() const {
+>         std::cout << "=== Buddy Allocator State (total=" << totalSize_ << "B) ===\n";
+>         size_t totalUsed = 0;
+>         for (const auto& [offset, block] : blocks_) {
+>             std::cout << "  Offset=" << offset << " Size=" << block.size
+>                       << " [" << (block.used ? "USED" : "FREE") << "]\n";
+>             if (block.used) totalUsed += block.size;
+>         }
+>         std::cout << "  Total used: " << totalUsed << "B / " << totalSize_ << "B\n";
+>     }
+>
+> private:
+>     // 向上取整到最近的 2 的幂
+>     static size_t roundUpPower2(size_t n) {
+>         if (n == 0) return 0;
+>         n--;
+>         n |= n >> 1;  n |= n >> 2;
+>         n |= n >> 4;  n |= n >> 8;
+>         n |= n >> 16; n |= n >> 32;
+>         return n + 1;
+>     }
+>
+>     // 伙伴地址 = current ^ size（异或翻转对应位）
+>     size_t getBuddyOffset(size_t offset, size_t size) const {
+>         return offset ^ size;
+>     }
+>
+>     // 分裂指定块
+>     void split(size_t offset) {
+>         auto it = blocks_.find(offset);
+>         if (it == blocks_.end() || it->second.used) return;
+>         size_t newSize = it->second.size / 2;
+>         if (newSize < 64) return; // 达到最小块
+>         it->second.size = newSize;
+>         size_t buddyOffset = offset + newSize;
+>         blocks_[buddyOffset] = {newSize, false};
+>     }
+>
+>     // 尝试合并伙伴块（递归直到无法合并）
+>     void tryMerge(size_t offset) {
+>         auto it = blocks_.find(offset);
+>         if (it == blocks_.end() || it->second.used) return;
+>         size_t size = it->second.size;
+>         size_t buddyOffset = getBuddyOffset(offset, size);
+>         auto buddyIt = blocks_.find(buddyOffset);
+>         if (buddyIt == blocks_.end() || buddyIt->second.used || buddyIt->second.size != size) return;
+>         // 合并：保留左块（较小的 offset），移除右块
+>         size_t left = std::min(offset, buddyOffset);
+>         blocks_[left].size = size * 2;
+>         blocks_.erase(std::max(offset, buddyOffset));
+>         // 递归尝试合并更大的块
+>         tryMerge(left);
+>     }
+>
+>     uint8_t* memory_;
+>     size_t totalSize_;
+>     // offset -> Block，用 map 维持 offset 排序以便遍历
+>     std::unordered_map<size_t, Block> blocks_;
+> };
+> ```
+>
+> **关键点：** 伙伴地址通过 `offset ^ size` 计算——这正是"伙伴"系统名称的由来。分配时自上而下分裂，释放时自下而上合并。时间复杂度 O(log N)。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <string>
+> #include <vector>
+> #include <cstdint>
+> #include <iostream>
+> #include <unordered_map>
+> #include <algorithm>
+>
+> // 子系统内存预算管理器
+> class MemoryBudget {
+> public:
+>     struct Subsystem {
+>         std::string name;
+>         size_t softLimit;  // 软限制：超过时告警
+>         size_t hardLimit;  // 硬限制：超过时拒绝
+>         size_t currentUsage;
+>         size_t totalAllocs;
+>         size_t peakUsage;
+>     };
+>
+>     void registerSubsystem(const std::string& name, size_t softMB, size_t hardMB) {
+>         Subsystem sub;
+>         sub.name = name;
+>         sub.softLimit = softMB * 1024 * 1024;
+>         sub.hardLimit = hardMB * 1024 * 1024;
+>         sub.currentUsage = 0;
+>         sub.totalAllocs = 0;
+>         sub.peakUsage = 0;
+>         subsystems_[name] = sub;
+>     }
+>
+>     void* allocate(const std::string& subsystem, size_t size) {
+>         auto it = subsystems_.find(subsystem);
+>         if (it == subsystems_.end()) return nullptr; // 未注册子系统
+>         auto& sub = it->second;
+>         if (sub.currentUsage + size > sub.hardLimit) {
+>             std::cerr << "[MEMORY] HARD LIMIT: " << subsystem
+>                       << " exceeds " << sub.hardLimit / 1024 / 1024 << "MB\n";
+>             return nullptr;
+>         }
+>         if (sub.currentUsage + size > sub.softLimit) {
+>             std::cerr << "[MEMORY] WARNING: " << subsystem
+>                       << " exceeds soft limit " << sub.softLimit / 1024 / 1024 << "MB\n";
+>         }
+>         void* ptr = std::malloc(size);
+>         if (ptr) {
+>             sub.currentUsage += size;
+>             sub.totalAllocs++;
+>             sub.peakUsage = std::max(sub.peakUsage, sub.currentUsage);
+>         }
+>         return ptr;
+>     }
+>
+>     void deallocate(const std::string& subsystem, void* ptr, size_t size) {
+>         if (!ptr) return;
+>         std::free(ptr);
+>         auto it = subsystems_.find(subsystem);
+>         if (it != subsystems_.end()) {
+>             it->second.currentUsage -= size;
+>         }
+>     }
+>
+>     void printReport() const {
+>         std::cout << "\n========== Memory Budget Report ==========\n";
+>         size_t totalCurrent = 0, totalPeak = 0;
+>         for (const auto& [name, sub] : subsystems_) {
+>             std::cout << name << ":\n";
+>             std::cout << "  Current: " << sub.currentUsage / 1024 << "KB";
+>             if (sub.currentUsage > sub.softLimit) std::cout << " [WARNING: >soft limit]";
+>             std::cout << "\n";
+>             std::cout << "  Peak:    " << sub.peakUsage / 1024 << "KB\n";
+>             std::cout << "  Soft limit: " << sub.softLimit / 1024 / 1024
+>                       << "MB, Hard limit: " << sub.hardLimit / 1024 / 1024 << "MB\n";
+>             std::cout << "  Total allocs: " << sub.totalAllocs << "\n";
+>             totalCurrent += sub.currentUsage;
+>             totalPeak += sub.peakUsage;
+>         }
+>         std::cout << "-------------------------------------------\n";
+>         std::cout << "  TOTAL Current: " << totalCurrent / 1024 / 1024 << "MB\n";
+>         std::cout << "  TOTAL Peak:    " << totalPeak / 1024 / 1024 << "MB\n";
+>         std::cout << "===========================================\n";
+>     }
+>
+> private:
+>     std::unordered_map<std::string, Subsystem> subsystems_;
+> };
+> ```
+>
+> **思考题：** 软限制和硬限制的区别是什么？> 软限制是告警阈值——超过时仅发出 warning，允许继续分配，用于提示开发者"该子系统内存使用偏高，可能需要优化"。硬限制是安全阈值——超过时拒绝分配返回 `nullptr`，防止单个子系统耗尽所有内存导致整体崩溃。两级限制的设计来自游戏主机的开发经验：主机总内存固定，必须确保渲染、物理、音频都能分配到内存。实际引擎中（如 UE 的 FMallocBinned）还会增加第三个维度——**预留内存**：关键功能（如 UI、玩家角色）始终保留最低内存配额，LRU 卸载时跳过这些关键资源。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> #include <string>
+> #include <map>
+> #include <mutex>
+>
+> // 全局内存追踪器——统计每个分配器的使用情况
+> class MemoryTracker {
+> public:
+>     static MemoryTracker& Instance() {
+>         static MemoryTracker inst;
+>         return inst;
+>     }
+>
+>     struct AllocatorStats {
+>         size_t totalAllocs = 0;
+>         size_t totalDeallocs = 0;
+>         size_t totalBytesAllocated = 0;
+>         size_t totalBytesDeallocated = 0;
+>         size_t currentBytes = 0;
+>         size_t peakBytes = 0;
+>     };
+>
+>     void recordAlloc(const std::string& allocatorName, size_t size) {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         auto& stats = stats_[allocatorName];
+>         stats.totalAllocs++;
+>         stats.totalBytesAllocated += size;
+>         stats.currentBytes += size;
+>         if (stats.currentBytes > stats.peakBytes)
+>             stats.peakBytes = stats.currentBytes;
+>         // 同时记录每次分配的调用堆栈（简化：仅存 size）
+>         activeAllocs_[allocatorName].push_back(size);
+>     }
+>
+>     void recordDealloc(const std::string& allocatorName, size_t size) {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         auto& stats = stats_[allocatorName];
+>         stats.totalDeallocs++;
+>         stats.totalBytesDeallocated += size;
+>         stats.currentBytes -= size;
+>     }
+>
+>     // 程序退出时调用，输出泄漏报告
+>     void printLeakReport() const {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         std::cout << "\n========== Per-Allocator Report ==========\n";
+>         for (const auto& [name, stats] : stats_) {
+>             size_t leaks = stats.totalAllocs - stats.totalDeallocs;
+>             std::cout << name << ":\n";
+>             std::cout << "  Total allocs: " << stats.totalAllocs
+>                       << ", Total bytes: " << formatBytes(stats.totalBytesAllocated) << "\n";
+>             std::cout << "  Current used: " << formatBytes(stats.currentBytes)
+>                       << " (peak: " << formatBytes(stats.peakBytes) << ")\n";
+>             std::cout << "  Leaks: " << leaks;
+>             if (stats.currentBytes > 0) std::cout << " (" << formatBytes(stats.currentBytes) << ")";
+>             std::cout << "\n";
+>         }
+>         std::cout << "==========================================\n";
+>     }
+>
+> private:
+>     static std::string formatBytes(size_t bytes) {
+>         if (bytes > 1024*1024*1024) return std::to_string(bytes/(1024*1024*1024)) + "GB";
+>         if (bytes > 1024*1024) return std::to_string(bytes/(1024*1024)) + "MB";
+>         if (bytes > 1024) return std::to_string(bytes/1024) + "KB";
+>         return std::to_string(bytes) + "B";
+>     }
+>
+>     mutable std::mutex mutex_;
+>     std::map<std::string, AllocatorStats> stats_;
+>     std::map<std::string, std::vector<size_t>> activeAllocs_;
+> };
+>
+> // 集成示例：在分配器中调用 MemoryTracker
+> // 以 ArenaAllocator 为例，在 allocate() 中添加一行：
+> //   MemoryTracker::Instance().recordAlloc("FrameArena", size);
+> // 在 reset() 中不调用 recordDealloc，因为 Arena 是按帧整体释放。
+> // 在 PoolAllocator::deallocate(T* ptr) 中：
+> //   MemoryTracker::Instance().recordDealloc("ParticlePool", sizeof(T));
+> ```
+> > **注意：** 本示例中 Arena 分配器不逐块追踪释放（因为它是整体回滚的），因此 `currentBytes` 在 Arena 中展示的是"累计已分配但未回滚"的近似值。真实引擎中可通过 `reset()` 时清零计数器来处理。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 书籍

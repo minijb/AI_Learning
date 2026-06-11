@@ -1675,6 +1675,230 @@ public class GameBootstrap : MonoBehaviour
 - 阶段切换不出现"瞬移"或"AI 状态残留"
 - 添加 Editor 测试：模拟 200ms 延迟下的 Boss 行为，确保无抖动
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1：理解双通道数据流
+> **本地玩家移动输入的完整路径**：
+>
+> ```
+> 玩家按键 → Input.GetAxis (0ms)
+>   → HybridSyncManager.Update (最多 16ms 等待当前渲染帧)
+>   → ProcessChannelAReceive (从 LockstepChannel 帧缓冲取帧)
+>   → AdvanceLogicFrame (逻辑帧推进，30Hz = 33ms)
+>   → LockstepEntity.TickInput (应用输入，计算新位置)
+>   → UpdateEntityPresentation (逻辑位置→渲染位置插值)
+>   → 屏幕刷新 (最多 16ms 等待 vsync)
+>
+> 延迟分解: 输入采样(~0) + 帧等待(≤16ms) + 帧缓冲(4帧×33ms=132ms)
+>          + 逻辑帧间隔(33ms) + 渲染(≤16ms)
+>        ≈ 0 + 16 + 132 + 33 + 16 = 197ms
+> 注: RTT=50ms → 服务器到客户端 25ms，但帧同步的帧缓冲 4帧=132ms 是主导因子
+> ```
+>
+> **远程怪物位置更新的完整路径**：
+>
+> ```
+> 服务器计算怪物位置 (Server Tick)
+>   → StateBroadcaster 打包 (1ms)
+>   → 网络传输 25ms (RTT/2)
+>   → ProcessChannelBReceive (立即处理，不等待帧对齐)
+>   → ReplicatedEntity.ApplyState (设置目标位置)
+>   → Interpolator.Update (在后几帧内平滑到目标)
+>   → 屏幕刷新
+>
+> 延迟分解: 服务器Tick(33-66ms) + 网络(25ms) + 插值缓冲(50-100ms)
+>        ≈ 108-191ms
+> 状态同步通道的关键优势：没有帧缓冲等待，数据到达就立即应用
+> ```
+>
+> **数据流图关键标注**：
+> - Channel A 路径的瓶颈是**帧缓冲**（4帧=132ms），但换来的是确定性同步
+> - Channel B 路径的瓶颈是**插值缓冲**（50-100ms），用于平滑运动
+> - 本地玩家的移动延迟约 158-197ms（变化主要来自帧等待时机）
+> - 怪物位置更新延迟约 75-191ms（变化来自服务器 Tick 相位和插值窗口）
+> - 两个通道互不阻塞：即使 Channel A 在等帧，Channel B 照常处理——这是 `Update()` 中 `ProcessChannelBReceive` 在 `ProcessChannelAReceive` 之前的根本原因（第 329-331 行）
+>
+> 在你的 `Debug.Log` 验证中，关注 `Time.realtimeSinceStartup` 差值来校准每个步骤的实际耗时，与理论值做对比。
+
+> [!tip]- 练习 2：帧号对齐的边界情况
+> **修改 `TimestampToLogicFrame` 处理边界**：
+>
+> ```csharp
+> public int TimestampToLogicFrame(long serverTimestampMs)
+> {
+>     if (_baseServerTimestampMs < 0) return _currentLogicFrame;
+>
+>     long deltaMs = serverTimestampMs - _baseServerTimestampMs;
+>     double frameIntervalMs = 1000.0 / _logicFrameRate;
+>
+>     // 处理负数时间戳：用 Floor 而非 Round，确保不会因四舍五入产生 +1帧偏移
+>     if (deltaMs < 0)
+>     {
+>         return _baseLogicFrame - (int)Math.Ceiling(-deltaMs / frameIntervalMs);
+>     }
+>
+>     return _baseLogicFrame + (int)Math.Round(deltaMs / frameIntervalMs);
+> }
+> ```
+>
+> **处理超前状态数据**（修改 `ResolveConflicts` 和 `ProcessChannelBReceive`）：
+>
+> ```csharp
+> // 新增字段
+> private const int MAX_PREDICTION_FRAMES = 10;
+> private readonly SortedList<int, List<ReplicatedState>> _pendingServerStates = new();
+>
+> // 修改 ProcessChannelBReceive
+> private void ProcessChannelBReceive()
+> {
+>     while (_stateSyncChannel.TryDequeueState(out ReplicatedState state))
+>     {
+>         int serverFrame = TimestampToLogicFrame(state.serverTimestampMs);
+>
+>         if (serverFrame > _currentLogicFrame + MAX_PREDICTION_FRAMES)
+>         {
+>             // 超前太多 → 暂存，等逻辑帧追上来
+>             if (!_pendingServerStates.ContainsKey(serverFrame))
+>                 _pendingServerStates[serverFrame] = new List<ReplicatedState>();
+>             _pendingServerStates[serverFrame].Add(state);
+>             continue;
+>         }
+>
+>         // 正常处理
+>         _latestServerStates[state.entityId] = state;
+>         if (_entityRegistry.TryGetReplicatedEntity(state.entityId, out var repEntity))
+>             repEntity.ApplyState(state, _currentLogicFrame);
+>     }
+> }
+>
+> // 在 AdvanceLogicFrame 末尾消费待定状态
+> private void AdvanceLogicFrame()
+> {
+>     _currentLogicFrame++;
+>     // ... 原有逻辑 ...
+>
+>     // 消费超前缓存的状态
+>     while (_pendingServerStates.Count > 0)
+>     {
+>         var first = _pendingServerStates.First();
+>         if (first.Key > _currentLogicFrame) break;
+>         foreach (var state in first.Value)
+>         {
+>             _latestServerStates[state.entityId] = state;
+>             if (_entityRegistry.TryGetReplicatedEntity(state.entityId, out var repEntity))
+>                 repEntity.ApplyState(state, _currentLogicFrame);
+>         }
+>         _pendingServerStates.RemoveAt(0);
+>     }
+> }
+> ```
+>
+> **单元测试要点**：
+> - 测试 1（正常转换）：`Assert(manager.TimestampToLogicFrame(0) == 0)`
+> - 测试 2（负数时间戳）：`Assert(manager.TimestampToLogicFrame(-50) == -2)` — 使用 `Ceiling` 确保负数向下取整
+> - 测试 3（长时间运行）：1 小时后 `baseFrame + 30*3600 = baseFrame + 108000`，验证无整数溢出
+> - 测试 4（超前暂存）：模拟 `serverFrame = currentFrame + 15`，断言状态进入 `_pendingServerStates` 而非立即应用
+> - 测试 5（超前消费）：在 `_pendingServerStates` 有数据后推进 `_currentLogicFrame`，断言被消耗
+>
+> **关键点**：`_pendingServerStates` 使用 `SortedList` 而非普通 `Dictionary`，保证按帧号顺序消费——这是处理快照系统的通用模式，避免因乱序处理导致状态回退。
+
+> [!tip]- 练习 3：完整的 HybridBoss 实体
+> ```csharp
+> public class HybridBoss : HybridEntity
+> {
+>     // ── 帧同步驱动字段（本地确定性计算） ──
+>     private Vector2 _logicalPosition;
+>     private Vector2 _logicalVelocity;
+>     private float _logicalAngle;
+>
+>     // ── 服务器权威覆盖字段 ──
+>     private float _serverHealth = 100f;
+>     private int   _serverPhase = 0;       // 0=未初始化, 1-3=阶段
+>
+>     // ── AI 状态机（帧同步确定性） ──
+>     private enum BossAIState { Idle, Patrol, Chase, Attack, RangeAttack, Rage }
+>     private BossAIState _aiState = BossAIState.Patrol;
+>
+>     public override void TickInput(int frameNumber, byte[] input)
+>     {
+>         // 1. 根据服务器阶段和帧同步输入计算 AI 行为
+>         int effectivePhase = _serverPhase > 0 ? _serverPhase : 1;
+>
+>         switch (effectivePhase)
+>         {
+>             case 1: // HP > 60%: 移动 + 普攻
+>                 _aiState = _aiState switch
+>                 {
+>                     BossAIState.Patrol when DistanceToNearestPlayer() < 10f => BossAIState.Chase,
+>                     BossAIState.Chase when DistanceToNearestPlayer() < 3f  => BossAIState.Attack,
+>                     BossAIState.Attack when DistanceToNearestPlayer() > 5f  => BossAIState.Chase,
+>                     _ => _aiState
+>                 };
+>                 break;
+>             case 2: // HP 30-60%: 加速 + 范围攻击
+>                 // 移动速度 ×1.5，攻击改为范围判定
+>                 break;
+>             case 3: // HP < 30%: 狂暴
+>                 // 移动速度 ×2.0，攻击频率 ×2
+>                 break;
+>         }
+>
+>         // 2. 执行移动（帧同步驱动——无网络延迟）
+>         ExecuteAIMovement_Deterministic(frameNumber);
+>
+>         // 3. 执行攻击判定
+>         ExecuteAIAttack_Deterministic(frameNumber);
+>     }
+>
+>     public override void ApplyServerOverride(ReplicatedState serverState)
+>     {
+>         // 服务器权威：血量覆盖
+>         if (serverState.properties.TryGetValue("health", out var hp))
+>         {
+>             float oldPhase = GetPhaseFromHP(_serverHealth);
+>             _serverHealth = (float)hp;
+>             float newPhase = GetPhaseFromHP(_serverHealth);
+>
+>             // 阶段切换 → 重置 AI 状态
+>             if (newPhase != oldPhase)
+>             {
+>                 _serverPhase = newPhase;
+>                 _aiState = BossAIState.Patrol;  // 重置状态机，避免残留
+>                 Debug.Log($"[HybridBoss] Phase change: {oldPhase}→{newPhase}, AI reset");
+>             }
+>         }
+>
+>         // 服务器权威：阶段号直接覆盖（防作弊）
+>         if (serverState.properties.TryGetValue("phase", out var phase))
+>             _serverPhase = (int)(float)phase;
+>     }
+>
+>     public override void UpdatePresentation(float dt, float alpha)
+>     {
+>         // 位置：逻辑位置 → 渲染位置（帧同步插值，< 2帧延迟）
+>         Vector2 renderPos = Vector2.Lerp(_lastRenderPosition, _logicalPosition, alpha);
+>         transform.position = new Vector3(renderPos.x, 0, renderPos.y);
+>
+>         // 血条：直接显示服务器权威值（状态同步路径，~100ms 延迟）
+>         healthBar.fillAmount = _serverHealth / 100f;
+>     }
+>
+>     private float GetPhaseFromHP(float hp) =>
+>         hp > 60 ? 1 : hp > 30 ? 2 : 3;
+> }
+> ```
+>
+> **验证清单对照**：
+> - **移动响应 < 2 帧**：`_logicalPosition` 在 `TickInput` 中更新，下一次 `UpdatePresentation`（下一渲染帧）即反映——本质延迟 = 逻辑帧间隔（33ms） < 2帧（66ms）
+> - **血量覆盖 ~100ms**：服务器 `StateBroadcaster` 15Hz 发送 → 网络 RTT/2（25ms）→ `ProcessChannelBReceive`（立即处理）→ 血条更新。总延迟 ≈ 服务器 Tick 间隔（66ms）+ 网络（25ms）≈ 91ms。如果服务器在变更的下一帧立即发送，最坏 66+25=91ms
+> - **阶段切换无瞬移**：`ApplyServerOverride` 中重置 `_aiState` 为 `Patrol`，下一帧的 `TickInput` 会根据新阶段号重新选择行为——不残留旧阶段的状态。位置由帧同步的 `_logicalPosition` 驱动，不会因阶段切换而跳变
+> - **Editor 测试**：使用 `UnityEditor.EditorApplication.update` 驱动模拟循环，注入人工延迟（`Thread.Sleep(200)`），检查 Boss 位置连续性和血量变化
+
+> [!note] 答案使用方式
+> - 练习 1 是理解题，先用纸笔画出数据流图，再对照本文的双通道架构图（1.2 节）确认
+> - 练习 2 的帧号对齐是混合架构中最容易出 Bug 的地方——负数时间戳和超前状态是真实场景（断线重连、时钟漂移）
+> - 练习 3 的 `HybridBoss` 展示了混合同步的核心理念：**移动走帧同步（即时响应），血量走状态同步（服务器权威）**——两种路径在同一实体上共存
 ---
 
 ## 4. 扩展阅读

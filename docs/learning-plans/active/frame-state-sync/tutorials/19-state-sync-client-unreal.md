@@ -1959,6 +1959,429 @@ void UMyIrisReplicatedObject::RegisterWithIris(UReplicationSystem* RepSystem)
 }
 ```
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1：补全 MyCharacter 的伤害同步
+> #### MyCharacter.h 添加内容
+>
+> ```cpp
+> // 添加到 AMyCharacter 类声明中
+>
+> // ServerRPC: 客户端请求对目标造成伤害
+> UFUNCTION(Server, Reliable)
+> void ServerTakeDamage(float DamageAmount, AController* InstigatedBy);
+>
+> // ClientRPC: 通知受伤客户端（只发给受伤者）
+> UFUNCTION(Client, Reliable)
+> void ClientNotifyDamageReceived(float Damage, AActor* DamageCauser);
+> ```
+>
+> #### MyCharacter.cpp 实现
+>
+> ```cpp
+> void AMyCharacter::ServerTakeDamage_Implementation(
+>     float DamageAmount, AController* InstigatedBy)
+> {
+>     // 1. 权威校验：同队免伤
+>     if (InstigatedBy)
+>     {
+>         AMyCharacter* InstigatorChar = Cast<AMyCharacter>(
+>             InstigatedBy->GetPawn());
+>         if (InstigatorChar && InstigatorChar->TeamId == TeamId)
+>         {
+>             UE_LOG(LogTemp, Warning,
+>                 TEXT("ServerTakeDamage: Friendly fire blocked"));
+>             return;  // 拒绝同队伤害
+>         }
+>     }
+>
+>     // 2. 权威扣血（Health 是 ReplicatedUsing=OnRep_Health，
+>     //    修改后自动触发复制到所有客户端）
+>     Health = FMath::Max(0.0f, Health - DamageAmount);
+>
+>     // 3. 通知受伤客户端播放受击特效
+>     //    注意：只发给 Owner，不是 Multicast
+>     ClientNotifyDamageReceived(DamageAmount, InstigatedBy->GetPawn());
+>
+>     // 4. 处理死亡
+>     if (Health <= 0.0f)
+>     {
+>         // 通知击杀者 + 触发死亡流程
+>         // Die(InstigatedBy);
+>     }
+> }
+>
+> void AMyCharacter::ClientNotifyDamageReceived_Implementation(
+>     float Damage, AActor* DamageCauser)
+> {
+>     // ★ 在受伤客户端的机器上执行 ★
+>     // 播放屏幕闪红、伤害数字、受击音效
+>
+>     // 例如：触发 GameplayCue
+>     if (AbilitySystemComponent)
+>     {
+>         FGameplayCueParameters CueParams;
+>         CueParams.RawMagnitude = Damage;
+>         CueParams.Instigator = DamageCauser;
+>         AbilitySystemComponent->ExecuteGameplayCue(
+>             FGameplayTag::RequestGameplayTag("GameplayCue.Character.DamageReceived"),
+>             CueParams);
+>     }
+> }
+>
+> void AMyCharacter::OnRep_Health()
+> {
+>     // ★ 所有能看到此角色的客户端都会调用 ★
+>     // 更新 HUD 血条（本端是 Owner 时）或敌人血条（本端非 Owner 时）
+>     OnHealthChanged.Broadcast(Health);
+>
+>     // 如果血量降到 0：播放死亡动画
+>     if (Health <= 0.0f && GetLocalRole() == ROLE_SimulatedProxy)
+>     {
+>         // SimulatedProxy（其他玩家）：播放死亡动画
+>         PlayDeathAnimation();
+>     }
+> }
+> ```
+>
+> #### 从 ServerFire 调用伤害
+>
+> ```cpp
+> void AMyCharacter::ServerFire_Implementation(FVector_NetQuantize AimTarget)
+> {
+>     // ... 弹药检查 ...
+>
+>     // 执行射线检测
+>     FHitResult Hit;
+>     FCollisionQueryParams Params;
+>     Params.AddIgnoredActor(this);
+>     if (GetWorld()->LineTraceSingleByChannel(Hit,
+>             GetActorLocation(), AimTarget, ECC_Visibility, Params))
+>     {
+>         if (AMyCharacter* HitChar = Cast<AMyCharacter>(Hit.GetActor()))
+>         {
+>             // 通过 ServerRPC 请求对目标造成伤害
+>             // 使用 HitChar 的 Controller 作为 InstigatedBy
+>             HitChar->ServerTakeDamage(25.0f, GetController());
+>         }
+>     }
+> }
+> ```
+>
+> #### 关键设计点
+> - **为什么用 ServerRPC 而非直接修改 Health**：客户端永远不能直接修改复制属性。即使"客户端 A 看到自己命中了客户端 B"，A 也不能直接改 B 的 Health——必须通过 ServerRPC 请求服务器校验并执行。
+> - **同队免伤的校验位置**：必须在服务器端做，客户端校验只是 UI 辅助（如准星变绿/变红）——客户端可以被外挂绕过。
+> - **ClientRPC vs OnRep_Health 的职责分离**：`OnRep_Health` 负责状态同步（血条数值），`ClientNotifyDamageReceived` 负责一次性事件（受击特效、屏幕闪红、伤害数字弹出）。状态用 Replicated 属性，事件用 RPC——这是 UE 网络设计的基本原则。
+
+> [!tip]- 练习 2：为 CMC 添加自定义移动模式校验
+> #### 自定义 CMC 类
+>
+> ```cpp
+> // NetworkTutorialCMC.h
+> #pragma once
+>
+> #include "CoreMinimal.h"
+> #include "GameFramework/CharacterMovementComponent.h"
+> #include "NetworkTutorialCMC.generated.h"
+>
+> UCLASS()
+> class UNetworkTutorialCMC : public UCharacterMovementComponent
+> {
+>     GENERATED_BODY()
+>
+> public:
+>     virtual void ServerMove_Implementation(
+>         float TimeStamp,
+>         FVector_NetQuantize10 InAccel,
+>         FVector_NetQuantize100 ClientLoc,
+>         uint8 CompressedMoveFlags,
+>         uint8 ClientRoll,
+>         uint32 View,
+>         UPrimitiveComponent* ClientMovementBase,
+>         FName ClientBaseBoneName,
+>         uint8 ClientMovementMode) override;
+>
+> private:
+>     int32 SuspiciousMoveCount = 0;
+>     static constexpr int32 MaxSuspiciousMoves = 3;
+>
+>     bool ValidateMoveSpeed(const FVector& Accel, float DeltaTime);
+>     bool ValidateTimestamp(float TimeStamp);
+>     bool ValidateMovementMode(uint8 ClientMovementMode);
+> };
+> ```
+>
+> ```cpp
+> // NetworkTutorialCMC.cpp
+> #include "NetworkTutorialCMC.h"
+> #include "GameFramework/Character.h"
+>
+> void UNetworkTutorialCMC::ServerMove_Implementation(
+>     float TimeStamp,
+>     FVector_NetQuantize10 InAccel,
+>     FVector_NetQuantize100 ClientLoc,
+>     uint8 CompressedMoveFlags,
+>     uint8 ClientRoll,
+>     uint32 View,
+>     UPrimitiveComponent* ClientMovementBase,
+>     FName ClientBaseBoneName,
+>     uint8 ClientMovementMode)
+> {
+>     ACharacter* Owner = Cast<ACharacter>(GetOwner());
+>     if (!Owner) return;
+>
+>     float DeltaTime = FMath::Min(
+>         Owner->GetWorld()->GetDeltaSeconds(), 0.2f);
+>
+>     // ── 自定义校验 ──────────────────────────────────────
+>     bool bValid = true;
+>     if (!ValidateMoveSpeed(InAccel, DeltaTime)) bValid = false;
+>     if (!ValidateTimestamp(TimeStamp))          bValid = false;
+>     if (!ValidateMovementMode(ClientMovementMode)) bValid = false;
+>
+>     if (!bValid)
+>     {
+>         SuspiciousMoveCount++;
+>         UE_LOG(LogTemp, Warning,
+>             TEXT("Suspicious move #%d from %s"),
+>             SuspiciousMoveCount, *Owner->GetName());
+>
+>         if (SuspiciousMoveCount >= MaxSuspiciousMoves)
+>         {
+>             // 断开连接——此客户端行为异常
+>             if (APlayerController* PC = Cast<APlayerController>(
+>                     Owner->GetController()))
+>             {
+>                 PC->ClientTravel("?closed", TRAVEL_Absolute);
+>             }
+>             return; // 不调用 Super，拒绝此次移动
+>         }
+>
+>         // 纠正位置（发送 ClientAdjustment）
+>         // Super::ServerMove_Implementation 内部会处理位置纠正
+>     }
+>
+>     // 调用父类，执行标准 CMC 位置校验 + ClientAdjustment
+>     Super::ServerMove_Implementation(
+>         TimeStamp, InAccel, ClientLoc, CompressedMoveFlags,
+>         ClientRoll, View, ClientMovementBase,
+>         ClientBaseBoneName, ClientMovementMode);
+> }
+>
+> bool UNetworkTutorialCMC::ValidateMoveSpeed(
+>     const FVector& Accel, float DeltaTime)
+> {
+>     // 速度 = 加速度积分（简化）
+>     // 客户端声明的移动速度不能超过 MaxWalkSpeed * 1.2
+>     float DeclaredSpeed = Accel.Size() * DeltaTime;
+>     float MaxAllowed = MaxWalkSpeed * 1.2f * DeltaTime;
+>
+>     if (DeclaredSpeed > MaxAllowed)
+>     {
+>         UE_LOG(LogTemp, Warning,
+>             TEXT("Speed violation: declared=%.1f, max=%.1f"),
+>             DeclaredSpeed, MaxAllowed);
+>         return false;
+>     }
+>     return true;
+> }
+>
+> bool UNetworkTutorialCMC::ValidateTimestamp(float TimeStamp)
+> {
+>     // 校验时间戳在合理范围内：
+>     // - 不能是未来的时间（TimeStamp > 当前服务器时间 + RTT 容差）
+>     // - 不能太旧（TimeStamp < 当前时间 - 5s）
+>     float ServerTime = GetWorld()->GetTimeSeconds();
+>     if (TimeStamp > ServerTime + 1.0f) // 未来 1 秒=明显作弊
+>     {
+>         UE_LOG(LogTemp, Warning,
+>             TEXT("Time travel: client claims %.2f, server is %.2f"),
+>             TimeStamp, ServerTime);
+>         return false;
+>     }
+>     return true;
+> }
+>
+> bool UNetworkTutorialCMC::ValidateMovementMode(
+>     uint8 ClientMovementMode)
+> {
+>     // 检查客户端的移动模式是否合法
+>     // 例如：服务器记录的角色在 Falling 模式，
+>     //       但客户端声称在 Walking（穿了飞行外挂）
+>     EMovementMode ServerMode = MovementMode;
+>     EMovementMode ClientMode = static_cast<EMovementMode>(
+>         ClientMovementMode);
+>
+>     // 允许客户端在预测中略微超前，但模式不能完全矛盾
+>     if (ClientMode == MOVE_Flying && ServerMode != MOVE_Flying)
+>     {
+>         // 除非角色有飞行能力（GAS），否则拒绝
+>         return false;
+>     }
+>     return true;
+> }
+> ```
+>
+> #### 关键设计点
+> - **容忍 1.2 倍速度**：网络抖动可能导致客户端发送的 Acceleration 略大于实际 MaxWalkSpeed。1.2x 是一个经验容差——既不会误杀正常玩家，也不会放过明显的加速外挂。
+> - **3 次可疑才断开**：避免因网络丢包/时钟漂移导致的误断。成熟的商业化游戏通常会配合"服务器端行为分析"而非单纯依赖硬阈值。
+> - **ClientAdjustment 是自动的**：`Super::ServerMove_Implementation()` 内部会比较 ClientLoc 与服务器计算位置，差值过大时自动发送 `ClientAdjustPosition` RPC。自定义校验是**额外的**安全层。
+
+> [!tip]- 练习 3：用 Iris 原生 API 实现自定义属性复制
+> #### 自定义 Iris 复制对象
+>
+> ```cpp
+> // MyIrisReplicatedObject.h
+> #pragma once
+>
+> #include "CoreMinimal.h"
+> #include "UObject/NoExportTypes.h"
+> #include "Iris/ReplicationSystem/ReplicationFragment.h"
+> #include "Net/Core/NetHandle/NetHandle.h"
+> #include "MyIrisReplicatedObject.generated.h"
+>
+> // 复制状态描述符：告诉 Iris 哪些属性需要复制
+> USTRUCT()
+> struct FMyReplicatedState
+> {
+>     GENERATED_BODY()
+>
+>     UPROPERTY()
+>     FVector Position;
+>
+>     UPROPERTY()
+>     FRotator Rotation;
+>
+>     UPROPERTY()
+>     float Health;
+>
+>     // 脏标记由游戏逻辑设置，Iris 读取并自动清除
+>     bool bPositionDirty = false;
+>     bool bRotationDirty = false;
+>     bool bHealthDirty  = false;
+>
+>     bool IsAnyDirty() const
+>     {
+>         return bPositionDirty || bRotationDirty || bHealthDirty;
+>     }
+> };
+>
+> // Iris Fragment：桥接游戏数据和 Iris 复制系统
+> UCLASS()
+> class UMyIrisFragment : public UReplicationFragment
+> {
+>     GENERATED_BODY()
+>
+> public:
+>     void Initialize(FMyReplicatedState* InState) { State = InState; }
+>
+>     // Iris 每帧调用：检查是否有数据需要复制
+>     virtual bool PollDirtyState() override
+>     {
+>         if (State && State->IsAnyDirty())
+>         {
+>             State->bPositionDirty = false;
+>             State->bRotationDirty = false;
+>             State->bHealthDirty  = false;
+>             return true;  // "有脏数据，请复制"
+>         }
+>         return false;  // "没有变化，跳过"
+>     }
+>
+> private:
+>     FMyReplicatedState* State = nullptr;
+> };
+>
+> // 自定义复制对象（不依赖 AActor，纯 UObject）
+> UCLASS()
+> class UMyIrisReplicatedObject : public UObject
+> {
+>     GENERATED_BODY()
+>
+> public:
+>     FMyReplicatedState ReplicatedState;
+>     FNetRefHandle NetHandle;
+>     TObjectPtr<UMyIrisFragment> IrisFragment;
+>
+>     void RegisterWithIris(UReplicationSystem* RepSystem);
+>     void SetPosition(const FVector& NewPos);
+>     void SetHealth(float NewHealth);
+> };
+> ```
+>
+> ```cpp
+> // MyIrisReplicatedObject.cpp
+> #include "MyIrisReplicatedObject.h"
+> #include "Iris/ReplicationSystem/ReplicationSystem.h"
+> #include "Iris/ReplicationSystem/ReplicationBridge.h"
+>
+> void UMyIrisReplicatedObject::RegisterWithIris(
+>     UReplicationSystem* RepSystem)
+> {
+>     // 1. 创建 ReplicationStateDescriptor（从 UPROPERTY 自动生成）
+>     FReplicationStateDescriptorBuilder Builder;
+>     FReplicationStateDescriptor StateDesc;
+>     Builder.BuildDescriptor(StateDesc, this);
+>
+>     // 2. 创建 Fragment 并注册
+>     FFragmentRegistrationContext Context(RepSystem, StateDesc);
+>     IrisFragment = NewObject<UMyIrisFragment>(this);
+>     IrisFragment->Initialize(&ReplicatedState);
+>     Context.RegisterFragment(IrisFragment);
+>
+>     // 3. 通过 ReplicationBridge 开始复制
+>     UReplicationBridge* Bridge = RepSystem->GetReplicationBridge();
+>     if (Bridge)
+>     {
+>         NetHandle = Bridge->BeginReplication(this, StateDesc);
+>
+>         // 4. 可选：添加空间过滤（只发给 50m 内的客户端）
+>         // RepSystem->SetFilter(NetHandle,
+>         //     FNetObjectFilterHandle(SpatialFilter));
+>     }
+>
+>     UE_LOG(LogTemp, Log,
+>         TEXT("Registered with Iris: Handle=%llu"),
+>         NetHandle.GetId());
+> }
+>
+> void UMyIrisReplicatedObject::SetPosition(const FVector& NewPos)
+> {
+>     ReplicatedState.Position = NewPos;
+>     ReplicatedState.bPositionDirty = true; // 触发下次 PollDirtyState
+> }
+>
+> void UMyIrisReplicatedObject::SetHealth(float NewHealth)
+> {
+>     ReplicatedState.Health = NewHealth;
+>     ReplicatedState.bHealthDirty = true;
+> }
+> ```
+>
+> #### Iris vs 旧复制系统对比
+>
+> | 维度 | 旧系统 (FObjectReplicator) | Iris |
+> |------|--------------------------|------|
+> | Dirty 检测 | 每个属性逐一比较 shadow state（需 O(n) 次 memcmp） | 游戏逻辑显式标记 dirty（O(1) 检查标志位） |
+> | 复制粒度 | 整个 Actor 为单位 | 单个 Fragment 为单位（可按需组合） |
+> | 过滤 | `IsNetRelevantFor()` 虚函数（每次复制都调用） | 可缓存的 Filter 对象（支持空间哈希加速） |
+> | 序列化 | `FArchive`（虚函数调用链路长） | `NetSerializer`（模板化，编译期多态） |
+> | 适用场景 | 基于 AActor 的传统实体 | 任何 UObject、数据项、大量相似实体 |
+>
+> #### 验证方法
+> 使用 `stat Iris` 控制台命令查看 Iris 的复制统计：Dirty 检测次数、实际发送的属性数、被 Filter 跳过的连接数。与旧系统对比带宽消耗——在大量实体场景下 Iris 的优势更明显。
+>
+> #### 关键认知
+> - Iris 不是为了替代你的游戏逻辑——它只是**传输层**。你仍然需要决定"什么要复制"、"什么时候复制"、"复制给谁"。
+> - Fragment 模式的价值在于**组合**：一个实体可以有多个 Fragment，分别管理位置、血量、背包——每个有自己的 Dirty 检测和过滤策略，互不干扰。
+> - 面试重点：能说清楚"旧系统在大量实体时的瓶颈"（O(n) 的 Dirty 遍历 + 每次 `IsNetRelevantFor` 虚函数调用）以及 Iris 如何解决（显式 Dirty 标记 + 可缓存 Filter）。
+
+> [!note] 答案使用方式
+> 以上参考答案提供的是**实现思路和关键代码片段**。建议：
+>
+> - 练习 1 的伤害同步是 UE 多人游戏最基础的 RPC 模式。理解 `Server → Client` vs `OnRep` 的职责分离——状态的持续展示用复制属性，一次性事件用 RPC
+> - 练习 2 的 CMC 校验是反外挂的基础层。生产环境中还应结合服务器端行为分析（如统计分析玩家的 APM/反应时间分布）来降低误判率
+> - 练习 3 的 Iris 代码在 UE 5.4+ 的 API 可能略有变化——始终参考 `Engine/Source/Runtime/Experimental/Iris/` 下的头文件获取最新接口
 ---
 
 ## 4. 扩展阅读

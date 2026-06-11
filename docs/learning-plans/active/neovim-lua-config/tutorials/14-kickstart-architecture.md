@@ -292,6 +292,91 @@ require 'myconfig.lsp'
 
 ---
 
+## 4.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> kickstart.nvim `init.lua` 的 9 个 section 总结：
+>
+> | Section | 行号范围 | 一句话总结 | 值得关注的关键配置项 |
+> |---------|---------|-----------|-------------------|
+> | 1. FOUNDATION | ~96-237 | 编辑器核心选项 + 基础 keymaps + 诊断配置 + yank 高亮 | `vim.o.inccommand = 'split'`（实时显示替换效果）；`vim.diagnostic.config.jump.on_jump`（跳转诊断时自动浮动窗口） |
+> | 2. PLUGIN MANAGER INTRO | ~242-310 | `run_build()` 辅助函数 + `PackChanged` autocmd（安装/更新后编译） | `ev.data.kind` 分别判断 `install` 和 `update`；`run_build` 使用 `vim.system`（0.12 新 API） |
+> | 3. UI / CORE UX | ~314-420 | colorscheme、gitsigns、which-key、todo-comments、mini.ai/surround/statusline | `vim.g.have_nerd_font` 控制图标显示（一处修改全局生效）；`mini.statusline.section_location` 自定义格式 |
+> | 4. SEARCH & NAVIGATION | ~424-520 | Telescope + fzf-native + LSP picker keymaps | `<leader>s` 前缀组（sh/sf/sg/sd）；`telescope-ui-select` 替换 `vim.ui.select` |
+> | 5. LSP | ~524-660 | LspAttach + 服务器表 + mason 三件套 + vim.lsp.config/enable | `on_init` 中禁用 lua_ls 的 formatting（交给 conform）；`mason-tool-installer` 从 servers keys 自动推导安装列表 |
+> | 6. FORMATTING | ~664-700 | conform.nvim + `<leader>f` 格式化 | `lsp_format = 'fallback'`（优先 LSP，fallback 到其他 formatter） |
+> | 7. AUTOCOMPLETE & SNIPPETS | ~704-760 | LuaSnip + blink.cmp | blink.cmp 版本锁定 `1.*`；fuzzy `'lua'` vs `'prefer_rust'` 的选择 |
+> | 8. TREESITTER | ~764-900 | 预装基础 parsers + FileType 按需安装 | `treesitter_try_attach` 条件函数（只启用有 parser 的语言）；`:await()` 异步安装 |
+> | 9. OPTIONAL / NEXT STEPS | ~904-980 | `kickstart.plugins.*` 可选模块 + `custom.plugins` 扩展点 | 按需取消注释启用 DAP、indent_line、lint、neo-tree 等 |
+>
+> **容易困惑的配置项及 `:help` 入口**：
+> - `vim.loader.enable()` → `:help vim.loader`（缓存 Lua 模块，启动加速）
+> - `vim.o.inccommand = 'split'` → `:help 'inccommand'`（键入 `:s` 时预览替换效果）
+> - `vim.schedule(function() vim.o.clipboard = 'unnamedplus' end)` → `:help 'clipboard'`（延迟设置以减少启动时间）
+> - `vim.diagnostic.config.jump.on_jump` → `:help vim.diagnostic.config`（跳转诊断时打开浮动窗口）
+
+> [!tip]- 练习 2 参考答案
+> `which-key.nvim` 在 kickstart.nvim 中的完整生命周期追踪：
+>
+> 1. **`vim.pack.add()` 的位置**：Section 3（UI / CORE UX），大致在 init.lua 的第 ~340 行。实际代码：
+> ```lua
+> vim.pack.add { gh 'folke/which-key.nvim' }
+> ```
+>
+> 2. **`.setup()` 传入的参数**：
+> ```lua
+> require('which-key').setup {
+>   delay = 0,           -- 按 leader 后立即显示提示，不等待
+>   icons = {
+>     mappings = vim.g.have_nerd_font,  -- 有 Nerd Font 时才显示图标
+>   },
+>   spec = {
+>     { '<leader>s', group = '[S]earch', mode = { 'n', 'v' } },
+>     { '<leader>t', group = '[T]oggle' },
+>     -- ... 更多 group 定义
+>   },
+> }
+> ```
+>   关键参数：`delay = 0` 使得按 leader 后无需等待即可看到提示弹窗；`spec` 定义了 leader 组合键的分组标签。
+>
+> 3. **PackChanged 中的 build hook**：**没有**。`which-key.nvim` 是纯 Lua 插件，不需要编译步骤。`PackChanged` 只处理需要构建的插件（treesitter 编译、telescope-fzf-native 的 make）。
+>
+> 4. **为什么不需要 lazy loading**：which-key.nvim 本身极其轻量（几十 KB），且它的初始化只是注册 autocmd（监听按键序列）。`vim.pack.add()` 注册后 `.setup()` 立即配置好键位监听，按需触发弹窗——这是"内置 lazy"模式。相比 lazy.nvim 的 `event = "VeryLazy"` 等魔法，kickstart 的方式更透明：你明确知道 setup() 在什么时候被调用了。
+
+> [!tip]- 练习 3 参考答案
+> 模块化拆分方案设计——一个实际可操作的划分：
+>
+> ```
+> lua/
+> ├── config/                   ← 非插件配置（无 vim.pack.add）
+> │   ├── options.lua           ← Section 1: vim.o/vim.opt 全部选项
+> │   ├── keymaps.lua           ← Section 1: 全局 keymaps
+> │   ├── autocmds.lua          ← Section 1: TextYankPost + 其他全局 autocmds
+> │   └── diagnostics.lua       ← Section 1: vim.diagnostic.config + <leader>q
+> ├── utils/                    ← 纯工具函数
+> │   ├── init.lua              ← 聚合导出
+> │   └── helpers.lua           ← gh(), run_build(), 通用 map 函数
+> └── plugins/                  ← 每个文件对应一个 Section
+>     ├── init.lua              ← PackChanged + require 各子模块
+>     ├── ui.lua                ← Section 3: colorscheme, gitsigns, which-key, mini.*
+>     ├── search.lua            ← Section 4: Telescope
+>     ├── lsp.lua               ← Section 5: LSP 全部
+>     ├── formatting.lua        ← Section 6: conform.nvim
+>     ├── completion.lua        ← Section 7: blink.cmp + LuaSnip
+>     ├── treesitter.lua        ← Section 8: nvim-treesitter
+>     └── optional.lua          ← Section 9: kickstart.plugins.* + custom.plugins
+> ```
+>
+> **设计决策**：
+> - **Section 1 拆成 4 个文件** 而非 1 个 `foundation.lua`——因为 options、keymaps、autocmds、diagnostics 是 4 个独立关注点，修改频率和时机不同。但每个文件至少 20 行有意义的配置。
+> - **Section 2（PackChanged + 工具函数）拆入 `utils/helpers.lua`（纯函数）和 `plugins/init.lua`（副作用）**——分离"是什么"和"做什么"。
+> - **保持顺序**：`plugins/init.lua` 中的 require 顺序就是 Section 3→8→9 的顺序——阅读者仍然可以从上到下理解加载顺序。
+> - **不拆得太细**：不把 `mini.ai` 和 `mini.surround` 分别拆成独立文件——它们在 UI section 内是紧凑的 mini.nvim 统一加载。
+> - **after/ 目录留给用户个性化**：不把覆盖配置放在插件模块中。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 5. 扩展阅读
 
 - [kickstart.nvim 源码](https://github.com/nvim-lua/kickstart.nvim) — 完整仓库

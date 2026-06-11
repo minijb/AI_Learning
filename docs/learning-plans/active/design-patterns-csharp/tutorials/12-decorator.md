@@ -709,6 +709,571 @@ services.Decorate<IMessageSender, LoggingMessageSender>();
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Diagnostics;
+> using System.Linq;
+>
+> // ============================================
+> // IRepository&lt;T&gt; 接口（题目给定）
+> // ============================================
+> public interface IRepository<T> where T : class
+> {
+>     T? GetById(int id);
+>     IEnumerable<T> GetAll();
+>     void Add(T entity);
+>     void Update(T entity);
+>     void Delete(int id);
+> }
+>
+> // ============================================
+> // 装饰器基类：默认委托所有调用到 _inner
+> // 减少子类样板代码 — 子类只需 override 需要增强的方法
+> // ============================================
+> public abstract class RepositoryDecorator<T> : IRepository<T> where T : class
+> {
+>     protected readonly IRepository<T> Inner;
+>
+>     protected RepositoryDecorator(IRepository<T> inner)
+>     {
+>         Inner = inner ?? throw new ArgumentNullException(nameof(inner));
+>     }
+>
+>     public virtual T? GetById(int id) => Inner.GetById(id);
+>     public virtual IEnumerable<T> GetAll() => Inner.GetAll();
+>     public virtual void Add(T entity) => Inner.Add(entity);
+>     public virtual void Update(T entity) => Inner.Update(entity);
+>     public virtual void Delete(int id) => Inner.Delete(id);
+> }
+>
+> // ============================================
+> // LoggingRepository&lt;T&gt; — 日志 + 计时装饰器
+> // ============================================
+> public class LoggingRepository<T> : RepositoryDecorator<T> where T : class
+> {
+>     private readonly Action<string> _log;
+>
+>     public LoggingRepository(IRepository<T> inner, Action<string>? log = null)
+>         : base(inner)
+>     {
+>         _log = log ?? Console.WriteLine;
+>     }
+>
+>     public override T? GetById(int id)
+>         => ExecuteWithLog($"GetById({id})", () => base.GetById(id));
+>
+>     public override IEnumerable<T> GetAll()
+>         => ExecuteWithLog("GetAll", () => base.GetAll());
+>
+>     public override void Add(T entity)
+>         => ExecuteWithLog("Add", () => base.Add(entity));
+>
+>     public override void Update(T entity)
+>         => ExecuteWithLog("Update", () => base.Update(entity));
+>
+>     public override void Delete(int id)
+>         => ExecuteWithLog($"Delete({id})", () => base.Delete(id));
+>
+>     private void ExecuteWithLog(string operationName, Action action)
+>     {
+>         _log($"[{operationName}] 开始");
+>         var sw = Stopwatch.StartNew();
+>         try
+>         {
+>             action();
+>             sw.Stop();
+>             _log($"[{operationName}] 完成，耗时 {sw.ElapsedMilliseconds}ms");
+>         }
+>         catch (Exception ex)
+>         {
+>             sw.Stop();
+>             _log($"[{operationName}] 失败 (耗时 {sw.ElapsedMilliseconds}ms): {ex.Message}");
+>             throw;
+>         }
+>     }
+>
+>     private TReturn ExecuteWithLog<TReturn>(
+>         string operationName, Func<TReturn> func)
+>     {
+>         _log($"[{operationName}] 开始");
+>         var sw = Stopwatch.StartNew();
+>         try
+>         {
+>             var result = func();
+>             sw.Stop();
+>             _log($"[{operationName}] 完成，耗时 {sw.ElapsedMilliseconds}ms");
+>             return result;
+>         }
+>         catch (Exception ex)
+>         {
+>             sw.Stop();
+>             _log($"[{operationName}] 失败 (耗时 {sw.ElapsedMilliseconds}ms): {ex.Message}");
+>             throw;
+>         }
+>     }
+> }
+>
+> // ============================================
+> // 模拟的 SqlRepository&lt;T&gt;（用于测试）
+> // ============================================
+> public class SqlRepository<T> : IRepository<T> where T : class
+> {
+>     private readonly List<T> _store = new();
+>     private int _nextId = 1;
+>
+>     public T? GetById(int id)
+>     {
+>         // 模拟数据库查询
+>         Thread.Sleep(10); // 模拟延迟
+>         return id <= _store.Count ? _store[id - 1] : null;
+>     }
+>
+>     public IEnumerable<T> GetAll()
+>     {
+>         Thread.Sleep(15);
+>         return _store.ToList();
+>     }
+>
+>     public void Add(T entity)
+>     {
+>         Thread.Sleep(5);
+>         _store.Add(entity);
+>     }
+>
+>     public void Update(T entity)
+>     {
+>         Thread.Sleep(8);
+>         // 模拟更新
+>     }
+>
+>     public void Delete(int id)
+>     {
+>         Thread.Sleep(5);
+>         if (id <= _store.Count)
+>             _store.RemoveAt(id - 1);
+>     }
+> }
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> public class User
+> {
+>     public int Id { get; set; }
+>     public string Name { get; set; } = "";
+>     public override string ToString() => $"User({Id}, {Name})";
+> }
+>
+> static void TestLoggingRepository()
+> {
+>     Console.WriteLine("===== 原始 SqlRepository（无日志） =====");
+>     IRepository<User> rawRepo = new SqlRepository<User>();
+>     rawRepo.Add(new User { Id = 1, Name = "Alice" });
+>     Console.WriteLine("（无日志输出）");
+>
+>     Console.WriteLine("\n===== LoggingRepository 装饰 =====");
+>     IRepository<User> loggingRepo = new LoggingRepository<User>(
+>         new SqlRepository<User>());
+>     loggingRepo.Add(new User { Id = 1, Name = "Bob" });
+>     var user = loggingRepo.GetById(1);
+>     loggingRepo.GetAll();
+>     loggingRepo.Delete(1);
+> }
+> ```
+> **设计要点：**
+> 1. **装饰器基类 `RepositoryDecorator<T>`** 提供虚拟默认委托——子类只 override 需要增强的方法，避免为 5 个方法手写样板代码
+> 2. **日志委托 `Action<string>`** 通过构造函数注入，便于单元测试时捕获日志，也便于切换到 Serilog/NLog 等框架
+> 3. **`Stopwatch` 计时** 包裹在 `ExecuteWithLog` 模板方法中，统一日志格式，避免每个方法重复 try-catch-stopwatch 样板
+> 4. **异常处理**：记录失败日志后 `throw`，保持原有异常传播路径——装饰器不吞异常
+> 5. `LoggingRepository<T>` 的泛型约束 `where T : class` 与原接口一致，装饰器和被装饰者的类型签名完全对齐
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using System;
+> using System.Text;
+>
+> // ============================================
+> // ITextProcessor 接口
+> // ============================================
+> public interface ITextProcessor
+> {
+>     string Process(string input);
+> }
+>
+> // ============================================
+> // 1. 基础处理器（核心组件）
+> // ============================================
+> public class PlainTextProcessor : ITextProcessor
+> {
+>     public string Process(string input) => input;
+> }
+>
+> // ============================================
+> // 2. 装饰器基类（减少样板代码）
+> // ============================================
+> public abstract class TextProcessorDecorator : ITextProcessor
+> {
+>     protected readonly ITextProcessor _inner;
+>
+>     protected TextProcessorDecorator(ITextProcessor inner)
+>     {
+>         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+>     }
+>
+>     public abstract string Process(string input);
+> }
+>
+> // ============================================
+> // 3. 压缩装饰器（模拟：加前缀 [COMPRESSED]）
+> // ============================================
+> public class CompressProcessor : TextProcessorDecorator
+> {
+>     public CompressProcessor(ITextProcessor inner) : base(inner) { }
+>
+>     public override string Process(string input)
+>     {
+>         // 委托 inner 处理 → 在结果前后附加自己的行为
+>         var processed = _inner.Process(input);
+>         return $"[COMPRESSED]{processed}[/COMPRESSED]";
+>     }
+> }
+>
+> // ============================================
+> // 4. 加密装饰器（ROT13 变换 — 只处理字母）
+> // ============================================
+> public class EncryptProcessor : TextProcessorDecorator
+> {
+>     public EncryptProcessor(ITextProcessor inner) : base(inner) { }
+>
+>     public override string Process(string input)
+>     {
+>         var processed = _inner.Process(input);
+>         return Rot13(processed);
+>     }
+>
+>     private static string Rot13(string s)
+>     {
+>         var sb = new StringBuilder(s.Length);
+>         foreach (char c in s)
+>         {
+>             if (c >= 'a' && c <= 'z')
+>                 sb.Append((char)((c - 'a' + 13) % 26 + 'a'));
+>             else if (c >= 'A' && c <= 'Z')
+>                 sb.Append((char)((c - 'A' + 13) % 26 + 'A'));
+>             else
+>                 sb.Append(c);
+>         }
+>         return sb.ToString();
+>     }
+> }
+>
+> // ============================================
+> // 5. Base64 编码装饰器
+> // ============================================
+> public class Base64Processor : TextProcessorDecorator
+> {
+>     public Base64Processor(ITextProcessor inner) : base(inner) { }
+>
+>     public override string Process(string input)
+>     {
+>         var processed = _inner.Process(input);
+>         var bytes = Encoding.UTF8.GetBytes(processed);
+>         return Convert.ToBase64String(bytes);
+>     }
+> }
+>
+>
+> // ============================================
+> // 验证：顺序决定结果
+> // ============================================
+> static void TestTextPipeline()
+> {
+>     const string original = "Hello World";
+>
+>     Console.WriteLine($"原文:                   {original}\n");
+>
+>     // 管道 1: Compress → Encrypt → Base64
+>     ITextProcessor pipeline1 =
+>         new Base64Processor(
+>             new EncryptProcessor(
+>                 new CompressProcessor(
+>                     new PlainTextProcessor())));
+>     var result1 = pipeline1.Process(original);
+>     Console.WriteLine($"Compress→Encrypt→Base64: {result1}");
+>
+>     // 管道 2: Encrypt → Compress → Base64（顺序不同！）
+>     ITextProcessor pipeline2 =
+>         new Base64Processor(
+>             new CompressProcessor(
+>                 new EncryptProcessor(
+>                     new PlainTextProcessor())));
+>     var result2 = pipeline2.Process(original);
+>     Console.WriteLine($"Encrypt→Compress→Base64: {result2}");
+>
+>     // 验证顺序的差异
+>     Console.WriteLine($"\n结果相同? {result1 == result2}");
+>
+>     // Pipeline 1 内部分解：
+>     //   PlainTextProcessor:       "Hello World"
+>     //   CompressProcessor:        "[COMPRESSED]Hello World[/COMPRESSED]"
+>     //   EncryptProcessor:         "[PBZCERFFRQ]Uryyb Jbeyq[/PBZCERFFRQ]"
+>     //   Base64Processor:          base64(...)
+>
+>     // Pipeline 2 内部分解：
+>     //   PlainTextProcessor:       "Hello World"
+>     //   EncryptProcessor:         "Uryyb Jbeyq"
+>     //   CompressProcessor:        "[COMPRESSED]Uryyb Jbeyq[/COMPRESSED]"
+>     //   Base64Processor:          base64(...)
+>
+>     Console.WriteLine("\n=== 单层验证 ===");
+>     var compress = new CompressProcessor(new PlainTextProcessor());
+>     Console.WriteLine($"仅压缩:      {compress.Process(original)}");
+>
+>     var encrypt = new EncryptProcessor(new PlainTextProcessor());
+>     Console.WriteLine($"仅加密:      {encrypt.Process(original)}");
+>
+>     var base64 = new Base64Processor(new PlainTextProcessor());
+>     Console.WriteLine($"仅Base64:    {base64.Process(original)}");
+> }
+> ```
+> **设计要点：**
+> 1. **装饰器铁律**：每个 ConcreteDecorator 的 `Process` 方法都先调用 `_inner.Process(input)`，再对结果附加自己的行为——正是"增强"而非"替换"
+> 2. **顺序决定语义**：`Compress → Encrypt` 是"先压缩再加密"（合理），`Encrypt → Compress` 是"先加密再压缩"（压缩加密后的高熵数据几乎无效）——输出完全不同
+> 3. **`PlainTextProcessor`** 是整个管道的"核心组件"（ConcreteComponent），没有它装饰链无处终止
+> 4. **装饰器基类 `TextProcessorDecorator`** 持有 `_inner`，子类只需实现 `Process` 方法——减少重复代码
+
+> [!tip]- 练习 3 参考答案（挑战）
+> ```csharp
+> using System;
+> using System.Threading.Tasks;
+> using Microsoft.Extensions.DependencyInjection;
+>
+> // ============================================
+> // IMessageSender 接口
+> // ============================================
+> public interface IMessageSender
+> {
+>     Task SendAsync(string recipient, string message);
+> }
+>
+> // ============================================
+> // 核心实现：真实邮件发送
+> // ============================================
+> public class SmtpMessageSender : IMessageSender
+> {
+>     public async Task SendAsync(string recipient, string message)
+>     {
+>         // 模拟 SMTP 发送（真实项目中会用 SmtpClient）
+>         Console.WriteLine($"[SMTP] 正在发送邮件到 {recipient}...");
+>         await Task.Delay(50); // 模拟网络延迟
+>         Console.WriteLine($"[SMTP] 发送成功: {message}");
+>     }
+> }
+>
+> // ============================================
+> // 装饰器 1：失败重试
+> // ============================================
+> public class RetryMessageSender : IMessageSender
+> {
+>     private readonly IMessageSender _inner;
+>     private readonly int _maxRetries;
+>     private readonly TimeSpan _delay;
+>
+>     public RetryMessageSender(IMessageSender inner,
+>         int maxRetries = 3, TimeSpan? delay = null)
+>     {
+>         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+>         _maxRetries = maxRetries;
+>         _delay = delay ?? TimeSpan.FromMilliseconds(100);
+>     }
+>
+>     public async Task SendAsync(string recipient, string message)
+>     {
+>         for (int attempt = 1; attempt <= _maxRetries; attempt++)
+>         {
+>             try
+>             {
+>                 Console.WriteLine($"  [Retry] 第 {attempt}/{_maxRetries} 次尝试...");
+>                 await _inner.SendAsync(recipient, message);
+>                 return; // 成功，退出
+>             }
+>             catch (Exception ex) when (attempt < _maxRetries)
+>             {
+>                 Console.WriteLine(
+>                     $"  [Retry] 失败: {ex.Message}，" +
+>                     $"等待 {_delay.TotalMilliseconds}ms 后重试");
+>                 await Task.Delay(_delay);
+>             }
+>         }
+>
+>         // 最后一次尝试不捕获异常 — 让它向上传播
+>         await _inner.SendAsync(recipient, message);
+>     }
+> }
+>
+> // ============================================
+> // 装饰器 2：日志记录
+> // ============================================
+> public class LoggingMessageSender : IMessageSender
+> {
+>     private readonly IMessageSender _inner;
+>     private readonly Action<string> _log;
+>
+>     public LoggingMessageSender(IMessageSender inner,
+>         Action<string>? log = null)
+>     {
+>         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
+>         _log = log ?? Console.WriteLine;
+>     }
+>
+>     public async Task SendAsync(string recipient, string message)
+>     {
+>         var startTime = DateTime.UtcNow;
+>         _log($"[Log] 开始发送 → {recipient}: {message}");
+>
+>         try
+>         {
+>             await _inner.SendAsync(recipient, message);
+>             var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+>             _log($"[Log] 发送成功 → {recipient} (耗时 {elapsed:F0}ms)");
+>         }
+>         catch (Exception ex)
+>         {
+>             var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+>             _log($"[Log] 发送失败 → {recipient}: {ex.Message} (耗时 {elapsed:F0}ms)");
+>             throw;
+>         }
+>     }
+> }
+>
+> // ============================================
+> // 方案 A：原生 DI 手动注册（无 Scrutor）
+> // ============================================
+> static void SetupWithNativeDI()
+> {
+>     var services = new ServiceCollection();
+>
+>     // 逐层注册，每一层引用上一层的实例
+>     services.AddTransient<SmtpMessageSender>();
+>
+>     // RetryMessageSender 包装 SmtpMessageSender
+>     services.AddTransient<IMessageSender>(sp =>
+>         new RetryMessageSender(
+>             sp.GetRequiredService<SmtpMessageSender>(),
+>             maxRetries: 3));
+>
+>     // LoggingMessageSender 包装 RetryMessageSender
+>     // 注意：这里需要"替换"之前注册的 IMessageSender
+>     // 原生 DI 不支持 Decorate，需要手动构建链
+>
+>     // 推荐方式：一次注册完整链条
+>     services.AddTransient<IMessageSender>(sp =>
+>     {
+>         var smtp = new SmtpMessageSender();
+>         var retry = new RetryMessageSender(smtp, maxRetries: 3);
+>         var logging = new LoggingMessageSender(retry);
+>         return logging;
+>     });
+>
+>     var provider = services.BuildServiceProvider();
+>     var sender = provider.GetRequiredService<IMessageSender>();
+>
+>     // 解析出的链条: LoggingMessageSender → RetryMessageSender → SmtpMessageSender
+>     sender.SendAsync("alice@corp.com", "Hello from DI!").GetAwaiter().GetResult();
+> }
+>
+> // ============================================
+> // 方案 B：使用 Scrutor（推荐）
+> // ============================================
+> // 安装: dotnet add package Scrutor
+> static void SetupWithScrutor()
+> {
+>     // using Scrutor;  // 需要添加 NuGet 引用
+>
+>     var services = new ServiceCollection();
+>
+>     // 1. 注册核心实现
+>     services.AddTransient<IMessageSender, SmtpMessageSender>();
+>
+>     // 2. 逐层装饰 — 注册顺序 = 外层→内层
+>     services.Decorate<IMessageSender, RetryMessageSender>();
+>     services.Decorate<IMessageSender, LoggingMessageSender>();
+>
+>     var provider = services.BuildServiceProvider();
+>     var sender = provider.GetRequiredService<IMessageSender>();
+>
+>     // Scrutor 内部自动解析依赖链：
+>     //   LoggingMessageSender(RetryMessageSender(SmtpMessageSender))
+>
+>     Console.WriteLine($"解析类型: {sender.GetType().Name}");
+>     sender.SendAsync("bob@corp.com", "Hello from Scrutor!").GetAwaiter().GetResult();
+> }
+>
+> // ============================================
+> // 验证测试
+> // ============================================
+> static async Task TestDecorators()
+> {
+>     Console.WriteLine("===== 直接使用 SmtpMessageSender =====");
+>     IMessageSender smtp = new SmtpMessageSender();
+>     await smtp.SendAsync("test@corp.com", "直接发送");
+>
+>     Console.WriteLine("\n===== 装饰链: Logging → Retry → Smtp =====");
+>     IMessageSender chain = new LoggingMessageSender(
+>         new RetryMessageSender(
+>             new SmtpMessageSender(),
+>             maxRetries: 3));
+>     await chain.SendAsync("test@corp.com", "装饰器发送");
+>
+>     Console.WriteLine("\n===== 验证装饰器顺序 =====");
+>     // 验证链条包装顺序: 外层 Logger 的日志在 Retry 的外围
+>     // 输出会显示:
+>     //   [Log] 开始...
+>     //     [Retry] 第 1/3 次尝试...
+>     //       [SMTP] 正在发送...
+>     //       [SMTP] 发送成功
+>     //   [Log] 发送成功
+> }
+> ```
+>
+> **方案 A（原生 DI）说明：**
+> ```csharp
+> // 原生 DI 不支持 Decorate 模式，推荐手动构建完整链条：
+> services.AddTransient<IMessageSender>(sp =>
+> {
+>     var smtp = new SmtpMessageSender();
+>     var retry = new RetryMessageSender(smtp, maxRetries: 3);
+>     var logging = new LoggingMessageSender(retry);
+>     return logging;
+> });
+> ```
+>
+> **方案 B（Scrutor）说明：**
+> ```csharp
+> // dotnet add package Scrutor
+> using Scrutor;
+>
+> services.AddTransient<IMessageSender, SmtpMessageSender>();
+> services.Decorate<IMessageSender, RetryMessageSender>();
+> services.Decorate<IMessageSender, LoggingMessageSender>();
+> // Decorate 注册顺序 = 从外层到内层
+> // 解析结果: LoggingMessageSender(RetryMessageSender(SmtpMessageSender))
+> ```
+>
+> **设计要点：**
+> 1. **装饰器链方向**：`LoggingMessageSender` 是最外层，`RetryMessageSender` 是中间层，`SmtpMessageSender` 是最内层——日志包裹重试，重试包裹真实发送
+> 2. **装饰器独立性**：`RetryMessageSender` 和 `LoggingMessageSender` 各自只依赖 `IMessageSender` 接口，不依赖具体实现——符合 LSP（里氏替换原则）
+> 3. **`Scrutor.Decorate<T>`** 是 .NET 生态中装饰器注册的标准方案：自动解析 `IMessageSender` 的当前注册，创建包装实例并替换 DI 容器中的注册——比手动构建链更可维护
+> 4. **原生 DI 限制**：没有内置 `Decorate` 语义，每次注册 `AddTransient<IMessageSender, ...>()` 会覆盖前一次注册——所以要么手动构建完整链，要么引入 Scrutor
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
+
 ## 4. 扩展阅读
 
 - [[09-adapter|适配器模式]] — 改变接口（适配），装饰器保持接口不变；两者可以组合使用

@@ -1127,6 +1127,342 @@ public struct BTFullTrace
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Per-node Tick 计数和计时 Instrumentation + Profiler 叠加层**（Unity C#）。
+>
+> **1. BTNode 基类扩展**：
+> ```csharp
+> public abstract class BTNode
+> {
+>     // 调试统计字段
+>     public int TickCount { get; private set; }
+>     public double TotalTickTimeMs { get; private set; }
+>     public double LastTickTimeMs { get; private set; }
+>     public double MaxTickTimeMs { get; private set; }
+>
+>     public BTNodeState Tick()
+>     {
+>         long start = Stopwatch.GetTimestamp();
+>         var result = OnTick();
+>         long end = Stopwatch.GetTimestamp();
+>
+>         double elapsedMs = (end - start) / (double)Stopwatch.Frequency * 1000.0;
+>         TickCount++;
+>         LastTickTimeMs = elapsedMs;
+>         TotalTickTimeMs += elapsedMs;
+>         if (elapsedMs > MaxTickTimeMs) MaxTickTimeMs = elapsedMs;
+>         return result;
+>     }
+>     public double AvgTickTimeMs => TickCount > 0 ? TotalTickTimeMs / TickCount : 0;
+>     public void ResetStats()
+>     {
+>         TickCount = 0; TotalTickTimeMs = 0; MaxTickTimeMs = 0;
+>     }
+> }
+> ```
+>
+> **2. BTProfilerOverlay**：
+> ```csharp
+> public class BTProfilerOverlay : MonoBehaviour
+> {
+>     private bool _isVisible = false;
+>     private static List<BehaviorTreeRunner> _runners = new();
+>
+>     public static void Register(BehaviorTreeRunner runner) => _runners.Add(runner);
+>     public static void Unregister(BehaviorTreeRunner runner) => _runners.Remove(runner);
+>
+>     void Update()
+>     {
+>         if (Input.GetKeyDown(KeyCode.F1)) _isVisible = !_isVisible;
+>         if (Input.GetKeyDown(KeyCode.F2)) ResetAllStats();
+>     }
+>
+>     void OnGUI()
+>     {
+>         if (!_isVisible) return;
+>         GUILayout.BeginArea(new Rect(10, 10, 380, 600));
+>         GUILayout.Label("=== BT Profiler (Top 10 by TotalTime) ===", GUI.skin.box);
+>         GUILayout.BeginHorizontal();
+>         GUILayout.Label("Node", GUILayout.Width(120));
+>         GUILayout.Label("Ticks", GUILayout.Width(40));
+>         GUILayout.Label("Total", GUILayout.Width(50));
+>         GUILayout.Label("Avg", GUILayout.Width(50));
+>         GUILayout.Label("Max", GUILayout.Width(50));
+>         GUILayout.EndHorizontal();
+>
+>         var allNodes = new List<BTNode>();
+>         foreach (var runner in _runners)
+>             CollectAllNodes(runner.Root, allNodes);
+>
+>         // 按节点类型名聚合统计
+>         var aggregated = allNodes
+>             .GroupBy(n => n.GetType().Name)
+>             .Select(g => new {
+>                 Name = g.Key,
+>                 Ticks = g.Sum(n => n.TickCount),
+>                 TotalMs = g.Sum(n => n.TotalTickTimeMs),
+>                 MaxMs = g.Max(n => n.MaxTickTimeMs),
+>             })
+>             .OrderByDescending(x => x.TotalMs)
+>             .Take(10);
+>
+>         foreach (var entry in aggregated)
+>         {
+>             GUILayout.BeginHorizontal();
+>             GUILayout.Label(entry.Name, GUILayout.Width(120));
+>             GUILayout.Label(entry.Ticks.ToString(), GUILayout.Width(40));
+>             GUILayout.Label($"{entry.TotalMs:F2}", GUILayout.Width(50));
+>             GUILayout.Label($"{(entry.TotalMs / entry.Ticks):F3}", GUILayout.Width(50));
+>             GUILayout.Label($"{entry.MaxMs:F3}", GUILayout.Width(50));
+>             GUILayout.EndHorizontal();
+>         }
+>         GUILayout.EndArea();
+>     }
+>
+>     void CollectAllNodes(BTNode node, List<BTNode> list)
+>     {
+>         if (node == null) return;
+>         list.Add(node);
+>         if (node is CompositeNode composite)
+>             foreach (var c in composite.Children) CollectAllNodes(c, list);
+>         else if (node is BTDecorator dec && dec.Child != null)
+>             CollectAllNodes(dec.Child, list);
+>     }
+>
+>     void ResetAllStats()
+>     {
+>         foreach (var runner in _runners)
+>             ResetNodeStats(runner.Root);
+>     }
+>     void ResetNodeStats(BTNode node) { /* 递归遍历清空 */ }
+> }
+> ```
+>
+> **验证**：场景中 3 个 AI 运行不同 BT，Profiler 的 Top 10 会聚合显示所有 AI 的节点统计，按总耗时降序。Reset 后全部归零，新的 tick 重新累计。`MoveTo` 节点因其路径查询通常是最耗时的，应该在 Top 3。
+
+> [!tip]- 练习 2 参考答案
+> **AI LOD 系统**（Unity C#，基于 Tutorial 08 的 BehaviorTreeRunner）。
+>
+> **1. 枚举和逻辑**：
+> ```csharp
+> public enum AILODLevel { FullBT, SimplifiedFSM, Disabled }
+>
+> public class BehaviorTreeRunner : MonoBehaviour
+> {
+>     [Header("LOD Settings")]
+>     public float FullDistance = 30f;
+>     public float SimplifiedDistance = 80f;
+>     public float LODCheckInterval = 0.5f;
+>     public float EventWakeupDuration = 3f; // 受伤后保持 FullBT 的秒数
+>
+>     private AILODLevel _currentLOD = AILODLevel.FullBT;
+>     private float _lodCheckTimer;
+>     private float _wakeupTimer;
+>     private Transform _player;
+>     private SimplifiedFSM _fsm;
+>     private bool _hasDamageEvent;
+>
+>     void Start()
+>     {
+>         _fsm = new SimplifiedFSM(this); // 3-5 状态轻量 FSM
+>         _player = GameObject.FindGameObjectWithTag("Player").transform;
+>         BTProfilerOverlay.Register(this);
+>     }
+>
+>     void Update()
+>     {
+>         _lodCheckTimer -= Time.deltaTime;
+>         if (_lodCheckTimer <= 0f)
+>         {
+>             _lodCheckTimer = LODCheckInterval;
+>             EvaluateLOD();
+>         }
+>         // 执行当前 LOD 等级的 Tick
+>         switch (_currentLOD)
+>         {
+>             case AILODLevel.FullBT:
+>                 _root?.Tick(Time.deltaTime); break;
+>             case AILODLevel.SimplifiedFSM:
+>                 _fsm?.Tick(Time.deltaTime); break;
+>             case AILODLevel.Disabled:
+>                 break; // 不做任何 AI 更新
+>         }
+>         // 事件唤醒计时器递减
+>         if (_wakeupTimer > 0f)
+>         {
+>             _wakeupTimer -= Time.deltaTime;
+>             if (_wakeupTimer <= 0f) EvaluateLOD(); // 降回
+>         }
+>     }
+>
+>     void EvaluateLOD()
+>     {
+>         if (_wakeupTimer > 0f) { _currentLOD = AILODLevel.FullBT; return; }
+>         float dist = Vector3.Distance(transform.position, _player.position);
+>         AILODLevel newLOD = dist < FullDistance ? AILODLevel.FullBT
+>                           : dist < SimplifiedDistance ? AILODLevel.SimplifiedFSM
+>                           : AILODLevel.Disabled;
+>         if (newLOD == _currentLOD) return;
+>         TransitionLOD(_currentLOD, newLOD);
+>         _currentLOD = newLOD;
+>     }
+>
+>     void TransitionLOD(AILODLevel from, AILODLevel to)
+>     {
+>         if (from == AILODLevel.FullBT && to == AILODLevel.SimplifiedFSM)
+>         {
+>             // 从 BT 的活跃行为推导 FSM 初始状态
+>             string activeBehavior = GetActiveBTBehavior();
+>             _fsm.InitializeState(activeBehavior); // "Attack" → Combat, "Patrol" → Patrol
+>         }
+>         else if (from == AILODLevel.SimplifiedFSM && to == AILODLevel.FullBT)
+>         {
+>             // 将 FSM 的当前意图写入 Blackboard 供 BT 读取
+>             Blackboard.Set("_LastLODBehavior", _fsm.CurrentStateName);
+>             _fsm.Exit(); // 退出 FSM，BT 从根重新评估
+>         }
+>     }
+>
+>     public void OnTakeDamage(float amount)
+>     {
+>         _wakeupTimer = EventWakeupDuration;
+>         if (_currentLOD != AILODLevel.FullBT)
+>             TransitionLOD(_currentLOD, AILODLevel.FullBT);
+>         _currentLOD = AILODLevel.FullBT;
+>     }
+>
+>     // Scene View Gizmos
+>     void OnDrawGizmos()
+>     {
+>         Color lodColor = _currentLOD switch
+>         {
+>             AILODLevel.FullBT => Color.green,
+>             AILODLevel.SimplifiedFSM => Color.yellow,
+>             _ => Color.gray
+>         };
+>         Gizmos.color = lodColor;
+>         Gizmos.DrawSphere(transform.position + Vector3.up * 2.5f, 0.3f);
+>     }
+> }
+> ```
+>
+> **2. Simplified FSM**（3-5 状态）：
+> ```csharp
+> public class SimplifiedFSM
+> {
+>     enum State { Patrol, Combat, Idle }
+>     State _state = State.Idle;
+>     BehaviorTreeRunner _owner;
+>
+>     public void Tick(float dt)
+>     {
+>         switch (_state)
+>         {
+>             case State.Patrol: MoveAlongWaypoints(dt); if (HasEnemyNearby()) _state = State.Combat; break;
+>             case State.Combat: MoveToEnemy(); if (!HasEnemyNearby()) _state = State.Patrol; break;
+>             case State.Idle: if (HasEnemyNearby()) _state = State.Combat; break;
+>         }
+>     }
+>
+>     public void InitializeState(string btBehavior)
+>     {
+>         _state = btBehavior switch
+>         {
+>             "Attack" or "Chase" => State.Combat,
+>             "Patrol" => State.Patrol,
+>             _ => State.Idle
+>         };
+>     }
+> }
+> ```
+>
+> **验证**：远处 AI 的 Profiler 显示其 LOD 2（Disabled）TickCount 增长极慢或为零；近处 AI LOD 0（FullBT）TickCount 正常。对远处 AI 施加伤害后 Gizmos 颜色从灰变绿，3 秒后恢复。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **录制与回放 BT Trace**。
+>
+> **1. Trace 数据结构**（已给出）。关键是在 `BehaviorTreeRunner.Tick()` 中收集每一帧数据：
+> ```csharp
+> public class BehaviorTreeRunner : MonoBehaviour
+> {
+>     public bool IsRecording = false;
+>     private BTFullTrace _trace;
+>
+>     void Tick()
+>     {
+>         var status = _root.Tick(dt);
+>         if (IsRecording) RecordFrame();
+>         return status;
+>     }
+>
+>     void RecordFrame()
+>     {
+>         var frame = new BTFrameTrace
+>         {
+>             FrameNumber = Time.frameCount,
+>             GameTime = Time.time,
+>             NodeTraces = new List<BTNodeTrace>()
+>         };
+>         CollectNodeTraces(_root, frame.NodeTraces);
+>         _trace.Frames.Add(frame);
+>         // Blackboard 快照（每 10 帧一次以免太大）
+>         if (Time.frameCount % 10 == 0)
+>             _trace.BlackboardSnapshots[Time.frameCount] = Blackboard.GetAllKeyValues();
+>     }
+>
+>     void CollectNodeTraces(BTNode node, List<BTNodeTrace> traces)
+>     {
+>         traces.Add(new BTNodeTrace {
+>             NodeName = node.GetType().Name,
+>             NodeInstanceId = node.GetHashCode(),
+>             State = node.LastStatus,
+>             TickTimeMs = (float)node.LastTickTimeMs
+>         });
+>         if (node is CompositeNode c)
+>             foreach (var child in c.Children) CollectNodeTraces(child, traces);
+>     }
+>
+>     public BTFullTrace StopRecording() { IsRecording = false; return _trace; }
+> }
+> ```
+>
+> **2. BTReplayWindow**（EditorWindow）：
+> ```csharp
+> public class BTReplayWindow : EditorWindow
+> {
+>     private BTFullTrace _trace;
+>     private int _currentFrameIndex;
+>
+>     void OnGUI()
+>     {
+>         if (_trace == null) { /* 加载按钮 */ return; }
+>         // 时间轴滑块
+>         _currentFrameIndex = EditorGUILayout.IntSlider(
+>             $"Frame {_currentFrameIndex}/{_trace.Frames.Count - 1}",
+>             _currentFrameIndex, 0, _trace.Frames.Count - 1);
+>         // 播放/暂停按钮
+>         if (GUILayout.Button("1x Play")) PlaybackCoroutine();
+>         // 渲染当前帧的树状态
+>         var frame = _trace.Frames[_currentFrameIndex];
+>         foreach (var nt in frame.NodeTraces)
+>         {
+>             var color = nt.State == BTNodeState.Running ? Color.yellow
+>                       : nt.State == BTNodeState.Success ? Color.green : Color.red;
+>             GUI.color = color;
+>             EditorGUILayout.LabelField($"{nt.NodeName} [{nt.State}] {nt.TickTimeMs:F2}ms");
+>         }
+>         GUI.color = Color.white;
+>     }
+> }
+> ```
+>
+> **录制性能**：3600 帧 × 假设平均 20 节点/帧 = 72,000 个 `BTNodeTrace` 对象。每个对象约 40 bytes（string 引用 + enum + float）≈ 3MB。加上 Blackboard 快照 ≈ 5MB 总内存。录制本身只追加到列表——O(1) 每帧开销。Benchmark 建议：使用 `List.Capacity` 预分配避免动态扩容、`BTNodeTrace` 改为 struct 减少 GC 压力。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Unreal Engine AI Debugging Docs** — [Gameplay Debugger](https://docs.unrealengine.com/5.3/en-US/gameplay-debugger-in-unreal-engine/), [Visual Logger](https://docs.unrealengine.com/5.3/en-US/visual-logger-in-unreal-engine/), [Behavior Tree Debugger](https://docs.unrealengine.com/5.3/en-US/behavior-tree-in-unreal-engine---debugging/)

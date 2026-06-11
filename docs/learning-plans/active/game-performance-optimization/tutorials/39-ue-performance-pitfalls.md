@@ -611,6 +611,137 @@ private:
 4. 实验：在 `Collision` → `Preset` 中测试 `NoCollision` vs `BlockAll` 的性能差异（在 500 个实例的场景中）
 5. 记录你的发现：减少复杂碰撞体后，物理 Tick 时间降低了多少？
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Tick 审计方法论：**
+>
+> 1. **识别 Top 5**：`stat game` → 按 `Tick Time` 降序排列，记录前 5 个。（如果 stat game 没有 Tick 明细，使用 `stat startfile` → 录制 30s → UnrealInsights → Timing 视图 → 展开 `GameThread` → `FTickTaskManager::RunTickGroup` → 按 Duration 排序子调用）
+>
+> 2. **对每个 Top 类进行三问检查**：
+>
+>    | 检查项 | 判断方法 | 常见发现 |
+>    |--------|---------|---------|
+>    | 必须每帧执行？ | 如果逻辑仅需周期性检查（如距离检测、状态查询）→ 否 | 80% 的 Tick 可以换 Timer |
+>    | 不可见时做无用功？ | 添加 `WasRecentlyRendered(0.2f)` 检查 | 远处的 AI/粒子/动画在空转 |
+>    | Tick 内是否有昂贵查询？ | 搜索 `GetAllActorsOfClass`、`FindComponentByClass`、`Cast` | 每帧 O(N) 遍历 |
+>
+> 3. **优化示例 — Tick 转 Timer**：
+>    ```cpp
+>    // Before: 每帧 Tick
+>    void AProblemActor::Tick(float DeltaTime)
+>    {
+>        Super::Tick(DeltaTime);
+>        GetAllActorsOfClass(AEnemy::StaticClass(), AllEnemies); // O(N) 每帧！
+>        for (AActor* E : AllEnemies)
+>        {
+>            if (FVector::Dist(GetActorLocation(), E->GetActorLocation()) < 1000)
+>                Cast<AEnemy>(E)->Alert();
+>        }
+>    }
+>
+>    // After: Timer + 缓存
+>    void AOptimizedActor::BeginPlay()
+>    {
+>        Super::BeginPlay();
+>        SetActorTickEnabled(false); // 完全关 Tick
+>        GetWorldTimerManager().SetTimer(CheckTimer, this,
+>            &AOptimizedActor::CheckNearby, 0.5f, true); // 0.5s 一次
+>    }
+>
+>    void AOptimizedActor::CheckNearby()
+>    {
+>        if (!WasRecentlyRendered(0.2f)) return; // 屏幕外跳过
+>        for (TWeakObjectPtr<AEnemy>& EnemyPtr : CachedEnemies) // 预缓存列表
+>        {
+>            if (AEnemy* E = EnemyPtr.Get())
+>            {
+>                if (FVector::DistSquared(GetActorLocation(), E->GetActorLocation()) < 1000000.f)
+>                    E->Alert();
+>            }
+>        }
+>    }
+>    ```
+>
+> 4. **测量前后对比**：优化前后各执行 `stat unit` 并记录 `Game` 时间。预期：减少 >50% 的 GameThread 耗时（如果该 Tick 是主要瓶颈）。
+
+> [!tip]- 练习 2 参考答案
+> **蓝图到 C++ 迁移方法论：**
+>
+> 1. **寻找迁移目标**：在蓝图中搜索包含以下模式的节点：
+>    - `ForEachLoop` + 内部有 `GetComponent`/`Cast To`/`Vector` 运算
+>    - 嵌套的 `ForLoop`（如遍历数组并对每个元素做 Vector 运算）
+>    - 大量 `MakeVector`/`BreakVector`/`VectorLength` 等数学节点
+>
+> 2. **实现 C++ BlueprintCallable**（参考示例 B 的模式）：
+>    ```cpp
+>    UCLASS()
+>    class UMyBlueprintAccel : public UBlueprintFunctionLibrary
+>    {
+>        GENERATED_BODY()
+>    public:
+>        UFUNCTION(BlueprintCallable, Category = "Optimization")
+>        static void ProcessEnemyArray(
+>            const TArray<AEnemy*>& Enemies,
+>            const FVector& PlayerLocation,
+>            TArray<AEnemy*>& OutNearbyEnemies,
+>            float MaxDistance = 1000.f)
+>        {
+>            OutNearbyEnemies.Reset();
+>            float MaxDistSq = FMath::Square(MaxDistance);
+>            for (AEnemy* Enemy : Enemies)
+>            {
+>                if (Enemy && FVector::DistSquared(Enemy->GetActorLocation(),
+>                    PlayerLocation) < MaxDistSq)
+>                {
+>                    OutNearbyEnemies.Add(Enemy);
+>                }
+>            }
+>        }
+>    };
+>    ```
+>
+> 3. **Insights 测量对比**：
+>    - 录制迁移前：Insights 中看到蓝图 Tick 函数耗时（通常 5-20ms 取决于循环规模）
+>    - 录制迁移后：C++ 函数调用通常在 0.05-0.5ms
+>    - 加速比计算：`蓝图耗时 / C++耗时`
+>
+> 4. **加速比分析**：
+>    - 循环密集场景：通常 20-80x 加速
+>    - 无循环（单次数学运算）：10-20x 加速
+>    - 不符合预期的情况：如果 C++ 函数中仍有 `Cast`/`FindComponent` 等包装开销，加速比会偏低；确保重计算部分脱离了 UObject 系统开销
+>    - 蓝图 VM 有函数调用开销，即使单个节点很快，连续 1000 次调用也会累积到毫秒级
+
+> [!tip]- 练习 3 参考答案（可选）
+> **碰撞审计操作步骤与预期结果：**
+>
+> 1. **审计脚本输出解读**：
+>    `AnalyzeCollisionSettings` 会标记两类问题：
+>    - `[WARN]`：`UseComplexAsSimple=true` 且面数 > 100 → 逐三角形碰撞检测，极其昂贵
+>    - `[INFO]`：使用 Simple Collision 或无碰撞 → 正常
+>
+> 2. **修复方法**：
+>    - 在 Static Mesh Editor 中：`Collision → Auto Convex Collision` → 设置 `Max Hulls=4` 和 `Max Hull Verts=16`（通常足够）
+>    - 或手动添加：`Collision → Add Box/Sphere/Capsule Simplified Collision`
+>    - 确认 `Collision Complexity` 设为 `Use Simple Collision as Simple`（而非 `Use Complex as Simple`）
+>
+> 3. **实验：NoCollision vs BlockAll（500 实例）**：
+>    - 将 500 个 Actor 的碰撞预设分别设置为 `NoCollision` 和 `BlockAll`
+>    - `stat physics` 查看物理耗时：
+>      ```
+>      NoCollision: PhysX 耗时 ≈ 0.05ms（仅遍历，无窄检测）
+>      BlockAll:    PhysX 耗时 ≈ 2.8ms（Broad + Narrow Phase，500*500 = 250K 碰撞对粗检测）
+>      ```
+>    - 结论：不必要的碰撞是隐形的帧率杀手——视觉效果 Actor 应当设为 NoCollision
+>
+> 4. **物理 Tick 时间降低幅度**：
+>    - 如果将 50 个复杂碰撞体（每个 500+ 三角面）替换为 Convex Hull：
+>    - 物理耗时通常从 3-6ms 降到 0.3-0.8ms → 减少 80-90%
+>    - 改善幅度取决于涉及的碰撞对数量和原碰撞体复杂度
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

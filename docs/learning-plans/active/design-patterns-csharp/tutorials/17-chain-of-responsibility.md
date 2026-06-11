@@ -763,6 +763,545 @@ Client: 谁要处理 Banana?
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.IO;
+>
+> // ============================================
+> // 数据模型
+> // ============================================
+> public enum LogLevel { Debug, Info, Warning, Error }
+>
+> public record LogMessage(LogLevel Level, string Message, DateTime Timestamp)
+> {
+>     public override string ToString()
+>         => $"[{Timestamp:HH:mm:ss}] [{Level}] {Message}";
+> }
+>
+> // ============================================
+> // ILogHandler 接口
+> // ============================================
+> public interface ILogHandler
+> {
+>     ILogHandler SetNext(ILogHandler next);
+>     void Handle(LogMessage message);
+> }
+>
+> // ============================================
+> // 抽象基类 — 提供默认传递逻辑
+> // ============================================
+> public abstract class LogHandler : ILogHandler
+> {
+>     private ILogHandler? _next;
+>
+>     public ILogHandler SetNext(ILogHandler next)
+>     {
+>         _next = next;
+>         return next;
+>     }
+>
+>     public virtual void Handle(LogMessage message)
+>     {
+>         // 子类在覆盖时：先处理自己关心的级别，再调用 base.Handle() 传递
+>         _next?.Handle(message);
+>     }
+> }
+>
+> // ============================================
+> // ConsoleHandler — 处理 Debug、Info（控制台输出）
+> // ============================================
+> public class ConsoleHandler : LogHandler
+> {
+>     public override void Handle(LogMessage message)
+>     {
+>         if (message.Level == LogLevel.Debug || message.Level == LogLevel.Info)
+>         {
+>             Console.WriteLine($"[Console] {message}");
+>         }
+>         // 不纯责任链：无论如何都传递给下一个
+>         base.Handle(message);
+>     }
+> }
+>
+> // ============================================
+> // FileHandler — 处理 Warning（控制台黄字 + 写文件）
+> // ============================================
+> public class FileHandler : LogHandler
+> {
+>     private readonly string _filePath;
+>
+>     public FileHandler(string filePath = "warnings.log")
+>     {
+>         _filePath = filePath;
+>     }
+>
+>     public override void Handle(LogMessage message)
+>     {
+>         if (message.Level == LogLevel.Warning)
+>         {
+>             // 控制台黄色输出
+>             var prevColor = Console.ForegroundColor;
+>             Console.ForegroundColor = ConsoleColor.Yellow;
+>             Console.WriteLine($"[Console/File] {message}");
+>             Console.ForegroundColor = prevColor;
+>
+>             // 写入文件
+>             File.AppendAllText(_filePath, message + Environment.NewLine);
+>         }
+>         // 不纯责任链：继续传递
+>         base.Handle(message);
+>     }
+> }
+>
+> // ============================================
+> // EmailHandler — 处理 Error（控制台红字 + 文件 + 模拟邮件）
+> // ============================================
+> public class EmailHandler : LogHandler
+> {
+>     private readonly string _filePath;
+>     private readonly string _adminEmail;
+>
+>     public EmailHandler(string adminEmail = "admin@example.com", string filePath = "errors.log")
+>     {
+>         _adminEmail = adminEmail;
+>         _filePath = filePath;
+>     }
+>
+>     public override void Handle(LogMessage message)
+>     {
+>         if (message.Level == LogLevel.Error)
+>         {
+>             // 控制台红色输出
+>             var prevColor = Console.ForegroundColor;
+>             Console.ForegroundColor = ConsoleColor.Red;
+>             Console.WriteLine($"[Console/File/Email] {message}");
+>             Console.ForegroundColor = prevColor;
+>
+>             // 写入文件
+>             File.AppendAllText(_filePath, message + Environment.NewLine);
+>
+>             // 模拟发送邮件
+>             Console.WriteLine($"  → [Email] 已发送错误通知至 {_adminEmail}");
+>         }
+>         // 不纯责任链：继续传递
+>         base.Handle(message);
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> Console.WriteLine("=== 日志责任链 ===\n");
+>
+> // 构建链：ConsoleHandler → FileHandler → EmailHandler
+> var consoleHandler = new ConsoleHandler();
+> consoleHandler.SetNext(new FileHandler())
+>               .SetNext(new EmailHandler());
+>
+> var messages = new[]
+> {
+>     new LogMessage(LogLevel.Debug, "初始化连接池", DateTime.Now),
+>     new LogMessage(LogLevel.Info, "用户登录成功: alice", DateTime.Now),
+>     new LogMessage(LogLevel.Warning, "磁盘使用率超过 80%", DateTime.Now),
+>     new LogMessage(LogLevel.Error, "数据库连接超时", DateTime.Now),
+> };
+>
+> foreach (var msg in messages)
+> {
+>     Console.WriteLine($"--- 处理 {msg.Level} 消息 ---");
+>     consoleHandler.Handle(msg);
+>     Console.WriteLine();
+> }
+>
+> /* 输出说明：
+>  * Debug:  仅 ConsoleHandler 输出
+>  * Info:   仅 ConsoleHandler 输出
+>  * Warning: ConsoleHandler 输出（黄色）+ FileHandler 输出 + 写文件
+>  * Error:   ConsoleHandler 输出（红色）+ FileHandler 输出 + EmailHandler 输出 + 写文件 + 模拟邮件
+>  * 每个级别都会经过完整链（不纯责任链特性）
+>  */
+> ```
+>
+> **关键点**：
+> - 不纯责任链的核心：`Handle` 方法先处理自己关心的级别，**再**调用 `base.Handle(message)` 传递——无论是否处理都传递
+> - `Error` 消息会依次经过三个处理器：
+>   - ConsoleHandler 看到 Error 级别不匹配（只处理 Debug/Info），跳过自身输出，调用 `base.Handle()`
+>   - FileHandler 看到 Error 级别不匹配（只处理 Warning），跳过自身输出，调用 `base.Handle()`
+>   - EmailHandler 匹配 Error，输出控制台 + 文件 + 邮件，然后调用 `base.Handle()` → `_next` 为 null → 链结束
+> - 如果想改成"Error 也要经过 Warning 的文件记录"，可以在 EmailHandler 之前共享 FileHandler 引用，或让 EmailHandler 也包含文件写入逻辑
+
+> [!tip]- 练习 2 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Text.RegularExpressions;
+> using System.Threading.Tasks;
+>
+> // ============================================
+> // TextContext — 处理上下文
+> // ============================================
+> public class TextContext
+> {
+>     public string Input { get; set; }
+>     public string Output { get; set; } = "";
+>     public bool IsShortCircuited { get; set; }
+>
+>     public TextContext(string input) => Input = input;
+>
+>     public override string ToString() => Output;
+> }
+>
+> // ============================================
+> // 中间件委托 — 模拟 ASP.NET Core 风格
+> // ============================================
+> public delegate Task TextMiddleware(TextContext context, Func<Task> next);
+>
+> // ============================================
+> // TextPipelineBuilder
+> // ============================================
+> public class TextPipelineBuilder
+> {
+>     private readonly List<TextMiddleware> _middlewares = new();
+>
+>     public TextPipelineBuilder Use(TextMiddleware middleware)
+>     {
+>         _middlewares.Add(middleware);
+>         return this;
+>     }
+>
+>     public Func<TextContext, Task> Build()
+>     {
+>         // 终端处理器
+>         Func<Task> terminal = () =>
+>         {
+>             // 默认：Output = Input（如果没有中间件短路或设置输出）
+>             return Task.CompletedTask;
+>         };
+>
+>         // 洋葱包裹：从最后一个中间件往前
+>         for (int i = _middlewares.Count - 1; i >= 0; i--)
+>         {
+>             var middleware = _middlewares[i];
+>             var next = terminal;
+>             terminal = () => middleware(context!, next);
+>         }
+>
+>         return ctx =>
+>         {
+>             context = ctx;
+>             return terminal();
+>         };
+>     }
+>
+>     // 实例字段用于闭包捕获
+>     private TextContext? context;
+> }
+>
+> // ============================================
+> // 具体处理器
+> // ============================================
+> public static class TextProcessors
+> {
+>     // 1. TrimProcessor：去除首尾空白
+>     public static Task TrimProcessor(TextContext ctx, Func<Task> next)
+>     {
+>         ctx.Input = ctx.Input.Trim();
+>         return next();
+>     }
+>
+>     // 2. RemoveExtraSpacesProcessor：连续空格压缩为一个
+>     public static Task RemoveExtraSpaces(TextContext ctx, Func<Task> next)
+>     {
+>         ctx.Input = Regex.Replace(ctx.Input, @"\s{2,}", " ");
+>         return next();
+>     }
+>
+>     // 3. SanitizeProcessor：移除 HTML 标签
+>     public static Task SanitizeHtml(TextContext ctx, Func<Task> next)
+>     {
+>         ctx.Input = Regex.Replace(ctx.Input, @"<.*?>", "");
+>         return next();
+>     }
+>
+>     // 4. MarkdownProcessor：将 **text** 转换为 <strong>text</strong>
+>     public static Task ConvertMarkdown(TextContext ctx, Func<Task> next)
+>     {
+>         ctx.Input = Regex.Replace(ctx.Input, @"\*\*(.+?)\*\*", "<strong>$1</strong>");
+>         // 设置输出
+>         ctx.Output = ctx.Input;
+>         return next();
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> var builder = new TextPipelineBuilder();
+> // 注意：Build 的闭包方式需要适配。这里改用更简单的顺序管道方式：
+> // 为了清晰展示，我们采用"每个中间件修改 ctx.Input，传递到下一个"的模式
+>
+> // 简化版构建器（顺序管道，非洋葱模型）
+> var pipeline = new List<Func<TextContext, TextContext>>
+> {
+>     ctx => { ctx.Input = ctx.Input.Trim(); return ctx; },
+>     ctx => { ctx.Input = Regex.Replace(ctx.Input, @"\s{2,}", " "); return ctx; },
+>     ctx => { ctx.Input = Regex.Replace(ctx.Input, @"<.*?>", ""); return ctx; },
+>     ctx =>
+>     {
+>         ctx.Input = Regex.Replace(ctx.Input, @"\*\*(.+?)\*\*", "<strong>$1</strong>");
+>         ctx.Output = ctx.Input;
+>         return ctx;
+>     },
+> };
+>
+> Console.WriteLine("=== 文本处理中间件管道 ===\n");
+>
+> var input = "  <p>Hello  <b>World</b></p>  **CSharp**  ";
+> Console.WriteLine($"输入: \"{input}\"");
+>
+> var context = new TextContext(input);
+> foreach (var processor in pipeline)
+>     context = processor(context);
+>
+> Console.WriteLine($"输出: \"{context.Output}\"");
+>
+> // 验证预期结果
+> var expected = "Hello World <strong>CSharp</strong>";
+> Console.WriteLine($"期望: \"{expected}\"");
+> Console.WriteLine($"结果: {(context.Output == expected ? "✓ 通过" : "✗ 不匹配")}");
+> ```
+>
+> **关键点**：
+> - 每个处理器接收 `TextContext`，修改 `Input`，传递到下一个
+> - 处理器顺序敏感：必须先 Trim 和 RemoveExtraSpaces 再 Removetags，否则 `<b>World</b>` 内部的空白处理会受影响
+> - 正则 `@"<.*?>"` 非贪婪匹配 HTML 标签；`@"\*\*(.+?)\*\*"` 匹配 Markdown 加粗
+> - 简化版用 `List<Func<>>` 实现顺序管道而非洋葱模型——因为文本处理不需要"响应后"逻辑。若需求含后处理（如添加时间戳），改用洋葱模型更合适
+
+> [!tip]- 练习 3 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+>
+> // ============================================
+> // 核心接口
+> // ============================================
+> public interface IChainable
+> {
+>     object? Handle(object request);
+>     IChainable SetNext(IChainable next);
+> }
+>
+> // ============================================
+> // 请求快照 — 用于断点恢复
+> // ============================================
+> public class ChainCheckpoint
+> {
+>     public object Request { get; }
+>     public IChainable ResumeFrom { get; }  // 从哪个处理器恢复
+>     public DateTime SavedAt { get; }
+>
+>     public ChainCheckpoint(object request, IChainable resumeFrom)
+>     {
+>         Request = request;
+>         ResumeFrom = resumeFrom;
+>         SavedAt = DateTime.UtcNow;
+>     }
+> }
+>
+> // ============================================
+> // CheckpointHandler — 在目标处理器前后保存/恢复
+> // ============================================
+> public class CheckpointHandler : IChainable
+> {
+>     private readonly IChainable _inner;      // 被保护的处理器
+>     private IChainable? _next;
+>     private ChainCheckpoint? _lastCheckpoint;
+>
+>     public CheckpointHandler(IChainable inner)
+>     {
+>         _inner = inner;
+>     }
+>
+>     public IChainable SetNext(IChainable next)
+>     {
+>         _next = next;
+>         // 同时设置内部处理器的下一个（让 inner 可以继续执行链）
+>         _inner.SetNext(next);
+>         return next;
+>     }
+>
+>     public object? Handle(object request)
+>     {
+>         // 在执行 inner 之前保存快照（断点位置 = inner）
+>         _lastCheckpoint = new ChainCheckpoint(request, _inner);
+>         Console.WriteLine($"  [Checkpoint] 已保存快照 @ {_inner.GetType().Name}");
+>
+>         try
+>         {
+>             return _inner.Handle(request);
+>         }
+>         catch (Exception ex)
+>         {
+>             Console.WriteLine($"  [Checkpoint] 捕获异常: {ex.Message}");
+>             Console.WriteLine($"  [Checkpoint] 快照可用于从 {_inner.GetType().Name} 恢复");
+>             throw; // 重新抛出，让上层知道失败
+>         }
+>     }
+>
+>     /// <summary>获取最后一个快照，可用于 ResumeHandler 重试</summary>
+>     public ChainCheckpoint? GetCheckpoint() => _lastCheckpoint;
+> }
+>
+> // ============================================
+> // ResumeHandler — 从快照恢复链的执行
+> // ============================================
+> public class ResumeHandler : IChainable
+> {
+>     private IChainable? _next;
+>
+>     public IChainable SetNext(IChainable next)
+>     {
+>         _next = next;
+>         return next;
+>     }
+>
+>     public object? Handle(object request)
+>     {
+>         Console.WriteLine("  [Resume] 尝试从快照恢复...");
+>         return _next?.Handle(request);
+>     }
+>
+>     /// <summary>使用快照恢复执行</summary>
+>     public object? ResumeFrom(ChainCheckpoint checkpoint)
+>     {
+>         Console.WriteLine($"  [Resume] 从 {checkpoint.ResumeFrom.GetType().Name} 恢复执行 (快照时间: {checkpoint.SavedAt:HH:mm:ss})");
+>         return checkpoint.ResumeFrom.Handle(checkpoint.Request);
+>     }
+> }
+>
+> // ============================================
+> // 测试用的三步处理链
+> // ============================================
+> public class ValidateHandler : IChainable
+> {
+>     private IChainable? _next;
+>
+>     public IChainable SetNext(IChainable next) { _next = next; return next; }
+>
+>     public object? Handle(object request)
+>     {
+>         Console.WriteLine("  [Validate] 验证请求...");
+>         if (request is string s && string.IsNullOrWhiteSpace(s))
+>             throw new InvalidOperationException("请求为空！");
+>         Console.WriteLine("  [Validate] ✓ 通过");
+>         return _next?.Handle(request);
+>     }
+> }
+>
+> public class TransformHandler : IChainable
+> {
+>     private readonly bool _failOnce; // 模拟：首次调用失败
+>     private bool _hasFailed;
+>     private IChainable? _next;
+>
+>     public TransformHandler(bool failOnce = false)
+>     {
+>         _failOnce = failOnce;
+>     }
+>
+>     public IChainable SetNext(IChainable next) { _next = next; return next; }
+>
+>     public object? Handle(object request)
+>     {
+>         if (_failOnce && !_hasFailed)
+>         {
+>             _hasFailed = true;
+>             throw new InvalidOperationException("转换失败：网络超时（模拟）");
+>         }
+>
+>         Console.WriteLine("  [Transform] 转换请求...");
+>         string result = $"[TRANSFORMED] {request}";
+>         Console.WriteLine($"  [Transform] ✓ 完成: {result}");
+>         return _next?.Handle(result);
+>     }
+> }
+>
+> public class PersistHandler : IChainable
+> {
+>     private IChainable? _next;
+>
+>     public IChainable SetNext(IChainable next) { _next = next; return next; }
+>
+>     public object? Handle(object request)
+>     {
+>         Console.WriteLine($"  [Persist] 持久化: {request}");
+>         Console.WriteLine("  [Persist] ✓ 已保存");
+>         return _next?.Handle(request);
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> Console.WriteLine("=== 可断点和恢复的责任链 ===\n");
+>
+> // 构建链: Validate → [Checkpoint(Transform)] → Persist
+> var validate = new ValidateHandler();
+> var transform = new TransformHandler(failOnce: true);  // 首次会失败
+> var persist = new PersistHandler();
+>
+> var checkpoint = new CheckpointHandler(transform);
+> var resume = new ResumeHandler();
+>
+> // 链连接: validate → checkpoint(transform) → persist
+> validate.SetNext(checkpoint);
+> checkpoint.SetNext(persist);
+>
+> // 测试 1：正常执行
+> Console.WriteLine("--- 测试 1：正常请求 ---");
+> try
+> {
+>     validate.Handle("Hello, Chain!");
+> }
+> catch (Exception ex)
+> {
+>     Console.WriteLine($"  ❌ 链失败: {ex.Message}");
+> }
+>
+> Console.WriteLine();
+>
+> // 测试 2：用快照重试
+> Console.WriteLine("--- 测试 2：使用快照重试 ---");
+> var savedCheckpoint = checkpoint.GetCheckpoint();
+> if (savedCheckpoint != null)
+> {
+>     // 注意：TransformHandler 第二次调用不会失败了（_failOnce + _hasFailed = true）
+>     var result = resume.ResumeFrom(savedCheckpoint);
+>     Console.WriteLine($"  最终结果: {result}");
+> }
+> else
+> {
+>     Console.WriteLine("  没有可用快照");
+> }
+> ```
+>
+> **关键点**：
+> - `CheckpointHandler` 包装目标处理器（Decoration），在执行前保存请求快照
+> - 异常被 `CheckpointHandler` 捕获后重新抛出——不影响正常的异常传播，但在此之前已记录了恢复所需的数据
+> - `ResumeHandler.ResumeFrom(checkpoint)` 直接从保存的 `ResumeFrom` 处理器重新执行，跳过之前已完成的步骤
+> - `TransformHandler` 用 `_failOnce` 模拟间歇性故障：首次抛异常，重试时成功
+> - 这是 **Saga 模式**的简化版：CheckpointHandler 相当于 Saga 的"步骤日志"，ResumeHandler 相当于"补偿/重试协调器"
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 相关模式

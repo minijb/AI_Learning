@@ -293,6 +293,201 @@ void PrintScalabilitySettings()
 3. 尝试用 `SCOPED_GPU_STAT` 包裹现有 UE 渲染代码路径（如 Post Process 的自定义部分）
 4. 使用 RenderDoc 捕获一帧，确认你的 Event 出现在正确的时机
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **渲染开销分解 — 排查思路与典型结果**
+> 
+> **测试场景搭建要点**：
+> - 镂空材质：铁栅栏/树叶（Masked Material，禁用 HZB 剔除，需逐像素可见性测试）
+> - 半透明材质：玻璃/水面（Translucent，额外排序 + 独立 Pass 开销）
+> - WPO 动画材质：旗帜飘动/水面波动（World Position Offset 禁用 Nanite 优化）
+> 
+> **stat gpu 典型输出解读**：
+> 
+> | Pass | Nanite ON | Nanite OFF | 分析 |
+> |------|-----------|------------|------|
+> | Nanite VisBuffer | 1.2ms | — | Nanite 可见性 Buffer 构建 |
+> | Nanite BasePass | 2.8ms | — | Nanite 材质求值（薄面物体占比大时偏高） |
+> | BasePass (non-Nanite) | 0.3ms | 4.5ms | 传统物体 → Nanite 关闭后暴增 |
+> | ShadowDepths | 1.5ms | 3.2ms | 关闭 VSM 后切换到 CSM，Draw Call 增加 |
+> | Lumen (DiffuseIndirect) | 2.1ms | 2.1ms | Lumen 独立于 Nanite（依赖 Surface Cache） |
+> | Lumen (Reflections) | 0.8ms | 0.8ms | 同上 |
+> | Post Process | 0.9ms | 0.9ms | 后处理不受 Nanite/VSM 影响 |
+> | **Total** | **9.6ms** | **11.5ms** | Nanite 节省 ~2ms（取决于场景复杂度） |
+> 
+> **为什么 Nanite 关闭后 BasePass 暴增？**
+> - Nanite 将大量小三角形合并为 Cluster，减少 Draw Call
+> - 关闭后每个静态网格体产生独立 Draw Call（CPU 提交 + GPU 状态切换）
+> - 场景中 5 种静态网格 × 每个的材质变体 → 大量 SetPass Call
+> 
+> **哪个系统开销最大？**
+> - 答案取决于场景：
+>   - **室内密集场景**：Lumen GI → 大量光线追踪 Surface Cache 更新（2-3ms）
+>   - **大量植被的开放世界**：Nanite BasePass → 薄面几何体（树叶）Cluster 剔除效率低（3-5ms）
+>   - **多动态光源场景**：VSM ShadowDepths → 每个光源独立 Shadow Page Pool（2-4ms）
+> - **通用结论**：Lumen 是最大的单系统开销（常占帧预算 20-30%），其次是 Nanite/VSM
+
+> [!tip]- 练习 2 参考答案
+> **可扩展性预设 — 三种场景的测试矩阵**
+> 
+> **三个预设文件**（保存为 `.txt` 放入 Config 目录）：
+> 
+> **Preset_Ultra.txt** (Epic 等效):
+> ```
+> r.Nanite 1
+> r.Lumen.DiffuseIndirect.Allow 1
+> r.Lumen.Reflections.Allow 1
+> r.Shadow.Virtual.Enable 1
+> r.Lumen.HardwareRayTracing 1
+> r.Lumen.ScreenProbeGather.RadianceCache.ProbeResolution 32
+> r.Shadow.Virtual.ResolutionLodBiasDirectional -1.5
+> r.Streaming.PoolSize 4000
+> ```
+> 
+> **Preset_High.txt** (主机/高配 PC):
+> ```
+> r.Nanite 1
+> r.Lumen.DiffuseIndirect.Allow 1
+> r.Lumen.Reflections.Allow 1
+> r.Shadow.Virtual.Enable 1
+> r.Lumen.HardwareRayTracing 1
+> r.Lumen.ScreenProbeGather.RadianceCache.ProbeResolution 24
+> r.Shadow.Virtual.ResolutionLodBiasDirectional -1.0
+> r.Streaming.PoolSize 3000
+> ```
+> 
+> **Preset_Medium.txt** (中配 PC):
+> ```
+> r.Nanite 1
+> r.Lumen.DiffuseIndirect.Allow 1
+> r.Lumen.Reflections.Allow 1
+> r.Shadow.Virtual.Enable 1
+> r.Lumen.HardwareRayTracing 0
+> r.Lumen.ScreenProbeGather.RadianceCache.ProbeResolution 16
+> r.Shadow.Virtual.ResolutionLodBiasDirectional 0.0
+> r.Streaming.PoolSize 2000
+> ```
+> 
+> **Preset_Low.txt** (低配/Steam Deck):
+> ```
+> r.Nanite 0
+> r.Lumen.DiffuseIndirect.Allow 0
+> r.Lumen.Reflections.Allow 0
+> r.Shadow.Virtual.Enable 0
+> r.Shadow.CSM.MaxCascades 2
+> r.Shadow.CSM.ShadowDistance 3000
+> r.Streaming.PoolSize 1500
+> r.VT.Enable 0
+> ```
+> 
+> **测试矩阵**（使用 `stat unit`）：
+> 
+> | 场景 | 预设 | Frame (ms) | GPU (ms) | 主要瓶颈 |
+> |------|------|-----------|----------|----------|
+> | 密集室内 | Ultra | 14.2 | 13.8 | Lumen GI (3.2ms) |
+> | 密集室内 | High | 11.5 | 11.2 | Lumen GI (2.1ms) |
+> | 密集室内 | Medium | 8.3 | 8.0 | Nanite BasePass (2.5ms) |
+> | 密集室内 | Low | 5.1 | 4.8 | 传统 BasePass (1.8ms) |
+> | 开放世界 | Ultra | 18.5 | 18.1 | Nanite VisBuffer (4.5ms) |
+> | 开放世界 | High | 14.8 | 14.5 | Nanite VisBuffer (3.2ms) |
+> | 开放世界 | Medium | 10.2 | 9.8 | Nanite BasePass (2.8ms) |
+> | 开放世界 | Low | 7.8 | 7.5 | CSM Shadow (1.5ms) |
+> | 多动态光 | Ultra | 22.1 | 21.5 | VSM PageTable (5.1ms) |
+> | 多动态光 | High | 16.5 | 16.1 | VSM PageTable (3.5ms) |
+> | 多动态光 | Medium | 10.8 | 10.3 | VSM PageTable (2.1ms) |
+> | 多动态光 | Low | 6.2 | 5.8 | CSM+静态烘焙 (0.8ms) |
+> 
+> **CVar 影响分析**：
+> 
+> | CVar | 密集室内 | 开放世界 | 多动态光 | 备注 |
+> |------|---------|----------|---------|------|
+> | `r.Nanite 0` | ++中 | **+++最大** | +小 | 开放世界中几何复杂度最高 |
+> | `r.Lumen.* 0` | **+++最大** | ++中 | +小 | 室内 GI 贡献大 |
+> | `r.Shadow.Virtual.Enable 0` | +小 | +小 | **+++最大** | 光源越多 VSM 收益越大 |
+> | `r.Streaming.PoolSize` | +小 | ++中 | +小 | 纹理流送池主要影响开放世界大纹理 |
+> 
+> **结论**：没有一刀切的优化——根据场景特征选择对应的性能开关。开放世界优先调 Nanite/LOD，室内优先调 Lumen，多光源场景优先调 VSM/Shadow。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **自定义 GPU 统计 — 完整示例**
+> 
+> ```cpp
+> // MyCustomRenderPass.h
+> #pragma once
+> #include "CoreMinimal.h"
+> #include "RenderingThread.h"
+> 
+> // 声明 GPU Stat（在 stat gpu 中可见）
+> DECLARE_GPU_STAT_NAMED(MyCustomBloomPass, TEXT("My Custom Bloom"));
+> DECLARE_GPU_STAT_NAMED(MyCustomToneMapPass, TEXT("My Custom ToneMap"));
+> 
+> // 声明 Draw Event（在 GPU Visualizer 中有色块标记）
+> DECLARE_DRAW_EVENT(MyBloomEvent, FColor::Yellow);
+> DECLARE_DRAW_EVENT(MyToneMapEvent, FColor::Cyan);
+> ```
+> 
+> ```cpp
+> // MyCustomRenderPass.cpp
+> #include "MyCustomRenderPass.h"
+> #include "PostProcess/PostProcessing.h"
+> 
+> // 自定义后处理 Pass 示例
+> void RenderMyCustomPostProcess(
+>     FRDGBuilder& GraphBuilder,
+>     const FSceneView& View,
+>     FRDGTextureRef SceneColor)
+> {
+>     // 添加 GPU Stat scope
+>     RDG_GPU_STAT_SCOPE(GraphBuilder, MyCustomBloomPass);
+> 
+>     // 添加 Draw Event scope
+>     RDG_EVENT_SCOPE(GraphBuilder, "My Custom Bloom Pass");
+> 
+>     // 创建临时 RT（Render Graph 自动管理生命周期）
+>     FRDGTextureDesc BloomDesc = SceneColor->Desc;
+>     BloomDesc.Reset();
+>     BloomDesc.Extent = FIntPoint(
+>         SceneColor->Desc.Extent.X / 4,
+>         SceneColor->Desc.Extent.Y / 4);
+>     BloomDesc.Format = PF_FloatRGBA;
+>     FRDGTextureRef BloomTexture = GraphBuilder.CreateTexture(
+>         BloomDesc, TEXT("MyBloomRT"));
+> 
+>     // Downsample Pass
+>     AddDownsamplePass(GraphBuilder, View, SceneColor, BloomTexture);
+> 
+>     // Blur Pass (horizontal + vertical)
+>     FRDGTextureRef BlurredTexture = GraphBuilder.CreateTexture(
+>         BloomDesc, TEXT("MyBloomBlurred"));
+>     AddGaussianBlurPass(GraphBuilder, View, BloomTexture, BlurredTexture);
+> 
+>     // Composite Pass
+>     {
+>         RDG_GPU_STAT_SCOPE(GraphBuilder, MyCustomToneMapPass);
+>         RDG_EVENT_SCOPE(GraphBuilder, "My Custom ToneMap");
+>         AddCompositePass(GraphBuilder, View, SceneColor, BlurredTexture);
+>     }
+> }
+> ```
+> 
+> **验证步骤**：
+> 1. 编译项目，确保没有编译错误
+> 2. 运行游戏 → 打开控制台 → 输入 `stat gpu`
+> 3. 在 GPU stat 列表中找到 `My Custom Bloom` 和 `My Custom ToneMap`
+> 4. 按 Ctrl+Shift+, → 打开 GPU Visualizer → 在下拉菜单中勾选你的 Event
+> 5. 黄色块 = Bloom，青色块 = ToneMap，确认它们的顺序和时机正确
+> 6. 用 RenderDoc 捕获一帧 → 在 Event Browser 中搜索 `My Custom` → 确认你的 Event 出现在预期位置（后处理阶段）
+> 
+> **RenderDoc 验证细节**：
+> - 打开捕获 → Event Browser → 按名称搜索
+> - 确认你的 Event 在 `PostProcessing` group 中
+> - 确认 Event 时间戳与 `stat gpu` 中显示的耗时一致
+> - 检查是否有意外的资源 barrier 产生额外开销
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

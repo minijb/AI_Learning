@@ -889,38 +889,34 @@ public class SalaryReportVisitor : IEmployeeVisitor
 3. 实现 `TakeHomePayVisitor`：扣除税款后的实际到手工资
 4. 编写测试代码：创建 2 个全职员工、1 个外包、1 个实习生，分别用三个 Visitor 处理，打印结果
 
-<details>
-<summary>提示</summary>
-
-```csharp
-public interface IEmployeeVisitor
-{
-    void Visit(FullTimeEmployee employee);
-    void Visit(Contractor contractor);
-    void Visit(Intern intern);
-}
-
-// TaxVisitor
-public class TaxVisitor : IEmployeeVisitor
-{
-    public decimal TotalTax { get; private set; }
-
-    public void Visit(FullTimeEmployee e)
-        => TotalTax += e.MonthlySalary * 0.25m;
-
-    public void Visit(Contractor e)
-        => TotalTax += e.HourlyRate * e.HoursWorked * 0.15m;
-
-    public void Visit(Intern e)
-    {
-        // 补贴低于 5000 免税
-        if (e.Stipend >= 5000)
-            TotalTax += e.Stipend * 0.10m;
-    }
-}
-```
-
-</details>
+> [!tip]- 提示
+> ```csharp
+> public interface IEmployeeVisitor
+> {
+>     void Visit(FullTimeEmployee employee);
+>     void Visit(Contractor contractor);
+>     void Visit(Intern intern);
+> }
+>
+> // TaxVisitor
+> public class TaxVisitor : IEmployeeVisitor
+> {
+>     public decimal TotalTax { get; private set; }
+>
+>     public void Visit(FullTimeEmployee e)
+>         => TotalTax += e.MonthlySalary * 0.25m;
+>
+>     public void Visit(Contractor e)
+>         => TotalTax += e.HourlyRate * e.HoursWorked * 0.15m;
+>
+>     public void Visit(Intern e)
+>     {
+>         // 补贴低于 5000 免税
+>         if (e.Stipend >= 5000)
+>             TotalTax += e.Stipend * 0.10m;
+>     }
+> }
+> ```
 
 ### 练习 2（进阶）：用 `dynamic` 改写练习 1 的员工系统
 
@@ -935,25 +931,21 @@ public class TaxVisitor : IEmployeeVisitor
 
 **要点：** 体会 `dynamic` 带来的便利（新元素不需要接口修改）和风险（遗漏无编译期提示）。
 
-<details>
-<summary>提示</summary>
-
-```csharp
-public abstract class Employee
-{
-    public string Name { get; set; } = "";
-
-    public void Accept(IEmployeeVisitor visitor)
-    {
-        visitor.Visit((dynamic)this);
-    }
-}
-
-// 注意：基类的 Visit((dynamic)this) 是关键
-// 调用的 Visit 重载由运行时 this 的真实类型决定
-```
-
-</details>
+> [!tip]- 提示
+> ```csharp
+> public abstract class Employee
+> {
+>     public string Name { get; set; } = "";
+>
+>     public void Accept(IEmployeeVisitor visitor)
+>     {
+>         visitor.Visit((dynamic)this);
+>     }
+> }
+>
+> // 注意：基类的 Visit((dynamic)this) 是关键
+> // 调用的 Visit 重载由运行时 this 的真实类型决定
+> ```
 
 ### 练习 3（挑战）：模式匹配替代 Visitor — 比较两种方案
 
@@ -971,28 +963,265 @@ public abstract class Employee
    - 当需要添加第 4 种员工类型，两种方案各需要改多少代码？
    - 在 C# 中，如果你确定员工类型会频繁新增但操作数量稳定，应该选 Visitor 还是模式匹配？
 
-<details>
-<summary>提示</summary>
-
-```csharp
-public static class PayrollCalculator
-{
-    public static decimal CalculateGross(object emp) => emp switch
-    {
-        FullTimeEmployee f => f.MonthlySalary,
-        Contractor c => c.HourlyRate * c.HoursWorked,
-        Intern i => i.Stipend,
-        _ => throw new ArgumentException($"Unknown type: {emp.GetType()}")
-    };
-
-    // 用 switch 表达式，C# 编译器在开启警告时会提示未覆盖的类型
-    // 但不会像 Visitor 接口那样强制穷举
-}
-```
-
-</details>
+> [!tip]- 提示
+> ```csharp
+> public static class PayrollCalculator
+> {
+>     public static decimal CalculateGross(object emp) => emp switch
+>     {
+>         FullTimeEmployee f => f.MonthlySalary,
+>         Contractor c => c.HourlyRate * c.HoursWorked,
+>         Intern i => i.Stipend,
+>         _ => throw new ArgumentException($"Unknown type: {emp.GetType()}")
+>     };
+>
+>     // 用 switch 表达式，C# 编译器在开启警告时会提示未覆盖的类型
+>     // 但不会像 Visitor 接口那样强制穷举
+> }
+> ```
 
 ---
+
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：薪资计算系统 TaxVisitor
+> ```csharp
+> // ============================================
+> // 1. IEmployeeVisitor 接口（补全）
+> // ============================================
+> public interface IEmployeeVisitor
+> {
+>     void Visit(FullTimeEmployee employee);
+>     void Visit(Contractor contractor);
+>     void Visit(Intern intern);
+> }
+>
+> // ============================================
+> // 2. TaxVisitor — 税款计算
+> // ============================================
+> public class TaxVisitor : IEmployeeVisitor
+> {
+>     public decimal TotalTax { get; private set; }
+>
+>     public void Visit(FullTimeEmployee e)
+>         => TotalTax += e.MonthlySalary * 0.25m;
+>
+>     public void Visit(Contractor e)
+>         => TotalTax += e.HourlyRate * e.HoursWorked * 0.15m;
+>
+>     public void Visit(Intern e)
+>     {
+>         // 补贴低于 5000 免税；>= 5000 按 10% 计税
+>         if (e.Stipend >= 5000)
+>             TotalTax += e.Stipend * 0.10m;
+>     }
+> }
+>
+> // ============================================
+> // 3. TakeHomePayVisitor — 实际到手工资
+> // ============================================
+> public class TakeHomePayVisitor : IEmployeeVisitor
+> {
+>     public decimal TotalTakeHome { get; private set; }
+>
+>     public void Visit(FullTimeEmployee e)
+>     {
+>         var gross = e.MonthlySalary;
+>         var tax = gross * 0.25m;
+>         TotalTakeHome += gross - tax;
+>         Console.WriteLine($"  {e.Name} (FullTime): Gross={gross:C}, Tax={tax:C}, TakeHome={gross - tax:C}");
+>     }
+>
+>     public void Visit(Contractor e)
+>     {
+>         var gross = e.HourlyRate * e.HoursWorked;
+>         var tax = gross * 0.15m;
+>         TotalTakeHome += gross - tax;
+>         Console.WriteLine($"  {e.Name} (Contractor): Gross={gross:C}, Tax={tax:C}, TakeHome={gross - tax:C}");
+>     }
+>
+>     public void Visit(Intern e)
+>     {
+>         var gross = e.Stipend;
+>         var tax = gross >= 5000 ? gross * 0.10m : 0;
+>         TotalTakeHome += gross - tax;
+>         Console.WriteLine($"  {e.Name} (Intern): Gross={gross:C}, Tax={tax:C}, TakeHome={gross - tax:C}");
+>     }
+> }
+>
+> // ============================================
+> // 4. 测试代码
+> // ============================================
+> // var employees = new List<IEmployee>
+> // {
+> //     new FullTimeEmployee { Name = "Alice", MonthlySalary = 10000m },
+> //     new FullTimeEmployee { Name = "Bob", MonthlySalary = 12000m },
+> //     new Contractor { Name = "Charlie", HourlyRate = 200m, HoursWorked = 80 },
+> //     new Intern { Name = "Diana", Stipend = 3000m }
+> // };
+> //
+> // var salaryReport = new SalaryReportVisitor();
+> // var taxReport = new TaxVisitor();
+> // var takeHomeReport = new TakeHomePayVisitor();
+> //
+> // foreach (var emp in employees) emp.Accept(salaryReport);
+> // Console.WriteLine($"\n=== Total Payout: {salaryReport.TotalPayout:C} ===");
+> //
+> // foreach (var emp in employees) emp.Accept(taxReport);
+> // Console.WriteLine($"=== Total Tax: {taxReport.TotalTax:C} ===");
+> //
+> // Console.WriteLine($"\n--- Take-Home Details ---");
+> // foreach (var emp in employees) emp.Accept(takeHomeReport);
+> // Console.WriteLine($"=== Total Take-Home Pay: {takeHomeReport.TotalTakeHome:C} ===");
+> ```
+
+> [!tip]- 练习 2 参考答案：`dynamic` 改写员工系统
+> ```csharp
+> // ============================================
+> // 抽象基类 — Accept 使用 dynamic 分派
+> // ============================================
+> public abstract class Employee
+> {
+>     public string Name { get; set; } = "";
+>
+>     // dynamic 分派：运行时根据 this 的真实类型选择 Visit 重载
+>     public void Accept(IEmployeeVisitor visitor)
+>     {
+>         visitor.Visit((dynamic)this);
+>     }
+> }
+>
+> // 具体员工类 — 继承 Employee，去掉 IEmployee 接口
+> public class FullTimeEmployee : Employee
+> {
+>     public decimal MonthlySalary { get; set; }
+> }
+>
+> public class Contractor : Employee
+> {
+>     public decimal HourlyRate { get; set; }
+>     public int HoursWorked { get; set; }
+> }
+>
+> public class Intern : Employee
+> {
+>     public decimal Stipend { get; set; }
+> }
+>
+> // 新增员工类型 — 无需修改 IEmployeeVisitor
+> public class Consultant : Employee
+> {
+>     public decimal ProjectFee { get; set; }
+> }
+>
+> // ============================================
+> // 已有 Visitor 无需修改即可编译
+> // 但调用 Consultant.Accept(taxVisitor) 会抛 RuntimeBinderException
+> // 修复：在 IEmployeeVisitor 中添加 Visit(Consultant) + 各 Visitor 实现对应方法
+> // ============================================
+>
+> // 测试：
+> // var employees = new List<Employee>
+> // {
+> //     new FullTimeEmployee { Name = "Alice", MonthlySalary = 10000m },
+> //     new Contractor { Name = "Charlie", HourlyRate = 200m, HoursWorked = 80 },
+> //     new Consultant { Name = "Eve", ProjectFee = 50000m }
+> // };
+> //
+> // var taxVisitor = new TaxVisitor();
+> // foreach (var emp in employees)
+> // {
+> //     try { emp.Accept(taxVisitor); }
+> //     catch (Microsoft.CSharp.RuntimeBinder.RuntimeBinderException ex)
+> //     {
+> //         Console.WriteLine($"Warning: No Visit method for {emp.GetType().Name}");
+> //     }
+> // }
+> ```
+>
+> **要点总结：**
+>
+> - **便利性**：`dynamic` 免除接口修改——新元素类型无需改动 `IEmployeeVisitor` 就能编译；所有元素继承同一个 `Employee` 基类，`Accept` 只写一次
+> - **风险**：遗漏新元素类型不会产生编译错误，编译期安全完全丧失——只能在运行时发现 `RuntimeBinderException`，且 `dynamic` 破坏 IntelliSense 和重构工具的支持
+> - **性能代价**：`dynamic` 调用涉及 DLR（Dynamic Language Runtime）缓存和运行时绑定，比虚方法分派慢数十倍——在循环遍历大量元素时可能成为瓶颈
+> - **决策**：元素类型真的频繁变化（如插件系统）且编译期安全不关键 → `dynamic` 可行；否则经典 Visitor 的编译期保证更有价值
+
+> [!tip]- 练习 3 参考答案：模式匹配替代 Visitor（可选挑战）
+> ```csharp
+> // ============================================
+> // 1. 用 record 定义员工类型（不需要接口和 Accept）
+> // ============================================
+> public record FullTimeEmployeeRecord(string Name, decimal MonthlySalary);
+> public record ContractorRecord(string Name, decimal HourlyRate, int HoursWorked);
+> public record InternRecord(string Name, decimal Stipend);
+>
+> // ============================================
+> // 2. 静态方法 — 每种操作一个方法
+> // ============================================
+> public static class PayrollCalculator
+> {
+>     public static decimal CalculateGrossPay(object emp) => emp switch
+>     {
+>         FullTimeEmployeeRecord f => f.MonthlySalary,
+>         ContractorRecord c => c.HourlyRate * c.HoursWorked,
+>         InternRecord i => i.Stipend,
+>         _ => throw new ArgumentException($"Unknown type: {emp.GetType()}")
+>     };
+>
+>     public static decimal CalculateTax(object emp) => emp switch
+>     {
+>         FullTimeEmployeeRecord f => f.MonthlySalary * 0.25m,
+>         ContractorRecord c => c.HourlyRate * c.HoursWorked * 0.15m,
+>         InternRecord i => i.Stipend >= 5000 ? i.Stipend * 0.10m : 0,
+>         _ => throw new ArgumentException($"Unknown type: {emp.GetType()}")
+>     };
+>
+>     public static decimal CalculateTakeHomePay(object emp)
+>         => CalculateGrossPay(emp) - CalculateTax(emp);
+>
+>     // 3. 批量处理
+>     public static void ProcessPayroll(List<object> employees)
+>     {
+>         decimal totalGross = 0, totalTax = 0, totalTakeHome = 0;
+>         foreach (var emp in employees)
+>         {
+>             var gross = CalculateGrossPay(emp);
+>             var tax = CalculateTax(emp);
+>             var takeHome = gross - tax;
+>             totalGross += gross; totalTax += tax; totalTakeHome += takeHome;
+>
+>             var name = emp switch
+>             {
+>                 FullTimeEmployeeRecord f => f.Name,
+>                 ContractorRecord c => c.Name,
+>                 InternRecord i => i.Name,
+>                 _ => "Unknown"
+>             };
+>             Console.WriteLine($"  {name}: Gross={gross:C}, Tax={tax:C}, TakeHome={takeHome:C}");
+>         }
+>         Console.WriteLine($"\nTotals: Gross={totalGross:C}, Tax={totalTax:C}, TakeHome={totalTakeHome:C}");
+>     }
+> }
+> ```
+>
+> **分析报告：**
+>
+> | 场景 | Visitor 模式 | 模式匹配 |
+> |:-----|:------------|:--------|
+> | **添加第 4 种操作（如社保扣款）** | 新建 `SocialSecurityVisitor` 类，实现 `IEmployeeVisitor`，所有员工类型的方法必须一一实现。不改任何现有代码。**改动量：+1 新文件** | 在 `PayrollCalculator` 中新增一个 `CalculateSocialSecurity(object emp)` 静态方法，必须覆盖所有员工类型的 `switch` 分支。不改现有方法。**改动量：+1 方法** |
+> | **添加第 4 种员工类型** | 在 `IEmployeeVisitor` 接口中添加 `Visit(NewType)` → **所有现有 Visitor 实现编译失败**，必须逐个添加新方法。**改动量：改 N 个 Visitor** | 在每个 `Calculate*` 的 `switch` 表达式中添加新分支。编译器可提示遗漏（开启警告），但不强制。**改动量：改 M 个方法** |
+>
+> **在 C# 中，如果员工类型会频繁新增但操作数量稳定 → 应选模式匹配**，理由：
+>
+> 1. **开闭方向匹配**：Visitor 对"新增操作"友好（开），对"新增类型"封闭（闭）。类型频繁变化时，Visitor 的封闭方向刚好是你要扩展的方向——最糟糕的匹配
+> 2. **C# 模式匹配的遗漏检测**：开启 `<WarningsAsErrors>CS8509</WarningsAsErrors>` 后，`switch` 表达式未穷举所有类型时会产生编译警告（可升级为错误），部分弥补编译期检查
+> 3. **更少的代码量**：不需要 `IVisitor` / `IElement` 接口和双分派样板，`record` 类型 + 模式匹配的总代码量显著更少
+>
+> 反过来，如果**操作数量频繁变化但员工类型稳定**（如文档处理系统——Heading/Paragraph/Table 几十年不变，但不断需要新导出格式），Visitor 更优。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

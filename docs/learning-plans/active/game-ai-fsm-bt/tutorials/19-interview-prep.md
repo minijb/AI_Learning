@@ -871,6 +871,244 @@ public struct Vector3
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 以下是八道题的结构化回答要点（3 分钟限时版），可作为自评对照：
+>
+> **Q1: "Design an AI system for an open-world enemy NPC."**
+> - 开头（30s）：先澄清约束——游戏类型、NPC 数、行为复杂度
+> - 架构图（60s）：感知层（Vision/Hearing/Damage Events）→ Blackboard → 决策层（Root Selector: Dead/Combat/Alerted/Idle）→ 移动层（NavMesh+Steering）→ 动画层（Anim FSM）
+> - 关键决策（60s）：为什么 BT 而非 FSM（30+ 行为时的线性叠加优势）；为什么感知与决策分离（缓存感知结果，避免重复射线检测）；为什么移动与决策分离（NavMesh 通用性，不与特定行为耦合）
+> - 扩展（30s）：小队 AI 通过 Blackboard Squad 域实现；LOD 200m 外简化 BT 每 10 帧 tick
+>
+> **Q2: "How would you implement squad AI?"**
+> - 三种模型（30s）：Shared Blackboard（L4D, 松耦合 2-4 人）、Coordinator BT（Halo 2/3, 紧耦合 3-6 人）、Hierarchical Planning（全面战争, 大规模 10+ 人）
+> - Halo 2 深挖（60s）：Encounter Director → Squad Leader 分配角色（Suppressor/Flanker/Grenadier）→ 个体 BT 执行。核心原则：角色分配与角色执行分离
+> - 通信成本（30s）：Shared Blackboard 成本近乎零但缺意图传递；时序协调需显式信号
+>
+> **Q3: "100 BT-driven agents — performance cost? Optimization?"**
+> - 性能构成（30s）：树遍历 30-300μs + 感知查询 600μs + NavMesh 1500μs ≈ 2-3ms
+> - 优化策略（60s）：频率 LOD（0-30m 每帧 / 30-80m 每 3 帧 / 80m+ 每 10 帧）→ 最大收益；事件驱动 → 中等收益；条件缓存 → 小收益；时间分片 → RTS 专属
+> - 多线程（30s）：Agent 级并行安全，job system 中决策逻辑可并行，Blackboard 写入需 barrier
+>
+> **Q4: "FSM vs BT — fighting game vs RTS?"**
+> - 格斗 → FSM（45s）：帧级精确性、O(1) 开销 < 1μs、确定性转移对 input buffer 至关重要、8-15 状态足够
+> - RTS → 混合（75s）：战略层 Utility AI/GOAP（科技选择是多维连续权衡）、战术层简单 FSM/微型 BT（3-5 种行为/单位）、执行层群体寻路+编队
+>
+> **Q5: "How does UE's Behavior Tree system work?"**
+> - UBehaviorTreeComponent（30s）：CurrentTree（DataAsset）、InstanceStack[3]、ActiveNode（缓存指针）、SearchData
+> - Node Memory（30s）：per-instance 分配，100 agent 共享节点结构但独立 Memory；GetNodeMemorySize 首次激活分配
+> - Tick 流程（60s）：AIController::Tick → Manager::TickActiveTree → CompositeNode::ExecuteChild 遍历 → Decorator::CalculateRawConditionValue → TaskNode::ExecuteTask → 返回值向上传播。ActiveNode 缓存跳过无变化重评估
+>
+> **Q6: "Design an AI Director for Left 4 Dead-style game."**
+> - 核心职责（30s）：Pacing（节奏控制）、Resource Management（资源管理）、Tension Curve（紧张曲线）
+> - 架构（60s）：Player State Monitor → Tension Calculator（0-1）→ Enemy Spawner + Item Placer + Music/Dialog。紧张模型：当前紧张度 vs 目标紧张度 + 衰减 + 上次高峰时间
+> - 扩展（30s）：动态难度调整——基于玩家表现调整紧张曲线斜率
+>
+> **Q7: "How to make AI fun to fight, not frustrating?"**
+> - 核心（30s）：可读性（telegraph 窗口、攻击前摇）、可学习性（固定模式但有变化）、公平感（AI 有局限——有限的感知、可预测的失误率）
+> - 技术手段（60s）：DOOM 的"AI 被设计为可被击败"——敌人投掷物有轨迹、攻击有明显延迟。F.E.A.R. 的"故意不完美的感知"
+> - 反例（30s）：Hitman 的 AI 如果不遵循视线规则——玩家失去学习基础 → 挫败感
+>
+> **Q8: "Explain HSM — when over flat FSM?"**
+> - 定义（30s）：HSM = 状态可以嵌套，子状态继承父状态的转移规则。每个父状态形成"上下文"，内部包含一组子状态
+> - 使用条件（60s）：多个状态共享相同转移（如所有战斗状态都需要"低血量 → 撤退"——定义在父状态一次）→ 维护成本降低 O(N)。经典案例：Boss 的 Phase1/Phase2，每阶段 4-5 个子状态，阶段切换就是父状态转移
+> - 性能（30s）：HSM 在当前活跃的父状态内进行状态评估——搜索范围从所有状态缩小到当前父状态 + 其子状态
+>
+> **自评标准**：如果超过 4 题能在 3 分钟内覆盖框架要点，准备已达标。未达标题应针对性练习 2-3 轮计时回答。
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> // 30 分钟限时编码参考实现 —— C# 完整 BT 框架 + 敌人 AI 树
+> using System;
+> using System.Collections.Generic;
+>
+> // === BTResult 枚举 ===
+> public enum BTResult { Success, Failure, Running }
+>
+> // === Blackboard ===
+> public class Blackboard
+> {
+>     private readonly Dictionary<string, object> _data = new();
+>     public void Set<T>(string key, T value) => _data[key] = value;
+>     public T Get<T>(string key) => _data.TryGetValue(key, out var v) ? (T)v : default;
+>     public bool Has(string key) => _data.ContainsKey(key);
+> }
+>
+> // === BTNode 抽象基类 ===
+> public abstract class BTNode
+> {
+>     public string Name { get; set; } = "Unnamed";
+>     // OnEnter/OnExit 用于初始化和清理——这里简化省略
+>     public abstract BTResult Tick(Blackboard bb, float dt);
+> }
+>
+> // === Selector（优先级选择）===
+> public class Selector : BTNode
+> {
+>     private readonly List<BTNode> _children;
+>     private int _runningIndex = -1; // 上次返回 Running 的子节点索引
+>     public Selector(string name, params BTNode[] children) {
+>         Name = name; _children = new List<BTNode>(children);
+>     }
+>     public override BTResult Tick(Blackboard bb, float dt) {
+>         int start = _runningIndex >= 0 ? _runningIndex : 0;
+>         for (int i = start; i < _children.Count; i++) {
+>             var result = _children[i].Tick(bb, dt);
+>             if (result == BTResult.Success) { _runningIndex = -1; return BTResult.Success; }
+>             if (result == BTResult.Running) { _runningIndex = i; return BTResult.Running; }
+>             // Failure: continue to next child
+>         }
+>         _runningIndex = -1;
+>         return BTResult.Failure;
+>     }
+> }
+>
+> // === Sequence（顺序执行）===
+> public class Sequence : BTNode
+> {
+>     private readonly List<BTNode> _children;
+>     private int _runningIndex = -1;
+>     public Sequence(string name, params BTNode[] children) {
+>         Name = name; _children = new List<BTNode>(children);
+>     }
+>     public override BTResult Tick(Blackboard bb, float dt) {
+>         int start = _runningIndex >= 0 ? _runningIndex : 0;
+>         for (int i = start; i < _children.Count; i++) {
+>             var result = _children[i].Tick(bb, dt);
+>             if (result == BTResult.Failure) { _runningIndex = -1; return BTResult.Failure; }
+>             if (result == BTResult.Running) { _runningIndex = i; return BTResult.Running; }
+>             // Success: continue to next child
+>         }
+>         _runningIndex = -1;
+>         return BTResult.Success;
+>     }
+> }
+>
+> // === Condition 节点 ===
+> public class Condition : BTNode
+> {
+>     private readonly Func<Blackboard, bool> _check;
+>     public Condition(string name, Func<Blackboard, bool> check) { Name = name; _check = check; }
+>     public override BTResult Tick(Blackboard bb, float dt) =>
+>         _check(bb) ? BTResult.Success : BTResult.Failure;
+> }
+>
+> // === Action 节点 ===
+> public class Action : BTNode
+> {
+>     private readonly Func<Blackboard, float, BTResult> _execute;
+>     public Action(string name, Func<Blackboard, float, BTResult> execute) { Name = name; _execute = execute; }
+>     public override BTResult Tick(Blackboard bb, float dt) => _execute(bb, dt);
+> }
+>
+> // === 组装完整敌人 AI 树 ===
+> // 优先级：Dead > Flee > Attack > Chase > Patrol
+> public static class EnemyBTFactory
+> {
+>     public static Selector Build()
+>     {
+>         return new Selector("Root",
+>             // 优先级 1: 死亡 → 等待
+>             new Sequence("Dead",
+>                 new Condition("IsDead", bb => bb.Get<float>("health") <= 0),
+>                 new Action("PlayDeath", (bb, dt) => { /* 播放死亡动画 */ return BTResult.Success; })
+>             ),
+>             // 优先级 2: 低血量撤退
+>             new Sequence("Flee",
+>                 new Condition("HealthLow", bb =>
+>                     bb.Get<float>("health") / bb.Get<float>("maxHealth") < 0.3f),
+>                 new Action("RunAway", (bb, dt) => {
+>                     // 朝远离玩家方向移动
+>                     bb.Set("moveTarget", "away_from_player");
+>                     return BTResult.Running; // 持续逃跑直到安全
+>                 })
+>             ),
+>             // 优先级 3: 在攻击范围内 → 攻击
+>             new Sequence("AttackSeq",
+>                 new Condition("HasTarget", bb => bb.Has("target")),
+>                 new Condition("InRange", bb =>
+>                     bb.Get<float>("distToTarget") < bb.Get<float>("attackRange")),
+>                 new Action("Attack", (bb, dt) => {
+>                     float cd = bb.Get<float>("attackCooldown");
+>                     if (cd > 0) { bb.Set("attackCooldown", cd - dt); return BTResult.Running; }
+>                     // 执行攻击
+>                     bb.Set("attackCooldown", 1.0f); // 1 秒冷却
+>                     return BTResult.Success;
+>                 })
+>             ),
+>             // 优先级 4: 有目标 → 追击
+>             new Sequence("Chase",
+>                 new Condition("HasTarget", bb => bb.Has("target")),
+>                 new Action("MoveToTarget", (bb, dt) => {
+>                     bb.Set("moveTarget", bb.Get<object>("target"));
+>                     return BTResult.Running;
+>                 })
+>             ),
+>             // 优先级 5: 默认 → 巡逻
+>             new Action("Patrol", (bb, dt) => {
+>                 int idx = bb.Get<int>("patrolIndex");
+>                 var waypoints = bb.Get<List<object>>("waypoints");
+>                 // 移动到 waypoints[idx]，到达后 idx++
+>                 return BTResult.Running;
+>             })
+>         );
+>     }
+> }
+> ```
+>
+> **自检清单对照**：
+> - `_runningIndex` 恢复逻辑 ✓：Selector resume 从 `_runningIndex` 开始（非 0），Sequence 同理
+> - 优先级顺序 ✓：Dead > Flee > Attack > Chase > Patrol（从左到右 Selector 顺序）
+> - Condition 不可能返回 Running ✓：只返回 Success/Failure
+> - Action 的 Running 下次 tick 正确恢复 ✓：Selector 保存 `_runningIndex`，下次直接 resume 该节点
+
+> [!tip]- 练习 3 参考答案（可选）
+> **潜行动作游戏 AI 系统设计——45 分钟模拟答案框架**
+>
+> **0-5 分钟：需求澄清**
+> - 每区域守卫数？10-15 个巡逻守卫 + 2-3 个精英守卫（有特殊行为）
+> - 警觉等级：Patrol → Suspicious → Alert → Combat → Search
+> - 平民能否报告？是——需要 Witness System（平民看到异常 → 触发 Alert）
+> - 性能预算：30fps，200 NPC 总预算 AI < 4ms
+>
+> **5-15 分钟：架构图**
+> ```
+> Perception Layer (服务器端)
+>   ├── Vision Cone (角度 120°, 距离 25m Guards / 15m Civilians)
+>   ├── Hearing (脚步半径 5-10m, 枪声 50m+, 警报铃 全局)
+>   └── Witness System (平民看到异常 → 路径搜索最近的守卫 → 触发报告)
+>           ↓
+> Blackboard (per-NPC)
+>   ├── Perception.HasTarget, Perception.TargetPos, Perception.AlertLevel
+>   ├── Combat.Health, Combat.WeaponType
+>   └── Movement.CurrentWaypoint, Movement.PatrolPath
+>           ↓
+> Decision Layer
+>   ├── Guard BT: Dead → Stunned → Combat → Alert → Investigate → Patrol
+>   ├── Civilian BT: Dead → Flee → Report → Idle(Schedule) → Wander
+>   └── AlertSystem: 事件总线 + 空间衰减传播
+>           ↓
+> Execution Layer: NavMesh Pathfinding + Animation FSM + Cover System
+> ```
+>
+> **15-25 分钟：Alert System 深挖**
+> - 一个守卫发现异常 → 发射 `AlertEvent` 到事件总线
+> - 事件包含：位置、威胁等级、类型（视觉/听觉/报告）
+> - 传播规则：半径内守卫收到事件 → 各自的 `OnAlert` Decorator 触发 Abort → 进入 Investigate
+> - 空间衰减：0-10m 立即反应，10-30m 延迟 1-2 秒（模拟信息传播时间），30m+ 不传播
+> - 精英守卫作为"Alert Amplifier"——收到事件后广播扩大覆盖范围
+>
+> **25-35 分钟：Tradeoff 讨论**
+> - 为什么 BT 而非 FSM：15+ 行为 × 动态中断 = FSM 状态爆炸。BT 的每帧重评估天然处理中断
+> - 为什么不用 GOAP：守卫行为应可预测——设计师精确控制巡逻路线和 Alert 流程。GOAP 的 emergent 行为是 bug 来源
+> - 为什么 Alert 用事件总线而非 Shared Blackboard：解耦——守卫不需要"知道"其他守卫的存在。事件总线支持空间衰减和过滤
+>
+> **35-45 分钟：追问回答**
+> - 性能：200 NPC → 频率 LOD（0-20m 每帧、20-60m 每 3 帧、60m+ 每 10 帧）。平民默认每 5 帧。AI Budget < 3ms
+> - LOD 切换过渡：远处守卫变近时，先 FlushNetDormancy 同步 → 再恢复全频 BT。切换时保留 Blackboard 状态（不重置巡逻索引）
+> - 多人网络：AI 全部在服务器运行——客户端只接收位置/动画/Alert 状态复制。Guard BT 不在客户端存在
 ## 4. 扩展阅读
 
 ### 面试准备资源

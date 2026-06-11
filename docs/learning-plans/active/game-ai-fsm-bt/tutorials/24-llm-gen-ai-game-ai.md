@@ -1180,6 +1180,613 @@ void ULLMQueryDecorator::OnLLMResponse(
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1：设计 LLM 增强 NPC 系统的架构
+>
+> **Q1: 本地 vs API — 哪些功能本地运行，哪些调用远程 API？**
+>
+> | 功能 | 部署方式 | 理由 |
+> |------|----------|------|
+> | 关键 NPC 对话生成（主 quest giver） | **远程 API（GPT-4o/Claude）** | 需要最强语言能力、情感表达丰富度；调用频率低（每次对话 1-3 次 API 调用），成本可控 |
+> | 非关键 NPC 闲聊（路人、商人） | **本地小模型（Llama 3.2 1B/3B，量化 INT4）** | 高频调用（50-100 NPC 可能同时对话），对话内容简单（问候、指路、交易），本地推理延迟 ~10-30ms，无 API 成本 |
+> | 战斗中的策略决策（"NPC 应该包抄还是撤退？"） | **本地模型或规则系统，用远程 API 做低频审核** | 延迟敏感（决策必须在 100ms 内完成）。主体逻辑用本地 3B 模型或纯规则；每 30 秒用远程 API 审核本地决策质量 |
+> | BT 初始生成（关卡加载时） | **远程 API** | 离线/加载时操作，无实时性要求。设计师用自然语言描述行为 → LLM 生成 BT JSON → 人工审核 → 打包进构建 |
+> | 情感分析（检测玩家语气） | **本地小模型** | 高频（每次对话实时分析），分类任务（愤怒/友好/中性），1-3B 模型足够 |
+> | 玩家行为分析（难度自适应） | **远程 API（每 30-60 秒）** | 需要复杂推理（综合多维度数据），低频调用，成本可控 |
+>
+> **隐私约束**：任何包含玩家 PII（用户名、聊天记录、语音数据）的请求**必须走本地模型**或经过匿名化处理后再发送到远程 API。
+>
+> **Q2: Fallback 策略 — 画出决策树**
+>
+> ```
+> LLM API 调用超时/失败
+>   ├─ 检查是否有缓存的上次结果？
+>   │   ├─ 有 → 缓存是否过期？（对话类 > 30 秒过期，策略类 > 15 秒过期）
+>   │   │   ├─ 未过期 → 复用缓存结果，标记 `fromCache=true`
+>   │   │   └─ 已过期 → 执行硬编码默认行为
+>   │   └─ 无缓存 → 执行硬编码默认行为
+>   │
+>   └─ 硬编码默认行为（按 NPC 类型不同）：
+>       ├─ 战斗 NPC → "激进追击" BT（示例 B 的 `BuildFallbackBT()`）
+>       ├─ 对话 NPC → 播放预设台词 "Hmm, let me think..." + 通用回应
+>       ├─ 守卫 NPC → 继续当前巡逻路径
+>       └─ 商人 NPC → 显示固定价格菜单（无讨价还价对话）
+> ```
+>
+> **"过期"的量化定义**：
+> - **对话上下文缓存**：30 秒。超过 30 秒，世界状态（玩家位置、NPC 情绪）已显著改变，复用旧对话会产生不连贯体验。
+> - **策略决策缓存**：15 秒。战斗节奏快，超过 15 秒的上次策略建议（如"包抄"）可能已经不适用（敌人已移动）。
+> - **BT 结构缓存**：整个 session 有效。LLM 生成的 BT JSON 是"策略模板"而非"实时决策"，在 NPC 存活期间可以一直复用。
+>
+> **Q3: 确保 NPC 仍然好玩 — 三个设计约束**
+>
+> 1. **可读行为窗口约束**："战斗中，任何攻击行为必须有一个 ≥ 2 秒的 telegraph（前摇）窗口。LLM 可以决定使用哪种攻击，但不能缩短 telegraph 窗口的最小值。" ——这保证玩家始终有反应时间，不会出现"LLM 突然决定瞬发攻击"的不公平情况。参考 Halo 精英的护盾冲锋设计——可预测的节奏是 mastery 的前提。
+>
+> 2. **难度边界约束**："LLM 调整的参数必须在设计师预设的 min-max 范围内。例如：敌人精准度 ∈ [0.3, 0.8]，反应时间 ∈ [200ms, 800ms]，巡逻速度 ∈ [0.5x, 1.5x]。LLM 不能将精准度设为 0.99（自瞄），也不能将反应时间设为 0ms（预知输入）。" ——这保证 LLM 的"自适应难度"不会突破设计师意图的体验边界。参考教程中"LLM 内部没有难度 knob"的论述——这个约束就是给 LLM 装 knob。
+>
+> 3. **行为多样性上限约束**："同一个 NPC 原型（如'精英守卫'）在单次玩家 session 中，LLM 最多使用 3 种不同的行为变体。超过 3 种 → 复用已有变体中最近最少使用的一个。" ——这确保玩家在 encounter 中能学习 NPC 的模式（"这个精英只会侧闪、重击、护盾"），而不会因为 LLM 每次都发明新行为导致无法建立 mastery。参考 Doom Eternal 的"愚蠢但可预测"设计哲学。
+>
+> **Q4: 数据流图 — LLM ↔ Blackboard ↔ BT**
+>
+> ```
+> ┌─────────────────────────────────────────────────────────────────┐
+> │                       数据流图（标注频率）                        │
+> ├─────────────────────────────────────────────────────────────────┤
+> │                                                                  │
+> │  ① Blackboard ──► LLM  (生成 BT JSON)                           │
+> │     频率: 关卡加载时 / NPC 首次生成时（一次性）                    │
+> │     内容: NPC 角色标签、已注册动作列表、Blackboard key 列表       │
+> │     输出: BT JSON 定义                                           │
+> │                                                                  │
+> │  ② Blackboard ──► LLM  (策略决策)                               │
+> │     频率: 每 5-10 秒                                             │
+> │     内容: HealthPercent, PlayerDistance, PlayerVisible,         │
+> │           IsUnderAttack, AlliesNearby, CurrentGoal               │
+> │     输出: StrategicGoal (Attack/Flank/Retreat/Patrol/Hold)       │
+> │                                                                  │
+> │  ③ LLM ──► Blackboard  (写入策略结果)                           │
+> │     频率: LLM 响应到达时（事件驱动，每 5-10 秒一次）              │
+> │     内容: LLMRecommendedTactic (string),                        │
+> │           ParameterOverrides (dict: 视野角度、精准度等)           │
+> │                                                                  │
+> │  ④ Blackboard ──► BT  (战术层读取)                              │
+> │     频率: 每帧 (16ms @ 60fps)                                    │
+> │     内容: 所有 Blackboard 键值 — BT 的条件节点和动作节点读这些值   │
+> │     ★ BT 不知道 LLM 的存在 — 它只是读 Blackboard                │
+> │                                                                  │
+> │  ⑤ BT ──► Blackboard  (战术层写入)                              │
+> │     频率: 每帧（动作节点执行时写入）                               │
+> │     内容: 更新 NPC 状态（当前位置、当前动作、武器状态等）          │
+> │                                                                  │
+> │  ⑥ 游戏世界 ──► Blackboard  (传感器更新)                        │
+> │     频率: 每帧                                                    │
+> │     内容: PlayerDistance, PlayerVisible, IsUnderAttack,          │
+> │           HealthPercent, AmmoCount                               │
+> │                                                                  │
+> └─────────────────────────────────────────────────────────────────┘
+>
+> **关键架构原则**：
+> - LLM 从不直接控制 BT — 只通过 Blackboard 间接影响。BT 的条件节点检查 Blackboard 上的 `LLMRecommendedTactic` 值来选择子树。
+> - LLM 的写入和 BT 的读取是异步解耦的：LLM 写入发生在"策略周期边界"（每 5-10 秒），BT 读取发生在"每帧"。
+> - Blackboard 是**唯一的状态共享点** — 没有 LLM ↔ BT 的直接通道。这使得两个系统可以独立测试：BT 可以用 mock Blackboard 值测试，LLM 可以用录制的 Blackboard 快照测试。
+
+> [!tip]- 练习 2：实现 BT-from-text pipeline
+>
+> **Q1: 为三个游戏类型的 NPC 编写 system prompt**
+>
+> **a) 潜行游戏敌人守卫**
+>
+> ```
+> You are a Behavior Tree generator for a stealth game. Given a natural language
+> description of a guard NPC's behavior, output a JSON BT definition.
+>
+> Available Blackboard keys:
+>   PlayerVisible (float: 0=hidden, 1=visible), PlayerDistance (float: meters),
+>   HeardSuspiciousSound (float: 0/1), SoundLocation (Vector3),
+>   AlertLevel (float: 0=calm..1=combat), HasBackupCalled (float: 0/1),
+>   HealthPercent (float: 0-100), LastKnownPlayerPos (Vector3)
+>
+> Available Actions (reference EXACTLY by name):
+> - PatrolWaypoints: Follow patrol route. config.waypoints: [int, ...]
+> - InvestigateSound: Move to HeardSoundLocation, search area. Returns Success when search complete.
+> - CallBackup: Trigger alarm, summon nearby guards. Returns Success once called.
+> - ChaseLastKnownPos: Move to LastKnownPlayerPos aggressively.
+> - SearchArea: Systematic search of current room/zone.
+> - ReturnToPatrol: Resume patrol from nearest waypoint.
+>
+> Behavioral constraints:
+> - Guards must NOT immediately know player location on first suspicion —
+>   they investigate the sound source first, then escalate.
+> - AlertLevel transitions: 0→0.3 (heard sound) → 0.6 (saw player briefly) → 1.0 (combat).
+>   BT structure should reflect these escalation stages.
+> - If player not seen for 15+ seconds while searching, return to patrol (don't stay alerted forever).
+>
+> Output ONLY the JSON object, no markdown fences, no explanatory text.
+> ```
+>
+> **b) RPG 商店店主**
+>
+> ```
+> You are a Behavior Tree generator for an RPG. Given a natural language description
+> of a shopkeeper NPC's behavior, output a JSON BT definition.
+>
+> Available Blackboard keys:
+>   PlayerNearby (float: 0/1), PlayerInShop (float: 0/1),
+>   PlayerStealing (float: 0/1), PlayerReputation (float: -1..1),
+>   ShopOpenHours (float: 0/1), StoreGold (float),
+>   PlayerThreatLevel (float: 0=none..1=weapon drawn)
+>
+> Available Actions (reference EXACTLY by name):
+> - StandBehindCounter: Move to counter position, idle animation.
+> - OpenTradeMenu: Present buy/sell UI to player.
+> - GreetPlayer: Play greeting dialogue line, wave animation.
+> - WarnPlayer: "Don't touch that!" — verbal warning with stern animation.
+> - CallGuards: Alert town guards, mark player as hostile.
+> - CloseShop: Lock door, hide behind counter.
+> - ResumeIdle: Return to idle animation loop.
+>
+> Behavioral constraints:
+> - Shopkeeper only trades when PlayerInShop=1 AND ShopOpenHours=1.
+> - When PlayerStealing=1: first WarnPlayer, if persists → CallGuards.
+> - If PlayerThreatLevel > 0.5 (weapon drawn): immediately CloseShop and CallGuards.
+> - If PlayerReputation < -0.5: refuse trade ("I don't serve your kind here").
+> - Priority order: Survive > Protect goods > Trade > Idle.
+>
+> Output ONLY the JSON object, no markdown fences, no explanatory text.
+> ```
+>
+> **c) RTS 战斗单位**
+>
+> ```
+> You are a Behavior Tree generator for an RTS game. Given a natural language description
+> of a combat unit's AI behavior, output a JSON BT definition.
+>
+> Available Blackboard keys:
+>   MoveOrderActive (float: 0/1), MoveTargetPosition (Vector3),
+>   EnemyInRange (float: 0/1), EnemyDistance (float),
+>   EnemyType (string: "infantry"/"vehicle"/"air"),
+>   HealthPercent (float: 0-100), AmmoPercent (float: 0-100),
+>   HasRetreatPoint (float: 0/1), RetreatPosition (Vector3),
+>   FormationPosition (Vector3 — offset from squad center)
+>
+> Available Actions (reference EXACTLY by name):
+> - MoveToTarget: Navigate to MoveTargetPosition using pathfinding.
+> - AttackNearestEnemy: Acquire nearest enemy in range, fire weapon.
+> - MoveToFormation: Move to FormationPosition relative to squad.
+> - RetreatToPoint: Move to RetreatPosition (priority pathfinding).
+> - HoldPosition: Stop movement, engage enemies in range only.
+> - UseAbility: Activate unit special ability. config.abilityName: string.
+>
+> Behavioral constraints:
+> - Formation takes priority over attacking: if unit is > 10m from FormationPosition,
+>   move to formation first, then engage.
+> - Retreat condition: HealthPercent < 25% OR AmmoPercent < 10%.
+> - If retreating and no RetreatPosition assigned, fall back toward nearest friendly base.
+> - Target priority: counter unit type (e.g., anti-vehicle weapons vs vehicles first).
+> - Idle units should maintain formation, not wander.
+>
+> Output ONLY the JSON object, no markdown fences, no explanatory text.
+> ```
+>
+> **Q2: JSON Schema 扩展 — 添加 "Parallel" 节点**
+>
+> 扩展后的 `BTNodeDefinition`：
+>
+> ```csharp
+> [Serializable]
+> public class BTNodeDefinition
+> {
+>     public string name;
+>     public string type;  // + "Parallel"
+>     public string conditionKey;
+>     public string conditionOp;
+>     public float conditionValue;
+>     public List<BTNodeDefinition> children;
+>
+>     // --- Parallel node specific ---
+>     public string parallelPolicy; // "SuccessOnAll" | "SuccessOnOne" | "FailOnOne"
+> }
+> ```
+>
+> Parallel 节点的语义定义：
+>
+> | Policy | 成功条件 | 失败条件 | 典型场景 |
+> |--------|----------|----------|----------|
+> | `SuccessOnAll` | 所有子节点返回 Success | 任一子节点返回 Failure | "一边巡逻一边监听无线电" — 两个都成功才算完成 |
+> | `SuccessOnOne` | 任一子节点返回 Success | 所有子节点返回 Failure | "一边搜索一边射击" — 任一取得进展即可 |
+> | `FailOnOne` | 所有子节点成功（同 SuccessOnAll） | 任一子节点返回 Failure | "一边移动一边维持护盾" — 任一失败则整体失败（护盾破了不能继续冲） |
+>
+> 对应的 `ParallelNode` 运行时实现：
+>
+> ```csharp
+> public class ParallelNode : BTNode
+> {
+>     public enum Policy { SuccessOnAll, SuccessOnOne, FailOnOne }
+>
+>     private readonly List<BTNode> _children;
+>     private readonly Policy _policy;
+>
+>     public ParallelNode(string name, List<BTNode> children, Policy policy) : base(name)
+>     {
+>         _children = children;
+>         _policy = policy;
+>     }
+>
+>     public override BTStatus Tick(Blackboard bb)
+>     {
+>         int successCount = 0, failureCount = 0, runningCount = 0;
+>
+>         foreach (var child in _children)
+>         {
+>             switch (child.Tick(bb))
+>             {
+>                 case BTStatus.Success: successCount++; break;
+>                 case BTStatus.Failure: failureCount++; break;
+>                 case BTStatus.Running: runningCount++; break;
+>             }
+>         }
+>
+>         return _policy switch
+>         {
+>             Policy.SuccessOnAll => failureCount > 0 ? BTStatus.Failure
+>                 : successCount == _children.Count ? BTStatus.Success
+>                 : BTStatus.Running,
+>
+>             Policy.SuccessOnOne => successCount > 0 ? BTStatus.Success
+>                 : failureCount == _children.Count ? BTStatus.Failure
+>                 : BTStatus.Running,
+>
+>             Policy.FailOnOne => failureCount > 0 ? BTStatus.Failure
+>                 : successCount == _children.Count ? BTStatus.Success
+>                 : BTStatus.Running,
+>
+>             _ => BTStatus.Failure,
+>         };
+>     }
+> }
+> ```
+>
+> 在 `BTNodeFactory.Build()` 中注册：
+>
+> ```csharp
+> "Parallel" => new ParallelNode(def.name,
+>     BuildChildren(def.children),
+>     Enum.TryParse<ParallelNode.Policy>(def.parallelPolicy, out var policy) ? policy : ParallelNode.Policy.SuccessOnAll),
+> ```
+>
+> 更新 system prompt 中的 schema 说明：
+>
+> ```
+> 6. Parallel nodes: type="Parallel", must include "parallelPolicy" field.
+>    Valid policies: "SuccessOnAll", "SuccessOnOne", "FailOnOne".
+>    All children tick simultaneously each frame.
+> ```
+>
+> **Q3: 实现反序列化器的错误恢复**
+>
+> 修改 `BTNodeFactory.Build()` — 核心变化：
+> - `Validate()` 不再在顶层返回 false/true，而是返回 (bool, List<string> errors)
+> - `Build()` 处理无效节点时用 `FallbackIdle` 替代，而不是返回 null 整个树
+> - `BuildChildren()` 跳过无效子节点并记录日志
+>
+> ```csharp
+> // Fallback action — always succeeds, NPC "stands still doing nothing reasonable"
+> private static readonly BTNode FallbackIdleNode = new ActionNode("FallbackIdle", (bb) => {
+>     Debug.LogWarning("BTNodeFactory: executing FallbackIdle — a node was invalid.");
+>     return BTStatus.Success; // Don't block parent Sequence/Selector
+> });
+>
+> private static readonly List<string> SkippedNodes = new();
+>
+> public static BTNode Build(BTNodeDefinition def)
+> {
+>     var (valid, errors) = ValidateWithErrors(def);
+>
+>     if (errors.Count > 0)
+>     {
+>         foreach (var err in errors)
+>             Debug.LogError($"[BTNodeFactory] {err}");
+>     }
+>
+>     if (def == null)
+>     {
+>         Debug.LogError("[BTNodeFactory] Build() called with null definition. Substituting FallbackIdle.");
+>         return FallbackIdleNode;
+>     }
+>
+>     if (!valid)
+>     {
+>         Debug.LogWarning($"[BTNodeFactory] Node '{def.name ?? "(unnamed)"}' (type='{def.type ?? "(null)"}') has validation errors. Substituting FallbackIdle.");
+>         SkippedNodes.Add(def.name ?? "(unnamed)");
+>         return FallbackIdleNode;
+>     }
+>
+>     return def.type switch
+>     {
+>         "Selector" => new SelectorNode(def.name, BuildChildren(def.children)),
+>         "Sequence" => new SequenceNode(def.name, BuildChildren(def.children)),
+>         "Parallel" => new ParallelNode(def.name,
+>             BuildChildren(def.children),
+>             Enum.TryParse<ParallelNode.Policy>(def.parallelPolicy, out var p) ? p : ParallelNode.Policy.SuccessOnAll),
+>         "Condition" => BuildCondition(def),
+>         "Action" => BuildAction(def.name) ?? FallbackIdleNode,
+>         _ => {
+>             Debug.LogError($"[BTNodeFactory] Unknown node type '{def.type}' for node '{def.name}'. Substituting FallbackIdle.");
+>             SkippedNodes.Add(def.name);
+>             return FallbackIdleNode;
+>         }
+>     };
+> }
+>
+> private static List<BTNode> BuildChildren(List<BTNodeDefinition> children)
+> {
+>     var result = new List<BTNode>();
+>     if (children == null) return result;
+>     foreach (var child in children)
+>     {
+>         var node = Build(child); // Build() now NEVER returns null
+>         // Only skip if it's exactly FallbackIdle AND we want to prune
+>         // (always add — FallbackIdle.Success won't break parent)
+>         result.Add(node);
+>     }
+>     return result;
+> }
+>
+> private static (bool valid, List<string> errors) ValidateWithErrors(BTNodeDefinition def, int depth = 0)
+> {
+>     var errors = new List<string>();
+>     if (def == null) { errors.Add("Node definition is null"); return (false, errors); }
+>     if (depth > 10) { errors.Add($"Max depth exceeded at '{def.name}'"); return (false, errors); }
+>     if (string.IsNullOrEmpty(def.type)) { errors.Add($"Node '{def.name}' missing 'type'"); return (false, errors); }
+>
+>     if (def.type == "Action" && !ActionRegistry.ContainsKey(def.name))
+>     {
+>         errors.Add($"Unknown action '{def.name}' — LLM hallucinated or action not registered");
+>     }
+>
+>     if (def.type == "Condition" && string.IsNullOrEmpty(def.conditionKey))
+>     {
+>         errors.Add($"Condition node '{def.name}' missing 'conditionKey'");
+>     }
+>
+>     if (def.type == "Parallel" && string.IsNullOrEmpty(def.parallelPolicy))
+>     {
+>         errors.Add($"Parallel node '{def.name}' missing 'parallelPolicy' — defaulting to SuccessOnAll");
+>     }
+>
+>     if (def.children != null)
+>     {
+>         foreach (var child in def.children)
+>         {
+>             var (childValid, childErrors) = ValidateWithErrors(child, depth + 1);
+>             errors.AddRange(childErrors);
+>         }
+>     }
+>
+>     bool hasBlockingErrors = errors.Any(e =>
+>         e.Contains("missing 'type'") || e.Contains("Max depth exceeded") || e.Contains("is null"));
+>
+>     return (!hasBlockingErrors, errors);
+> }
+>
+> // Call after Build() to get the skipped node report
+> public static string GetBuildReport()
+> {
+>     if (SkippedNodes.Count == 0) return "BT built with no skipped nodes.";
+>     return $"BT built with {SkippedNodes.Count} substituted nodes: {string.Join(", ", SkippedNodes)}";
+> }
+> ```
+>
+> **关键设计决策**：
+> - `FallbackIdleNode` 返回 `Success` 而非 `Failure`——这样它在 Selector 中不会阻塞后续 sibling，在 Sequence 中不会让整个 sequence 失败。这是"优雅降级"的选择。
+> - `SkippedNodes` 是 static 列表——在生产代码中应该 per-build 而非 static，这里为了简洁。
+> - 只有**结构性错误**（null def、missing type、max depth）导致整体 invalid；**语义性错误**（unknown action、missing conditionKey）只导致该节点的替换，子节点的错误不影响父节点的有效性判断。
+>
+> **Q4: 用自然语言测试 pipeline**
+>
+> 输入：
+> > "The NPC should patrol normally. If it hears a suspicious sound, investigate the source. If it sees the player, pursue aggressively but keep at least 10 meters distance. If health below 40%, retreat to the nearest cover position and use a health item."
+>
+> 预期 LLM 输出的 JSON BT 结构（三次运行的差异分析）：
+>
+> | 运行 | Skill 检查差异 | 可能的问题 |
+> |------|---------------|-----------|
+> | Run 1 | 正确使用了 `HeardSuspiciousSound` 条件 | — |
+> | Run 2 | 将"keep 10m distance"实现为 `Condition(PlayerDistance, >, 10)` 包裹 `ChasePlayer` — 正确 | — |
+> | Run 3 | 可能将"use health item"映射到不存在的 action 名（如 `UseHealthPack` 而非已注册的 `MoveToNearestHealthPack`） | LLM hallucination！被 `ValidateWithErrors` 捕获并替换为 `FallbackIdle` |
+>
+> **Pipeline 的正确性保证链**：
+> 1. System prompt 强制 LLM 使用已知 action 名 → 降低但不消除 hallucination
+> 2. `ValidateWithErrors` 检查所有 action 引用和 conditionKey → 捕获剩余的 hallucination
+> 3. `Build()` 用 `FallbackIdle` 替换无效节点 → 保证 BT 始终可运行
+> 4. 日志记录所有被替换的节点 → 设计师可审查/修正
+> 5. 人工在此 pipeline 中的角色：审查 LLM 生成的 BT → 修正问题 → 保存为"已验证的 BT 模板" → 运行时加载模板而非实时生成
+
+> [!tip]- 练习 3（可选）：构建 AI Director
+>
+> **1. 玩家技能追踪结构体**
+>
+> ```csharp
+> [Serializable]
+> public struct PlayerSkillProfile
+> {
+>     public float killDeathRatio;          // 击杀/死亡比，最近 5 分钟窗口
+>     public float avgEncounterTimeSec;     // 平均每次遭遇消耗时间（秒）
+>     public string preferredWeapon;        // "rifle" | "shotgun" | "sniper" | "melee"
+>     public int[] last3Results;           // 0=输, 1=赢. e.g. [1, 0, 1]
+>     public float ammoReserveRatio;        // 弹药剩余: 0=空, 1=满
+>     public float healthPackUsageRate;     // 每分钟使用医疗包次数
+>
+>     // 派生指标（不存储，计算得出）
+>     public float RecentWinRate => last3Results.Average();
+>     public bool IsStruggling => RecentWinRate < 0.34f && ammoReserveRatio < 0.3f;
+>     public bool IsSpeedrunning => avgEncounterTimeSec < 15f && RecentWinRate > 0.66f;
+>     public bool IsMethodical => avgEncounterTimeSec > 45f && preferredWeapon == "sniper";
+> }
+> ```
+>
+> 更新频率：每 30 秒（如教程所述），或每次 encounter 结束后触发。
+>
+> **2. LLM Director Prompt**
+>
+> ```
+> You are an AI Director for a single-player action game. Your goal: maximize player
+> engagement by dynamically tuning enemy encounters based on player performance.
+>
+> Input: PlayerSkillProfile JSON.
+> Output: EncounterDefinition JSON with the following fields:
+>
+> {
+>   "enemyTypes": ["grunt", "sniper", "heavy", ...],
+>   "enemyCount": int (1-8),
+>   "aiStyle": "aggressive" | "conservative" | "squadTactics",
+>   "mapZone": "zone_a" | "zone_b" | "zone_c" | "boss_arena",
+>   "supplyPlacements": [{"item": "health"|"ammo"|"armor", "count": int}],
+>   "spawnTiming": "simultaneous" | "wave" (wave: spawn in 2-3 groups, 5s apart)
+> }
+>
+> Available zones and their difficulty:
+> - zone_a: open field, limited cover — EASY
+> - zone_b: urban ruins, many corners — MEDIUM
+> - zone_c: tight corridors, ambush points — HARD
+> - boss_arena: large open space with pillars — BOSS only
+>
+> Director rules:
+> 1. If player IsStruggling (recent loss rate > 66%): reduce enemyCount by 2, add +1 health supply,
+>    prefer "conservative" AI style. Goal: give player room to recover.
+> 2. If player IsSpeedrunning: increase enemyCount by 1-2, use "aggressive" AI,
+>    reduce supply placements. Goal: challenge the skilled player.
+> 3. If player prefers sniper: add more cover in zone selection, add flanking enemies
+>    to force repositioning. Goal: counter player's comfort zone.
+> 4. If last 3 encounters all won: escalate difficulty by one tier.
+>    If last 3 encounters all lost: de-escalate by one tier.
+> 5. BOSS encounters: only when player has won ≥ 2 of last 3 encounters AND
+>    ammoReserveRatio > 0.5. Never spawn boss when player is low on resources.
+>
+> Hard constraints (MUST NOT VIOLATE):
+> - enemyCount: MIN=1, MAX=8 (including all types combined)
+> - boss encounters: always preceded by a "warning event" (audio cue + text hint)
+> - total enemies per session: never exceed 100 (to manage session length)
+> - supply placements: MIN=1 item per encounter (player always gets something)
+>
+> Output ONLY the JSON object. No markdown, no explanation.
+> ```
+>
+> **3. BT 执行 — 参数化子树**
+>
+> BT 不动态生成节点——它使用预定义的子树，LLM 只提供参数：
+>
+> ```csharp
+> // Pre-defined behavior tree subtrees (each is a BTNode tree)
+> private static readonly Dictionary<string, Func<EncounterDefinition, BTNode>> EncounterBTs = new()
+> {
+>     ["standard_combat"] = (def) => new SelectorNode("CombatEncounter", new() {
+>         new SequenceNode("SpawnAndFight", new() {
+>             new ActionNode("SpawnEnemies", (bb) => {
+>                 SpawnEnemies(def.enemyTypes, def.enemyCount, def.spawnTiming);
+>                 return BTStatus.Success;
+>             }),
+>             new ActionNode("WaitForCombatEnd", (bb) => {
+>                 return AliveEnemyCount() > 0 ? BTStatus.Running : BTStatus.Success;
+>             }),
+>         }),
+>     }),
+>     ["boss_encounter"] = (def) => new SelectorNode("BossEncounter", new() {
+>         new SequenceNode("BossSequence", new() {
+>             new ActionNode("PlayWarningEvent", (bb) => {
+>                 TriggerBossWarning(); // Audio cue + text
+>                 return BTStatus.Success;
+>             }),
+>             new ActionNode("SpawnBoss", (bb) => {
+>                 SpawnEnemies(def.enemyTypes, 1, "simultaneous");
+>                 return BTStatus.Success;
+>             }),
+>             new ActionNode("BossFightLoop", (bb) => {
+>                 // Phase transitions, weak point exposure, etc.
+>                 return BossAlive() ? BTStatus.Running : BTStatus.Success;
+>             }),
+>         }),
+>     }),
+> };
+>
+> // Director selects the subtree and passes LLM-generated params
+> public void ExecuteEncounter(EncounterDefinition def)
+> {
+>     string btKey = def.enemyTypes.Contains("boss") ? "boss_encounter" : "standard_combat";
+>     var bt = EncounterBTs[btKey](def);  // BT structure is pre-defined, only params vary
+>
+>     // Apply AI style parameters (these go to Blackboard, BT condition nodes read them)
+>     _blackboard.Set("AI_Style", def.aiStyle);       // "aggressive" / "conservative" / "squadTactics"
+>     _blackboard.Set("EnemyCount", def.enemyCount);
+>     _blackboard.Set("EnemyTypes", string.Join(",", def.enemyTypes));
+>
+>     // Place supplies
+>     foreach (var supply in def.supplyPlacements)
+>         PlaceSupplyItem(supply.item, supply.count, GetSupplySpawnPoint(def.mapZone));
+>
+>     _currentEncounterBT = bt;
+> }
+> ```
+>
+> **4. Hard Constraints 定义**
+>
+> 在引擎端（非 LLM prompt 端）实施的硬约束——即 LLM 输出后的验证层：
+>
+> ```csharp
+> public static class DirectorConstraints
+> {
+>     public const int MAX_ENEMIES_PER_ENCOUNTER = 8;
+>     public const int MAX_ENEMIES_PER_SESSION = 100;
+>     public const int MIN_SUPPLIES_PER_ENCOUNTER = 1;
+>     public const int MIN_ENCOUNTERS_BEFORE_BOSS = 3;
+>
+>     public static (bool valid, List<string> violations) Validate(EncounterDefinition def,
+>         PlayerSkillProfile profile, SessionState session)
+>     {
+>         var violations = new List<string>();
+>
+>         if (def.enemyCount > MAX_ENEMIES_PER_ENCOUNTER)
+>             violations.Add($"enemyCount {def.enemyCount} exceeds max {MAX_ENEMIES_PER_ENCOUNTER}");
+>
+>         if (session.TotalEnemiesSpawned + def.enemyCount > MAX_ENEMIES_PER_SESSION)
+>             violations.Add($"Would exceed session enemy cap ({MAX_ENEMIES_PER_SESSION})");
+>
+>         if (def.supplyPlacements.Count == 0)
+>             violations.Add("No supply placements — player must get at least 1 item");
+>
+>         if (def.enemyTypes.Contains("boss"))
+>         {
+>             if (session.EncountersSinceLastBoss < MIN_ENCOUNTERS_BEFORE_BOSS)
+>                 violations.Add("Boss encounter too soon — minimum interval not met");
+>             if (profile.ammoReserveRatio < 0.5f)
+>                 violations.Add("Player low on ammo, boss encounter blocked");
+>         }
+>
+>         // Difficulty guardrails
+>         if (profile.IsStruggling && def.aiStyle == "aggressive")
+>             violations.Add("Player struggling but AI style is aggressive — should be conservative");
+>
+>         return (violations.Count == 0, violations);
+>     }
+>
+>     // If LLM output violates constraints, apply safe defaults
+>     public static EncounterDefinition ApplySafeDefaults(EncounterDefinition def)
+>     {
+>         def.enemyCount = Mathf.Clamp(def.enemyCount, 1, MAX_ENEMIES_PER_ENCOUNTER);
+>         if (def.supplyPlacements.Count == 0)
+>             def.supplyPlacements.Add(new SupplyPlacement { item = "health", count = 1 });
+>         return def;
+>     }
+> }
+> ```
+>
+> **关键设计点**：
+> - **约束在引擎端，不在 prompt 端**：LLM prompt 中的 "MUST NOT VIOLATE" 是建议性的（LLM 可能忽略）。真正的硬约束在 C# 代码中——`Validate()` 运行在 LLM 输出之后，BT 执行之前。
+> - **Safe defaults 而非拒绝**：当 LLM 输出违反约束时，不丢弃整个 encounter 设计，而是 clamp 到安全范围 + 补充缺失的 supply。这避免了"Director 不生成任何 encounter"的灾难性 failure。
+> - **Session state tracking**：`SessionState` 是跨 encounter 持久化的状态（已生成敌人总数、距上次 Boss 的 encounter 数），防止 LLM 在单次调用中看不到的全局违规。
+> - **Difficulty guardrails**：`IsStruggling` 和 `aiStyle` 的交叉验证是"软约束"——记录 violation 日志但不强制修改，让设计师决定是否启用自动修正。
 ## 4. 扩展阅读
 
 - **GDC 2026 AI Summit**：*"From Text to Gameplay: Generative AI's Influence on Behavior Trees"* — GDC Vault (gdcvault.com)。2026 年关于 LLM 与 BT 集成的核心演讲，包含至少三个工作室的生产案例研究。

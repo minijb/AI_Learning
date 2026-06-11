@@ -2088,6 +2088,413 @@ Delta (10% loss) | 15,200      | 152      | 2 (recovered)
 - 格子大小如何选择（太大 vs 太小）？
 - AOI 切换时是否可能短暂看到 "闪现"？如何缓解？
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 补全 ServerRPC 验证链——在教程 2.1 节的 `PlayerController` 中添加道具使用：
+>
+> ```csharp
+> // ===== 服务器端私有数据（客户端不可见） =====
+> // 这些不是 NetworkVariable——它们只存在于服务器内存中
+> private List<int> _serverInventory = new List<int> { 1, 2, 3 };
+> private Dictionary<int, float> _itemCooldowns = new Dictionary<int, float>();
+>
+> // ===== 客户端输入采集 =====
+> void Update() {
+>     if (!IsOwner) return;
+>
+>     if (Input.GetKeyDown(KeyCode.Alpha1))
+>         SendUseItemServerRpc(1);
+>     else if (Input.GetKeyDown(KeyCode.Alpha2))
+>         SendUseItemServerRpc(2);
+>     else if (Input.GetKeyDown(KeyCode.Alpha3))
+>         SendUseItemServerRpc(3);
+> }
+>
+> // ===== ServerRPC：服务器端执行 =====
+> [ServerRpc]
+> void SendUseItemServerRpc(int itemId) {
+>     // ① 验证道具 ID 合法性
+>     if (itemId < 1 || itemId > 3) {
+>         Debug.LogWarning($"[Anti-Cheat] Invalid itemId: {itemId}");
+>         return; // 静默拒绝
+>     }
+>
+>     // ② 验证玩家是否存活
+>     if (NetworkHealth.Value <= 0) {
+>         Debug.LogWarning($"[Anti-Cheat] Dead player using item");
+>         return;
+>     }
+>
+>     // ③ 验证背包中是否有该道具
+>     if (!_serverInventory.Contains(itemId)) {
+>         Debug.LogWarning($"[Anti-Cheat] Item {itemId} not in inventory");
+>         return;
+>     }
+>
+>     // ④ 验证冷却
+>     float serverTime = (float)Time.timeAsDouble;
+>     if (_itemCooldowns.TryGetValue(itemId, out float cooldownEnd)
+>         && serverTime < cooldownEnd) {
+>         Debug.LogWarning($"[Anti-Cheat] Item {itemId} on cooldown");
+>         return;
+>     }
+>
+>     // === 验证通过，执行效果 ===
+>     // 移除道具
+>     _serverInventory.Remove(itemId);
+>
+>     // 设置冷却（每个道具独立冷却 5 秒）
+>     _itemCooldowns[itemId] = serverTime + 5f;
+>
+>     // 应用效果（以道具 1=回血为例）
+>     if (itemId == 1) {
+>         NetworkHealth.Value = Mathf.Min(100f, NetworkHealth.Value + 30f);
+>     } else if (itemId == 2) {
+>         NetworkScore.Value += 10;
+>     }
+>     // itemId == 3 等其他效果...
+>
+>     // 通知所有客户端播放使用特效
+>     PlayItemEffectClientRpc(itemId);
+> }
+>
+> // ===== ClientRPC：在所有客户端播放特效 =====
+> [ClientRpc]
+> void PlayItemEffectClientRpc(int itemId) {
+>     // 根据 itemId 播放对应的粒子特效和音效（纯表现）
+>     Debug.Log($"Playing item effect: {itemId}");
+>     // Instantiate(effectPrefabs[itemId], transform.position, ...);
+> }
+> ```
+>
+> **关键安全设计**：
+> - **背包数据不暴露给客户端**：`_serverInventory` 是普通 `List<int>`，不是 `NetworkVariable`。客户端无法通过反编译/内存修改获知背包内容，也无法声称"我有道具 X"
+> - **时间用服务器时钟**：`Time.timeAsDouble`（或 `NetworkManager.ServerTime`）而非客户端传来的值——外挂可以伪造客户端时间戳
+> - **静默拒绝**：验证失败时不发 ClientRpc 不弹错误提示——外挂无法通过"试错"探测服务器的验证逻辑
+> - **逐个验证**：四条验证缺一不可。先检查代价最小的（ID 范围），再检查代价稍大的（背包搜索、冷却字典查询）
+> - **冷却字典在服务器端**：客户端无法绕过冷却，即使客户端快速连按，服务器也只执行未冷却的请求
+
+> [!tip]- 练习 2 参考答案
+> 增量压缩模拟器——三种模式对比：
+>
+> ```python
+> import random
+> from dataclasses import dataclass, field
+>
+> @dataclass
+> class Entity:
+>     id: int
+>     pos_x: float; pos_y: float; pos_z: float
+>     health: float
+>
+> @dataclass
+> class ServerState:
+>     entities: list[Entity]
+>     tick: int = 0
+>
+>     # 增量压缩专用：客户端已 Ack 的基线
+>     baseline: dict[int, Entity] = field(default_factory=dict)
+>     unacked_ticks: list[int] = field(default_factory=list)
+>
+>     def update(self):
+>         self.tick += 1
+>         for e in self.entities:
+>             e.pos_x += 1.0    # 匀速移动
+>             e.pos_y += 0.5
+>             if random.random() < 0.05:  # 5% 概率血量变化
+>                 e.health = max(0, e.health - random.uniform(1, 10))
+>
+>     # --- 三种序列化模式 ---
+>
+>     def serialize_full(self) -> bytes:
+>         """全量模式：发送所有实体的所有属性"""
+>         data = f"{self.tick}"
+>         for e in self.entities:
+>             data += f"|{e.id},{e.pos_x:.2f},{e.pos_y:.2f},"
+>             data += f"{e.pos_z:.2f},{e.health:.1f}"
+>         return data.encode()
+>
+>     def serialize_dirty(self, prev: "ServerState") -> bytes:
+>         """脏属性模式：只发送变化的属性"""
+>         data = f"{self.tick}"
+>         for e in self.entities:
+>             pe = next((x for x in prev.entities if x.id == e.id), None)
+>             if pe is None:
+>                 data += f"|Spawn,{e.id},..."
+>                 continue
+>             changes = []
+>             if abs(e.pos_x - pe.pos_x) > 0.001:
+>                 changes.append(f"px={e.pos_x:.2f}")
+>             if abs(e.health - pe.health) > 0.001:
+>                 changes.append(f"hp={e.health:.1f}")
+>             if changes:
+>                 data += f"|{e.id}:" + ",".join(changes)
+>         return data.encode()
+>
+>     def serialize_delta(self) -> bytes:
+>         """增量压缩模式：发送相对于基线的增量"""
+>         data = f"{self.tick}"
+>         for e in self.entities:
+>             bl = self.baseline.get(e.id)
+>             if bl is None:
+>                 # 无基线 → 发全量
+>                 data += f"|{e.id},FULL,{e.pos_x:.2f},...,{e.health:.1f}"
+>             else:
+>                 dx = e.pos_x - bl.pos_x
+>                 dy = e.pos_y - bl.pos_y
+>                 dh = e.health - bl.health
+>                 data += f"|{e.id},D,{dx:.2f},{dy:.2f},{dh:.1f}"
+>         return data.encode()
+>
+>     def on_client_ack(self, ack_tick: int):
+>         """客户端确认收到 ack_tick → 更新基线"""
+>         self.unacked_ticks = [t for t in self.unacked_ticks if t > ack_tick]
+>         # 将当前状态保存为基线
+>         self.baseline = {e.id: Entity(e.id, e.pos_x, e.pos_y,
+>                                        e.pos_z, e.health)
+>                          for e in self.entities}
+>
+>     def should_fallback_full(self) -> bool:
+>         """连续 3 个 Tick 未被 Ack → 回退全量"""
+>         return len(self.unacked_ticks) >= 3
+>
+>
+> # --- 模拟运行 ---
+> def run_simulation(total_ticks=100, loss_rate=0.1):
+>     server = ServerState(entities=[
+>         Entity(i, i*10.0, 0.0, 0.0, 100.0) for i in range(5)
+>     ])
+>
+>     modes = {
+>         "Full":       ("serialize_full", 0, 0),
+>         "Dirty Only": ("serialize_dirty", 0, 0),
+>         "Delta":      ("serialize_delta", 0, 0),
+>     }
+>
+>     prev_state = None
+>     for tick in range(total_ticks):
+>         server.update()
+>
+>         # 模拟丢包
+>         delivered = random.random() > loss_rate
+>         if delivered:
+>             server.on_client_ack(tick)
+>
+>         if not delivered:
+>             server.unacked_ticks.append(tick)
+>
+>         # 采集各模式的字节数
+>         full_data = server.serialize_full()
+>         modes["Full"] = (modes["Full"][0],
+>                          modes["Full"][1] + len(full_data),
+>                          modes["Full"][2])
+>
+>         if prev_state is not None:
+>             dirty_data = server.serialize_dirty(prev_state)
+>             modes["Dirty Only"] = (modes["Dirty Only"][0],
+>                                    modes["Dirty Only"][1] + len(dirty_data),
+>                                    modes["Dirty Only"][2])
+>
+>         if server.should_fallback_full():
+>             delta_data = server.serialize_full()
+>             modes["Delta"] = (modes["Delta"][0],
+>                               modes["Delta"][1] + len(delta_data),
+>                               modes["Delta"][2] + 1)  # drift count
+>         else:
+>             delta_data = server.serialize_delta()
+>             modes["Delta"] = (modes["Delta"][0],
+>                               modes["Delta"][1] + len(delta_data),
+>                               modes["Delta"][2])
+>
+>         prev_state = ServerState(
+>             entities=[Entity(e.id, e.pos_x, e.pos_y, e.pos_z, e.health)
+>                       for e in server.entities],
+>             tick=tick
+>         )
+>
+>     # 输出对比
+>     print(f"{'Mode':<16} {'Total Bytes':>12} {'Avg/Tick':>10} {'Drifts':>8}")
+>     print("-" * 48)
+>     for name, (_, total, drifts) in modes.items():
+>         avg = total / total_ticks
+>         print(f"{name:<16} {total:>12} {avg:>10.0f} {drifts:>8}")
+>
+> run_simulation()
+> ```
+>
+> **三种模式的核心差异**：
+> - **全量模式**：简单可靠，但每个 Tick 都发送所有数据——带宽 = O(实体数 × 属性数)，即使没有任何变化
+> - **脏属性模式**：仅发送变化的属性，显著降低带宽。但"判断变化"需要服务器维护上一帧的完整状态
+> - **增量压缩模式**：发送相对于已确认基线的差值。delta 值通常很小（如匀速移动中 dx=1.0），可以用更少的位表示。但需要 Ack 机制确认基线同步
+>
+> **回退全量快照的触发条件**：连续 3 个 Tick 未收到 Ack → 说明客户端可能错过了多个增量更新 → 累积误差可能已很大 → 发送全量快照重建信任
+
+> [!tip]- 练习 3 参考答案
+> AOI（兴趣区域）系统——基于教程 2.3 节 Lua `ServerCore` 的扩展：
+>
+> ```lua
+> -- ============================================================
+> -- AOI 网格系统：九宫格 + 过渡缓冲区
+> -- ============================================================
+>
+> local AOI = {}
+>
+> -- 配置
+> local GRID_SIZE = 20.0     -- 每格 20m × 20m
+> local GRID_COUNT = 10      -- 10×10 网格
+> local BUFFER_ZONE = 2.0    -- 格子边缘 2m 缓冲区
+>
+> -- 实体所在格子缓存
+> -- entity_grids[entity_id] = {gx, gy}
+> local entity_grids = {}
+>
+> function AOI.get_grid(pos_x, pos_y)
+>     local gx = math.floor(pos_x / GRID_SIZE) + 1
+>     local gy = math.floor(pos_y / GRID_SIZE) + 1
+>     -- 钳制在有效范围
+>     gx = math.max(1, math.min(GRID_COUNT, gx))
+>     gy = math.max(1, math.min(GRID_COUNT, gy))
+>     return gx, gy
+> end
+>
+> function AOI.get_nine_grids(gx, gy)
+>     -- 返回 3×3 九宫格的格子列表
+>     local grids = {}
+>     for dx = -1, 1 do
+>         for dy = -1, 1 do
+>             local nx, ny = gx + dx, gy + dy
+>             if nx >= 1 and nx <= GRID_COUNT
+>                and ny >= 1 and ny <= GRID_COUNT then
+>                 table.insert(grids, {nx, ny})
+>             end
+>         end
+>     end
+>     return grids
+> end
+>
+> -- ============================================================
+> -- AOI 事件处理：进入 / 离开
+> -- ============================================================
+>
+> -- grid_entities[gx][gy] = {entity_id1, entity_id2, ...}
+> local grid_entities = {}
+> for i = 1, GRID_COUNT do
+>     grid_entities[i] = {}
+>     for j = 1, GRID_COUNT do
+>         grid_entities[i][j] = {}
+>     end
+> end
+>
+> -- client_aoi[client_id] = {visible_entity_ids = {...}}
+> local client_aoi = {}
+>
+> function AOI.update_entity_position(entity_id, new_x, new_y)
+>     local old_grid = entity_grids[entity_id]
+>     local new_gx, new_gy = AOI.get_grid(new_x, new_y)
+>
+>     -- 检查是否跨越格子边界（含缓冲区）
+>     if old_grid then
+>         local crossed = false
+>         -- 在格子内靠近边缘时不算跨越
+>         local in_buffer = AOI._in_buffer_zone(new_x, new_y,
+>                                                old_grid[1], old_grid[2])
+>         if not in_buffer then
+>             if old_grid[1] ~= new_gx or old_grid[2] ~= new_gy then
+>                 crossed = true
+>             end
+>         end
+>
+>         if crossed then
+>             -- 从旧格子移除
+>             grid_entities[old_grid[1]][old_grid[2]][entity_id] = nil
+>             -- 加入新格子
+>             grid_entities[new_gx][new_gy][entity_id] = true
+>             entity_grids[entity_id] = {new_gx, new_gy}
+>
+>             -- 通知受影响的客户端：Spawn / Despawn
+>             AOI._notify_aoi_change(entity_id, old_grid, {new_gx, new_gy})
+>         end
+>     else
+>         -- 首次出现：直接加入
+>         grid_entities[new_gx][new_gy][entity_id] = true
+>         entity_grids[entity_id] = {new_gx, new_gy}
+>     end
+> end
+>
+> function AOI._in_buffer_zone(x, y, gx, gy)
+>     local left   = (gx - 1) * GRID_SIZE
+>     local bottom = (gy - 1) * GRID_SIZE
+>     local right  = left + GRID_SIZE
+>     local top    = bottom + GRID_SIZE
+>
+>     -- 在任何边缘的 BUFFER_ZONE 范围内 → 在缓冲区
+>     local in_buf = (x - left < BUFFER_ZONE)
+>                 or (right - x < BUFFER_ZONE)
+>                 or (y - bottom < BUFFER_ZONE)
+>                 or (top - y < BUFFER_ZONE)
+>     return in_buf
+> end
+>
+> function AOI._notify_aoi_change(entity_id, old_grid, new_grid)
+>     -- 对于在旧九宫格内但不在新九宫格内的客户端 → Despawn
+>     -- 对于在新九宫格内但不在旧九宫格内的客户端 → Spawn（全属性）
+>     -- 实现略：遍历相关客户端，对比 old/new 九宫格的重叠区域
+> end
+>
+> -- ============================================================
+> -- 修改 _collect_dirty_properties：只收集 AOI 范围内的属性
+> -- ============================================================
+>
+> function ServerCore:_collect_dirty_properties_for_client(client_id)
+>     local client = self.clients[client_id]
+>     local player_entity = client.entity_id
+>     local px, py = self.entities[player_entity].pos_x,
+>                    self.entities[player_entity].pos_y
+>     local gx, gy = AOI.get_grid(px, py)
+>     local visible_grids = AOI.get_nine_grids(gx, gy)
+>
+>     local updates = {}
+>     for _, grid in ipairs(visible_grids) do
+>         for entity_id, _ in pairs(grid_entities[grid[1]][grid[2]]) do
+>             local entity = self.entities[entity_id]
+>             if entity and entity.is_dirty then
+>                 -- 收集脏属性（只对该客户端可见范围内的实体）
+>                 table.insert(updates, {
+>                     entity_id = entity_id,
+>                     pos_x = entity.pos_x,
+>                     pos_y = entity.pos_y,
+>                     health = entity.health,
+>                     -- ... 其他属性
+>                 })
+>                 entity.is_dirty = false
+>             end
+>         end
+>     end
+>     return updates
+> end
+> ```
+>
+> **关键设计决策说明**：
+>
+> **为什么用 3×3 九宫格而不是圆形 AOI**：
+> - 网格计算是 O(1) 的——只需查找 9 个格子的哈希表，不涉及距离平方和开根号
+> - 圆形的边界计算在每一帧对每个实体-客户端对都需要做距离判断 → O(N×M)，N 是实体数，M 是客户端数
+> - 九宫格虽然比圆形略粗糙（角落的实体可能稍远），但这是可接受的精度换性能
+>
+> **格子大小如何选择**：
+> - 太大（如 50m）：每个九宫格包含太多实体 → AOI 失去过滤意义，带宽接近全图同步
+> - 太小（如 5m）：实体频繁跨越格子 → Spawn/Despawn 消息风暴，且九宫格覆盖面积太小，玩家可视范围边缘的实体可能被错误剔除
+> - 20m×20m 是 MOBA 常见的折中：九宫格覆盖 60m×60m，略大于典型视野范围（约 40-50m），留有安全余量
+>
+> **AOI 切换时的"闪现"问题与缓解**：
+> - 闪现发生在：实体刚进入新格子的瞬间，客户端还没收到 Spawn 消息，但实体已经在视野内
+> - 缓解措施 1：**过渡缓冲区**（2m）——实体必须在格内走出缓冲区才算真正跨越，避免在边界来回来回震荡触发频繁 Spawn/Despawn
+> - 缓解措施 2：**预发送**——在缓冲区边缘时就将相邻格子的实体也发送给客户端，这样当实体真正跨过边界时客户端已经拥有它的数据
+> - 缓解措施 3：**滞后 Spawn**——新进入的实体先不可见（或半透明），等待一帧后再显示。但这个引入的延迟感往往比闪现更令人不适，实践中较少采用
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 扩展阅读

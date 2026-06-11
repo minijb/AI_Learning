@@ -1192,6 +1192,857 @@ stateDiagram-v2
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：文档审批工作流
+>   
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> 
+> // ============================================
+> // IDocumentState 接口
+> // ============================================
+> public interface IDocumentState
+> {
+>     void Submit(DocumentContext ctx);
+>     void Approve(DocumentContext ctx, string comment);
+>     void Reject(DocumentContext ctx, string reason);
+>     void Publish(DocumentContext ctx);
+>     string Name { get; }
+> }
+> 
+> // ============================================
+> // DocumentContext
+> // ============================================
+> public class DocumentContext
+> {
+>     private IDocumentState _state;
+>     public string Title { get; }
+>     public string Content { get; private set; }
+>     public List<string> ApprovalComments { get; } = new();
+>     public List<string> History { get; } = new();
+> 
+>     public DocumentContext(string title, string content)
+>     {
+>         Title = title;
+>         Content = content;
+>         _state = new DraftState();
+>         History.Add($"{DateTime.Now:HH:mm:ss} — 文档创建（草稿）");
+>     }
+> 
+>     public void SetState(IDocumentState state)
+>     {
+>         var oldName = _state.Name;
+>         _state = state;
+>         Console.WriteLine($"  [状态转移] {oldName} → {state.Name}");
+>         History.Add($"{DateTime.Now:HH:mm:ss} — {oldName} → {state.Name}");
+>     }
+> 
+>     public void Submit() => _state.Submit(this);
+>     public void Approve(string comment) => _state.Approve(this, comment);
+>     public void Reject(string reason) => _state.Reject(this, reason);
+>     public void Publish() => _state.Publish(this);
+> 
+>     public void UpdateContent(string newContent) => Content = newContent;
+> 
+>     public void Display()
+>     {
+>         Console.WriteLine($"  文档: \"{Title}\"");
+>         Console.WriteLine($"  状态: {_state.Name}");
+>         Console.WriteLine($"  内容: {Content[..Math.Min(Content.Length, 60)]}...");
+>         Console.WriteLine($"  审批意见: {(ApprovalComments.Count > 0 ? string.Join("; ", ApprovalComments) : "无")}");
+>     }
+> 
+>     public void DisplayHistory()
+>     {
+>         Console.WriteLine("  状态变更历史:");
+>         foreach (var entry in History)
+>             Console.WriteLine($"    {entry}");
+>     }
+> }
+> 
+> // ============================================
+> // DraftState — 草稿
+> // ============================================
+> public class DraftState : IDocumentState
+> {
+>     public string Name => "草稿";
+> 
+>     public void Submit(DocumentContext ctx)
+>     {
+>         Console.WriteLine("  已提交审核");
+>         ctx.SetState(new ReviewState());
+>     }
+> 
+>     public void Approve(DocumentContext ctx, string comment)
+>         => Console.WriteLine("  草稿状态不能直接批准，请先提交审核");
+> 
+>     public void Reject(DocumentContext ctx, string reason)
+>         => Console.WriteLine("  草稿状态不能拒绝，请先提交审核");
+> 
+>     public void Publish(DocumentContext ctx)
+>         => Console.WriteLine("  草稿状态不能直接发布，请先提交审核");
+> }
+> 
+> // ============================================
+> // ReviewState — 审核中
+> // ============================================
+> public class ReviewState : IDocumentState
+> {
+>     public string Name => "审核中";
+> 
+>     public void Submit(DocumentContext ctx)
+>         => Console.WriteLine("  文档已在审核中");
+> 
+>     public void Approve(DocumentContext ctx, string comment)
+>     {
+>         Console.WriteLine($"  审核通过: {comment}");
+>         ctx.ApprovalComments.Add($"[批准] {comment}");
+>         ctx.SetState(new ApprovedState());
+>     }
+> 
+>     public void Reject(DocumentContext ctx, string reason)
+>     {
+>         Console.WriteLine($"  审核驳回: {reason}");
+>         ctx.ApprovalComments.Add($"[驳回] {reason}");
+>         ctx.SetState(new DraftState());
+>     }
+> 
+>     public void Publish(DocumentContext ctx)
+>         => Console.WriteLine("  审核中的文档不能直接发布，请先批准");
+> }
+> 
+> // ============================================
+> // ApprovedState — 已批准
+> // ============================================
+> public class ApprovedState : IDocumentState
+> {
+>     public string Name => "已批准";
+> 
+>     public void Submit(DocumentContext ctx)
+>         => Console.WriteLine("  文档已批准，无需重复提交");
+> 
+>     public void Approve(DocumentContext ctx, string comment)
+>         => Console.WriteLine("  文档已批准，无需重复批准");
+> 
+>     public void Reject(DocumentContext ctx, string reason)
+>         => Console.WriteLine("  已批准的文档不能驳回，请先发布后创建新版本");
+> 
+>     public void Publish(DocumentContext ctx)
+>     {
+>         Console.WriteLine("  文档已发布！");
+>         ctx.SetState(new PublishedState());
+>     }
+> }
+> 
+> // ============================================
+> // PublishedState — 已发布（终态）
+> // ============================================
+> public class PublishedState : IDocumentState
+> {
+>     public string Name => "已发布";
+> 
+>     public void Submit(DocumentContext ctx)
+>         => Console.WriteLine("  文档已发布，无法再次提交。请创建新版本。");
+> 
+>     public void Approve(DocumentContext ctx, string comment)
+>         => Console.WriteLine("  文档已发布，无法再次批准。");
+> 
+>     public void Reject(DocumentContext ctx, string reason)
+>         => Console.WriteLine("  文档已发布，无法驳回。");
+> 
+>     public void Publish(DocumentContext ctx)
+>         => Console.WriteLine("  文档已发布，无需重复发布。");
+> }
+> 
+> // ============================================
+> // 验证：完整工作流 + 非法操作 + 状态变更历史
+> // ============================================
+> Console.WriteLine("=== 文档审批工作流 ===\n");
+> 
+> var doc = new DocumentContext("年度财务报告", "本年度营收增长 20%，利润率提升 5 个百分点...");
+> doc.Display();
+> 
+> // 尝试非法操作：草稿直接发布
+> Console.WriteLine("\n--- 尝试草稿直接发布 ---");
+> doc.Publish(); // → 草稿状态不能直接发布
+> 
+> // 提交审核
+> Console.WriteLine("\n--- 提交审核 ---");
+> doc.Submit(); // Draft → Review
+> doc.Display();
+> 
+> // 驳回
+> Console.WriteLine("\n--- 审核驳回 ---");
+> doc.Reject("缺少 Q3 数据对比"); // Review → Draft
+> doc.Display();
+> 
+> // 修改后重新提交
+> Console.WriteLine("\n--- 修改后重新提交 ---");
+> doc.UpdateContent("本年度营收增长 20%（Q3 +12%），利润率提升 5 个百分点...");
+> doc.Submit(); // Draft → Review
+> 
+> // 批准
+> Console.WriteLine("\n--- 审核批准 ---");
+> doc.Approve("数据完整，同意发布"); // Review → Approved
+> doc.Display();
+> 
+> // 发布
+> Console.WriteLine("\n--- 发布文档 ---");
+> doc.Publish(); // Approved → Published
+> doc.Display();
+> 
+> // 尝试终态操作
+> Console.WriteLine("\n--- 尝试对已发布文档操作 ---");
+> doc.Submit();
+> doc.Approve("再次批准");
+> 
+> // 打印状态变更历史
+> Console.WriteLine("\n=== 状态变更历史 ===");
+> doc.DisplayHistory();
+> 
+> /* 预期输出:
+> === 文档审批工作流 ===
+> 
+>   文档: "年度财务报告"
+>   状态: 草稿
+>   内容: 本年度营收增长 20%，利润率提升 5 个百分点......
+> 
+> --- 尝试草稿直接发布 ---
+>   草稿状态不能直接发布，请先提交审核
+> 
+> --- 提交审核 ---
+>   已提交审核
+>   [状态转移] 草稿 → 审核中
+>   文档: "年度财务报告"
+>   状态: 审核中
+> 
+> --- 审核驳回 ---
+>   审核驳回: 缺少 Q3 数据对比
+>   [状态转移] 审核中 → 草稿
+> 
+> --- 修改后重新提交 ---
+>   已提交审核
+>   [状态转移] 草稿 → 审核中
+> 
+> --- 审核批准 ---
+>   审核通过: 数据完整，同意发布
+>   [状态转移] 审核中 → 已批准
+> 
+> --- 发布文档 ---
+>   文档已发布！
+>   [状态转移] 已批准 → 已发布
+> 
+> --- 尝试对已发布文档操作 ---
+>   文档已发布，无法再次提交。请创建新版本。
+>   文档已发布，无法再次批准。
+> 
+> === 状态变更历史 ===
+>   状态变更历史:
+>     15:30:01 — 文档创建（草稿）
+>     15:30:02 — 草稿 → 审核中
+>     15:30:03 — 审核中 → 草稿
+>     15:30:04 — 草稿 → 审核中
+>     15:30:05 — 审核中 → 已批准
+>     15:30:06 — 已批准 → 已发布
+> */
+> ```
+>
+> **关键设计要点：**
+> - `DraftState` 只有 `Submit()` 能成功——其他三个操作返回友好提示而非抛异常
+> - `ReviewState` 可以 `Approve()` 或 `Reject()`——分别转移到 Approved 和 Draft
+> - `PublishedState` 是终态——所有操作都返回提示
+> - `DocumentContext.History` 记录完整的状态变更轨迹——审计友好
+> - 每个状态类的非法操作都返回有意义的消息，不抛异常——符合"友好提示"要求
+
+> [!tip]- 练习 2 参考答案：TCP 连接状态机
+>   
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> 
+> // ============================================
+> // ITcpState 接口
+> // ============================================
+> public interface ITcpState
+> {
+>     void Open(TcpConnection ctx);          // 主动打开连接
+>     void PassiveOpen(TcpConnection ctx);   // 被动打开（进入 LISTEN）
+>     void Close(TcpConnection ctx);         // 主动关闭
+>     void Send(TcpConnection ctx, string data);
+>     void Receive(TcpConnection ctx);       // 接收数据
+>     void OnSyn(TcpConnection ctx);         // 收到 SYN
+>     void OnAck(TcpConnection ctx);         // 收到 ACK
+>     void OnFin(TcpConnection ctx);         // 收到 FIN
+>     void OnTimeout(TcpConnection ctx);     // 超时
+>     string Name { get; }
+> }
+> 
+> // ============================================
+> // TcpConnection（Context）
+> // ============================================
+> public class TcpConnection
+> {
+>     private ITcpState _state;
+>     public uint SequenceNumber { get; private set; }
+>     public uint AcknowledgmentNumber { get; private set; }
+>     public List<string> History { get; } = new();
+> 
+>     public TcpConnection()
+>     {
+>         _state = new ClosedState();
+>         History.Add($"初始状态: {_state.Name}");
+>     }
+> 
+>     public void SetState(ITcpState state)
+>     {
+>         Console.WriteLine($"  [状态转移] {_state.Name} → {state.Name}");
+>         History.Add($"{_state.Name} → {state.Name}");
+>         _state = state;
+>     }
+> 
+>     public void IncrementSeqNum(uint delta = 1) { SequenceNumber += delta; }
+>     public void SetAckNum(uint ack) { AcknowledgmentNumber = ack; }
+> 
+>     // 委托给当前状态
+>     public void Open() => _state.Open(this);
+>     public void PassiveOpen() => _state.PassiveOpen(this);
+>     public void Close() => _state.Close(this);
+>     public void Send(string data) => _state.Send(this, data);
+>     public void Receive() => _state.Receive(this);
+>     public void OnSyn() => _state.OnSyn(this);
+>     public void OnAck() => _state.OnAck(this);
+>     public void OnFin() => _state.OnFin(this);
+>     public void OnTimeout() => _state.OnTimeout(this);
+> 
+>     public string CurrentState => _state.Name;
+> 
+>     public void Display()
+>     {
+>         Console.WriteLine($"  状态: {_state.Name} | Seq={SequenceNumber} | Ack={AcknowledgmentNumber}");
+>     }
+> 
+>     public void DisplayHistory()
+>     {
+>         Console.WriteLine("  状态转移轨迹:");
+>         foreach (var entry in History)
+>             Console.WriteLine($"    {entry}");
+>     }
+> }
+> 
+> // ============================================
+> // Concrete States
+> // ============================================
+> 
+> // --- 辅助基类：默认非法操作 + 友好提示 ---
+> public abstract class TcpStateBase : ITcpState
+> {
+>     public abstract string Name { get; }
+> 
+>     public virtual void Open(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下无法主动打开连接");
+> 
+>     public virtual void PassiveOpen(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下无法被动打开");
+> 
+>     public virtual void Close(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下关闭操作无效");
+> 
+>     public virtual void Send(TcpConnection ctx, string data)
+>         => Console.WriteLine($"  {Name} 状态下无法发送数据");
+> 
+>     public virtual void Receive(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下无法接收数据");
+> 
+>     public virtual void OnSyn(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下收到 SYN — 忽略");
+> 
+>     public virtual void OnAck(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下收到 ACK — 忽略");
+> 
+>     public virtual void OnFin(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下收到 FIN — 忽略");
+> 
+>     public virtual void OnTimeout(TcpConnection ctx)
+>         => Console.WriteLine($"  {Name} 状态下超时 — 忽略");
+> }
+> 
+> // --- CLOSED ---
+> public class ClosedState : TcpStateBase
+> {
+>     public override string Name => "CLOSED";
+> 
+>     public override void Open(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  主动打开连接 → 发送 SYN");
+>         ctx.IncrementSeqNum();
+>         ctx.SetState(new SynSentState());
+>     }
+> 
+>     public override void PassiveOpen(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  被动打开 → 进入 LISTEN");
+>         ctx.SetState(new ListenState());
+>     }
+> }
+> 
+> // --- LISTEN ---
+> public class ListenState : TcpStateBase
+> {
+>     public override string Name => "LISTEN";
+> 
+>     public override void Close(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  停止监听 → CLOSED");
+>         ctx.SetState(new ClosedState());
+>     }
+> 
+>     public override void OnSyn(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 SYN → 发送 SYN+ACK → SYN_RCVD");
+>         ctx.SetAckNum(ctx.SequenceNumber + 1);
+>         ctx.SetState(new SynRcvdState());
+>     }
+> }
+> 
+> // --- SYN_SENT ---
+> public class SynSentState : TcpStateBase
+> {
+>     public override string Name => "SYN_SENT";
+> 
+>     public override void Close(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  连接建立中关闭 → CLOSED");
+>         ctx.SetState(new ClosedState());
+>     }
+> 
+>     public override void OnSyn(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 SYN+ACK → 发送 ACK → ESTABLISHED（同时打开）");
+>         ctx.SetAckNum(ctx.SequenceNumber + 1);
+>         ctx.SetState(new EstablishedState());
+>     }
+> 
+>     public override void OnAck(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 SYN+ACK → 发送 ACK → ESTABLISHED（三次握手完成）");
+>         ctx.IncrementSeqNum();
+>         ctx.SetState(new EstablishedState());
+>     }
+> }
+> 
+> // --- SYN_RCVD ---
+> public class SynRcvdState : TcpStateBase
+> {
+>     public override string Name => "SYN_RCVD";
+> 
+>     public override void Close(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  握手期间关闭 → 发送 FIN → FIN_WAIT_1");
+>         ctx.SetState(new FinWait1State());
+>     }
+> 
+>     public override void OnAck(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 ACK → 三次握手完成 → ESTABLISHED");
+>         ctx.SetState(new EstablishedState());
+>     }
+> }
+> 
+> // --- ESTABLISHED ---
+> public class EstablishedState : TcpStateBase
+> {
+>     public override string Name => "ESTABLISHED";
+> 
+>     public override void Close(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  主动关闭 → 发送 FIN → FIN_WAIT_1");
+>         ctx.IncrementSeqNum();
+>         ctx.SetState(new FinWait1State());
+>     }
+> 
+>     public override void Send(TcpConnection ctx, string data)
+>     {
+>         Console.WriteLine($"  发送数据: \"{data}\"");
+>         ctx.IncrementSeqNum((uint)data.Length);
+>     }
+> 
+>     public override void Receive(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  接收数据 → 发送 ACK");
+>         ctx.SetAckNum(ctx.SequenceNumber + 1);
+>     }
+> 
+>     public override void OnFin(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 FIN → 发送 ACK → CLOSE_WAIT");
+>         ctx.SetAckNum(ctx.SequenceNumber + 1);
+>         ctx.SetState(new CloseWaitState());
+>     }
+> }
+> 
+> // --- FIN_WAIT_1 ---
+> public class FinWait1State : TcpStateBase
+> {
+>     public override string Name => "FIN_WAIT_1";
+> 
+>     public override void OnAck(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 ACK → FIN_WAIT_2");
+>         ctx.SetState(new FinWait2State());
+>     }
+> 
+>     public override void OnFin(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  同时关闭 → 收到 FIN → 发送 ACK → CLOSING");
+>         ctx.SetState(new ClosingState());
+>     }
+> }
+> 
+> // --- FIN_WAIT_2 ---
+> public class FinWait2State : TcpStateBase
+> {
+>     public override string Name => "FIN_WAIT_2";
+> 
+>     public override void OnFin(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 FIN → 发送 ACK → TIME_WAIT");
+>         ctx.SetState(new TimeWaitState());
+>     }
+> }
+> 
+> // --- CLOSING ---
+> public class ClosingState : TcpStateBase
+> {
+>     public override string Name => "CLOSING";
+> 
+>     public override void OnAck(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 ACK → TIME_WAIT");
+>         ctx.SetState(new TimeWaitState());
+>     }
+> }
+> 
+> // --- TIME_WAIT ---
+> public class TimeWaitState : TcpStateBase
+> {
+>     public override string Name => "TIME_WAIT";
+> 
+>     public override void OnTimeout(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  2MSL 超时 → CLOSED");
+>         ctx.SetState(new ClosedState());
+>     }
+> }
+> 
+> // --- CLOSE_WAIT ---
+> public class CloseWaitState : TcpStateBase
+> {
+>     public override string Name => "CLOSE_WAIT";
+> 
+>     public override void Close(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  关闭连接 → 发送 FIN → LAST_ACK");
+>         ctx.IncrementSeqNum();
+>         ctx.SetState(new LastAckState());
+>     }
+> }
+> 
+> // --- LAST_ACK ---
+> public class LastAckState : TcpStateBase
+> {
+>     public override string Name => "LAST_ACK";
+> 
+>     public override void OnAck(TcpConnection ctx)
+>     {
+>         Console.WriteLine("  收到 ACK → CLOSED");
+>         ctx.SetState(new ClosedState());
+>     }
+> }
+> 
+> // ============================================
+> // 验证：三次握手 → 数据传输 → 四次挥手
+> // ============================================
+> Console.WriteLine("=== TCP 连接状态机 ===\n");
+> 
+> // 服务端
+> var server = new TcpConnection();
+> Console.WriteLine("--- 服务端：被动打开 ---");
+> server.PassiveOpen();                      // CLOSED → LISTEN
+> server.Display();
+> 
+> Console.WriteLine("\n--- 服务端：收到 SYN ---");
+> server.OnSyn();                            // LISTEN → SYN_RCVD
+> server.Display();
+> 
+> Console.WriteLine("\n--- 服务端：收到 ACK（三次握手完成）---");
+> server.OnAck();                            // SYN_RCVD → ESTABLISHED
+> server.Display();
+> 
+> // 数据传输
+> Console.WriteLine("\n--- 数据传输 ---");
+> server.Send("HTTP/1.1 200 OK");
+> server.Receive();
+> server.Display();
+> 
+> // 客户端主动关闭
+> Console.WriteLine("\n--- 收到客户端的 FIN ---");
+> server.OnFin();                            // ESTABLISHED → CLOSE_WAIT
+> server.Display();
+> 
+> Console.WriteLine("\n--- 服务端关闭连接 ---");
+> server.Close();                            // CLOSE_WAIT → LAST_ACK
+> server.Display();
+> 
+> Console.WriteLine("\n--- 收到 ACK ---");
+> server.OnAck();                            // LAST_ACK → CLOSED
+> server.Display();
+> 
+> // 非法操作测试
+> Console.WriteLine("\n--- 处于 CLOSED 时各操作 ---");
+> server.Send("data"); // 非法
+> server.Close();       // 非法
+> 
+> // 打印状态转移轨迹
+> Console.WriteLine("\n=== 状态转移轨迹 ===");
+> server.DisplayHistory();
+> ```
+>
+> **关键设计要点：**
+> - `TcpStateBase` 基类为所有非法操作提供默认友好提示——子类只需重写合法的操作
+> - 状态转移严格按照 RFC 793 简化版状态图：CLOSED→LISTEN→SYN_RCVD→ESTABLISHED→FIN_WAIT_1→FIN_WAIT_2→TIME_WAIT→CLOSED
+> - 同时关闭路径：FIN_WAIT_1→(收到FIN)→CLOSING→TIME_WAIT→CLOSED
+> - 被动关闭路径：ESTABLISHED→(收到FIN)→CLOSE_WAIT→LAST_ACK→CLOSED
+> - 序列号/确认号在状态转移时递增——模拟真实 TCP 行为
+> - 终态（CLOSED）的所有操作返回友好提示，不抛异常
+
+> [!tip]- 练习 3 参考答案：`enum` + `switch` vs State 模式对比
+>   
+> **Part A — `enum` + `switch` 实现（含故意遗留的 bug）**
+>   
+> ```csharp
+> // ============================================
+> // Part A: enum + switch 实现 — 停车场闸机
+> // ============================================
+> public enum GateState { Idle, VehicleArrived, Paid }
+> 
+> public class GateControllerSwitch
+> {
+>     private GateState _state = GateState.Idle;
+> 
+>     public void VehicleArrives()
+>     {
+>         switch (_state)
+>         {
+>             case GateState.Idle:
+>                 Console.WriteLine("车辆到达，请取票");
+>                 _state = GateState.VehicleArrived;
+>                 break;
+>             case GateState.VehicleArrived:
+>                 Console.WriteLine("已有车辆在等待");
+>                 break;
+>             case GateState.Paid:
+>                 Console.WriteLine("前车已缴费，请先通过");
+>                 break;
+>             // BUG: 如果未来新增 MaintenanceState，此 switch 漏改 → 直接 fall through！
+>         }
+>     }
+> 
+>     public void Pay()
+>     {
+>         switch (_state)
+>         {
+>             case GateState.VehicleArrived:
+>                 Console.WriteLine("缴费成功，请通行");
+>                 _state = GateState.Paid;
+>                 break;
+>             case GateState.Idle:
+>                 Console.WriteLine("没有车辆，无需缴费");
+>                 break;
+>             case GateState.Paid:
+>                 Console.WriteLine("已缴费，请通行");
+>                 break;
+>             // BUG: 同上——新增状态时漏改
+>         }
+>     }
+> 
+>     public void Pass()
+>     {
+>         switch (_state)
+>         {
+>             case GateState.Paid:
+>                 Console.WriteLine("栏杆抬起，车辆通过");
+>                 _state = GateState.Idle;
+>                 break;
+>             case GateState.Idle:
+>                 Console.WriteLine("没有车辆");
+>                 break;
+>             case GateState.VehicleArrived:
+>                 Console.WriteLine("请先缴费");
+>                 break;
+>             // BUG: 同上
+>         }
+>     }
+> }
+> ```
+> 
+> **Part B — State 模式实现 + 新增 MaintenanceState**
+>   
+> ```csharp
+> // ============================================
+> // Part B: State 模式实现 — 停车场闸机
+> // ============================================
+> public interface IGateState
+> {
+>     void VehicleArrives(GateContext ctx);
+>     void Pay(GateContext ctx);
+>     void Pass(GateContext ctx);
+>     string Name { get; }
+> }
+> 
+> public class GateContext
+> {
+>     private IGateState _state;
+>     public List<string> History { get; } = new();
+> 
+>     public GateContext()
+>     {
+>         _state = new GateIdleState();
+>         History.Add($"初始: {_state.Name}");
+>     }
+> 
+>     public void SetState(IGateState state)
+>     {
+>         Console.WriteLine($"  [{_state.Name} → {state.Name}]");
+>         History.Add($"{_state.Name} → {state.Name}");
+>         _state = state;
+>     }
+> 
+>     public void VehicleArrives() => _state.VehicleArrives(this);
+>     public void Pay() => _state.Pay(this);
+>     public void Pass() => _state.Pass(this);
+>     public string Current => _state.Name;
+> 
+>     public void Display() => Console.WriteLine($"  当前状态: {_state.Name}");
+> }
+> 
+> // 具体状态类
+> public class GateIdleState : IGateState
+> {
+>     public string Name => "空闲";
+> 
+>     public void VehicleArrives(GateContext ctx)
+>     {
+>         Console.WriteLine("车辆到达，请取票");
+>         ctx.SetState(new GateVehicleArrivedState());
+>     }
+> 
+>     public void Pay(GateContext ctx)
+>         => Console.WriteLine("没有车辆，无需缴费");
+> 
+>     public void Pass(GateContext ctx)
+>         => Console.WriteLine("没有车辆");
+> }
+> 
+> public class GateVehicleArrivedState : IGateState
+> {
+>     public string Name => "车辆到达";
+> 
+>     public void VehicleArrives(GateContext ctx)
+>         => Console.WriteLine("已有车辆在等待");
+> 
+>     public void Pay(GateContext ctx)
+>     {
+>         Console.WriteLine("缴费成功，请通行");
+>         ctx.SetState(new GatePaidState());
+>     }
+> 
+>     public void Pass(GateContext ctx)
+>         => Console.WriteLine("请先缴费");
+> }
+> 
+> public class GatePaidState : IGateState
+> {
+>     public string Name => "已缴费";
+> 
+>     public void VehicleArrives(GateContext ctx)
+>         => Console.WriteLine("前车已缴费，请先通过");
+> 
+>     public void Pay(GateContext ctx)
+>         => Console.WriteLine("已缴费，请通行");
+> 
+>     public void Pass(GateContext ctx)
+>     {
+>         Console.WriteLine("栏杆抬起，车辆通过");
+>         ctx.SetState(new GateIdleState());
+>     }
+> }
+> 
+> // === 新增 MaintenanceState — 只需新增一个类！ ===
+> public class MaintenanceState : IGateState
+> {
+>     public string Name => "维护中";
+> 
+>     public void VehicleArrives(GateContext ctx)
+>         => Console.WriteLine("设备维护中，禁止进入");
+> 
+>     public void Pay(GateContext ctx)
+>         => Console.WriteLine("设备维护中，无法缴费");
+> 
+>     public void Pass(GateContext ctx)
+>         => Console.WriteLine("设备维护中，禁止通行");
+> }
+> 
+> // ============================================
+> // 验证 State 模式
+> // ============================================
+> Console.WriteLine("=== State 模式 — 停车场闸机 ===\n");
+> var gate = new GateContext();
+> 
+> gate.VehicleArrives();  // 空闲 → 车辆到达
+> gate.Pay();             // 车辆到达 → 已缴费
+> gate.Pass();            // 已缴费 → 空闲
+> 
+> // 设置维护模式
+> Console.WriteLine("\n--- 进入维护模式 ---");
+> gate.SetState(new MaintenanceState());
+> gate.VehicleArrives();  // → 设备维护中
+> gate.Pay();             // → 设备维护中
+> gate.Pass();            // → 设备维护中
+> ```
+> 
+> **Part C — 分析报告**
+> 
+> ```csharp
+> // ============================================
+> // Part C: 分析报告（写在注释中）
+> // ============================================
+> ```
+>
+> **1. 哪个实现更容易引入 bug？为什么？**
+>
+> `enum` + `switch` 更容易引入 bug。因为新增状态（如 `MaintenanceState`）时需要修改**每一个** `switch` 分支——编译器不会警告你"漏了某个 switch"。如在 Part A 中演示的，三个 `switch` 都缺少 `MaintenanceState` 的 case，运行时要么 fall through 到 default（未定义行为），要么静默跳过（逻辑错误）。State 模式中，新增状态只需新建一个实现了 `IGateState` 的类——编译器强制你实现所有方法，**遗漏是不可能的**。
+>
+> **2. 哪个实现更容易测试？为什么？**
+>
+> State 模式更容易测试。每个 `ConcreteState` 是一个独立的类，可以**单独实例化并测试**：`new MaintenanceState().VehicleArrives(mockCtx)` 返回值/行为是可预测的。`enum` + `switch` 方案中，所有状态逻辑耦合在同一个 `GateControllerSwitch` 类中——要测试"MaintenanceState 下 Pay() 的行为"，你必须先构造 `GateControllerSwitch` 并设置其内部 `_state = Maintenance`，间接测试。单元测试的隔离性更差。
+>
+> **3. 哪个实现更符合开闭原则？**
+>
+> State 模式完全符合开闭原则——**对扩展开放（新增 ConcreteState 类），对修改关闭（Context 和已有状态类无需修改）**。`enum` + `switch` 方案违反了开闭原则——新增一个枚举值必须修改所有 switch 分支（修改已有代码）。即使有 `default` 分支，也只是把"未处理新状态"变成了隐式 fall-through，并未解决根本问题。
+>
+> **4. 对于只有 2–3 个状态且行为差异很小的场景，你会选哪个？为什么？**
+>
+> 选 `enum` + `switch`。原因：
+> - **简单性胜出**：2–3 个状态的 switch 分支数 = 2–3 个，每个方法 5–10 行，一眼看完
+> - **代码量**：State 模式需要 1 个接口 + N 个类 + N×3 个方法模板 → 约 50+ 行。`enum` + `switch` 只需 1 个枚举 + 1 个类 → 约 20 行
+> - **认知负荷**：2–3 个状态的 switch 分支不会产生"改一处漏一处"的问题——分支数太少，很难漏
+> - **临界点**：当状态 ≥ 3 且**行为差异显著**时，立即切换到 State 模式。三个带 `switch(state)` 的方法是临界信号（见教程正文的警告）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 相关模式

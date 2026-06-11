@@ -869,6 +869,482 @@ MetricsProxy<IOrderService>.PrintStats();
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Concurrent;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // InMemoryRepository — 完整实现
+> // ============================================
+> public class InMemoryRepository<T> : IRepository<T> where T : class
+> {
+>     private readonly Dictionary<int, T> _storage = new();
+>     private readonly Func<T, int> _idSelector;
+>
+>     public InMemoryRepository(Func<T, int> idSelector)
+>     {
+>         _idSelector = idSelector;
+>     }
+>
+>     public T? GetById(int id)
+>     {
+>         _storage.TryGetValue(id, out var entity);
+>         return entity;
+>     }
+>
+>     public IEnumerable<T> GetAll() => _storage.Values.ToList();
+>
+>     public void Add(T entity)
+>     {
+>         int id = _idSelector(entity);
+>         _storage[id] = entity;
+>     }
+>
+>     public void Update(T entity)
+>     {
+>         int id = _idSelector(entity);
+>         if (_storage.ContainsKey(id))
+>             _storage[id] = entity;
+>     }
+>
+>     public void Delete(int id)
+>     {
+>         _storage.Remove(id);
+>     }
+> }
+>
+> // ============================================
+> // CachingProxy — 智能缓存代理
+> // ============================================
+> public class CachingProxy<T> : IRepository<T> where T : class
+> {
+>     private readonly IRepository<T> _realRepo;
+>     private readonly ConcurrentDictionary<string, object?> _cache = new();
+>
+>     public CachingProxy(IRepository<T> realRepo)
+>     {
+>         _realRepo = realRepo;
+>     }
+>
+>     public T? GetById(int id)
+>     {
+>         string key = $"byId_{id}";
+>
+>         if (_cache.TryGetValue(key, out var cached))
+>         {
+>             Console.WriteLine($"  [Cache] 命中 GetById({id})");
+>             return cached as T;  // 返回缓存引用（真实数据不暴露给外部修改）
+>         }
+>
+>         Console.WriteLine($"  [Cache] 未命中 GetById({id})，查询真实仓库...");
+>         var entity = _realRepo.GetById(id);
+>         if (entity != null)
+>             _cache[key] = entity;
+>         return entity;
+>     }
+>
+>     public IEnumerable<T> GetAll()
+>     {
+>         const string key = "all";
+>
+>         if (_cache.TryGetValue(key, out var cached) && cached is List<T> list)
+>         {
+>             Console.WriteLine($"  [Cache] 命中 GetAll()，返回 {list.Count} 条");
+>             // 返回副本，避免外部修改污染缓存
+>             return list.ToList();
+>         }
+>
+>         Console.WriteLine("  [Cache] 未命中 GetAll()，查询真实仓库...");
+>         var entities = _realRepo.GetAll().ToList();
+>         _cache[key] = entities;  // 存储原始列表
+>         return entities.ToList(); // 返回副本
+>     }
+>
+>     public void Add(T entity)
+>     {
+>         Console.WriteLine("  [Cache] Add → 清空所有缓存");
+>         _realRepo.Add(entity);
+>         _cache.Clear();  // 写穿透：失效所有缓存
+>     }
+>
+>     public void Update(T entity)
+>     {
+>         Console.WriteLine("  [Cache] Update → 清空所有缓存");
+>         _realRepo.Update(entity);
+>         _cache.Clear();
+>     }
+>
+>     public void Delete(int id)
+>     {
+>         Console.WriteLine($"  [Cache] Delete({id}) → 清空所有缓存");
+>         _realRepo.Delete(id);
+>         _cache.Clear();
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> public record User(int Id, string Name, string Email);
+>
+> var realRepo = new InMemoryRepository<User>(u => u.Id);
+> var proxy = new CachingProxy<User>(realRepo);
+>
+> // 添加数据
+> proxy.Add(new User(1, "Alice", "alice@example.com"));
+> proxy.Add(new User(2, "Bob", "bob@example.com"));
+>
+> // 首次查询 → 未命中缓存
+> Console.WriteLine("\n--- 首次查询 ---");
+> var user1 = proxy.GetById(1);
+> Console.WriteLine($"  结果: {user1}");
+>
+> // 再次查询 → 命中缓存
+> Console.WriteLine("\n--- 缓存命中 ---");
+> var user1Again = proxy.GetById(1);
+> Console.WriteLine($"  结果: {user1Again}");
+>
+> // 修改数据 → 缓存失效
+> Console.WriteLine("\n--- 更新后缓存失效 ---");
+> proxy.Update(new User(1, "Alice", "alice_new@example.com"));
+> var user1Updated = proxy.GetById(1);
+> Console.WriteLine($"  结果: {user1Updated}");
+> ```
+>
+> **关键点**：
+> - `ConcurrentDictionary` 保证多线程并发读写缓存安全
+> - `GetAll` 返回 `.ToList()` 副本——防止调用方修改返回的列表污染内部缓存
+> - 写操作（Add/Update/Delete）清空全部缓存——最简单的写穿透策略，适合数据量不大的场景。更精细的做法是只失效受影响的 key
+> - 缓存的 key 使用字符串前缀区分不同查询类型
+
+> [!tip]- 练习 2 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+>
+> // ============================================
+> // 权限模型
+> // ============================================
+> public enum Role { Viewer, Editor, Owner, Admin }
+>
+> public class DocumentAccessException : Exception
+> {
+>     public string Operation { get; }
+>     public Role UserRole { get; }
+>
+>     public DocumentAccessException(string operation, Role userRole, Role required)
+>         : base($"用户角色 '{userRole}' 没有 '{operation}' 权限（需要 {required} 或更高）")
+>     {
+>         Operation = operation;
+>         UserRole = userRole;
+>     }
+> }
+>
+> // ============================================
+> // 受保护的文档接口（比原始 IDocument 多了权限操作）
+> // ============================================
+> public interface ISecureDocument
+> {
+>     string Title { get; }
+>     string ReadContent();
+>     void WriteContent(string content);
+>     void GrantAccess(Role role, string userId);
+>     void RevokeAccess(string userId);
+> }
+>
+> // 真实文档（添加了访问控制列表）
+> public class SecureDocument : ISecureDocument
+> {
+>     public string Title { get; }
+>     private string _content;
+>     private readonly Dictionary<string, Role> _acl = new();
+>
+>     public SecureDocument(string title, string initialContent = "")
+>     {
+>         Title = title;
+>         _content = initialContent;
+>     }
+>
+>     public string ReadContent() => _content;
+>     public void WriteContent(string content) => _content = content;
+>     public void GrantAccess(Role role, string userId) => _acl[userId] = role;
+>     public void RevokeAccess(string userId) => _acl.Remove(userId);
+> }
+>
+> // ============================================
+> // RoleBasedDocumentProxy — 基于策略表的保护代理
+> // ============================================
+> public class RoleBasedDocumentProxy : ISecureDocument
+> {
+>     private readonly ISecureDocument _document;
+>     private readonly Role _userRole;
+>
+>     // 策略表：操作 → 所需最低角色
+>     private static readonly Dictionary<string, Role> Permissions = new()
+>     {
+>         ["Read"]       = Role.Viewer,
+>         ["Write"]      = Role.Editor,
+>         ["GrantAccess"]= Role.Owner,
+>         ["RevokeAccess"]= Role.Owner,
+>     };
+>
+>     // Admin 可以执行所有操作
+>     private static readonly HashSet<Role> AdminRoles = new() { Role.Admin };
+>
+>     public RoleBasedDocumentProxy(ISecureDocument document, Role userRole)
+>     {
+>         _document = document;
+>         _userRole = userRole;
+>     }
+>
+>     public string Title => _document.Title;
+>
+>     public string ReadContent()
+>     {
+>         EnsurePermission("Read");
+>         return _document.ReadContent();
+>     }
+>
+>     public void WriteContent(string content)
+>     {
+>         EnsurePermission("Write");
+>         _document.WriteContent(content);
+>     }
+>
+>     public void GrantAccess(Role role, string userId)
+>     {
+>         EnsurePermission("GrantAccess");
+>         _document.GrantAccess(role, userId);
+>     }
+>
+>     public void RevokeAccess(string userId)
+>     {
+>         EnsurePermission("RevokeAccess");
+>         _document.RevokeAccess(userId);
+>     }
+>
+>     private void EnsurePermission(string operation)
+>     {
+>         // Admin 始终放行
+>         if (AdminRoles.Contains(_userRole))
+>             return;
+>
+>         // 从策略表查找所需角色
+>         if (!Permissions.TryGetValue(operation, out var required))
+>             throw new DocumentAccessException(operation, _userRole, Role.Admin);
+>
+>         // Role 枚举按权限递增排序：Viewer=0, Editor=1, Owner=2, Admin=3
+>         if (_userRole < required)
+>             throw new DocumentAccessException(operation, _userRole, required);
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> var doc = new SecureDocument("架构设计文档", "机密架构细节...");
+>
+> Console.WriteLine("=== 角色权限保护代理 ===\n");
+>
+> // Viewer：只能读
+> var viewerProxy = new RoleBasedDocumentProxy(doc, Role.Viewer);
+> Console.WriteLine("1. Viewer 读取文档:");
+> Console.WriteLine($"   内容: {viewerProxy.ReadContent()}");
+> Console.WriteLine("2. Viewer 尝试写入:");
+> try { viewerProxy.WriteContent("修改"); }
+> catch (DocumentAccessException ex) { Console.WriteLine($"   ❌ {ex.Message}"); }
+>
+> Console.WriteLine();
+>
+> // Editor：可读写
+> var editorProxy = new RoleBasedDocumentProxy(doc, Role.Editor);
+> Console.WriteLine("3. Editor 写入文档:");
+> editorProxy.WriteContent("更新后的架构设计");
+> Console.WriteLine("4. Editor 尝试授权:");
+> try { editorProxy.GrantAccess(Role.Viewer, "user123"); }
+> catch (DocumentAccessException ex) { Console.WriteLine($"   ❌ {ex.Message}"); }
+>
+> Console.WriteLine();
+>
+> // Owner：可读写 + 授权
+> var ownerProxy = new RoleBasedDocumentProxy(doc, Role.Owner);
+> Console.WriteLine("5. Owner 授权:");
+> ownerProxy.GrantAccess(Role.Editor, "user123");
+> Console.WriteLine("   ✓ 授权成功");
+>
+> Console.WriteLine();
+>
+> // Admin：一切操作
+> var adminProxy = new RoleBasedDocumentProxy(doc, Role.Admin);
+> Console.WriteLine("6. Admin 全部操作:");
+> adminProxy.ReadContent();
+> adminProxy.WriteContent("Admin 修改");
+> adminProxy.RevokeAccess("user123");
+> Console.WriteLine("   ✓ 所有操作通过");
+> ```
+>
+> **关键点**：
+> - 策略表 `Permissions` 从硬编码 `if-else` 中解耦：新增操作或调整权限只需修改 Dictionary
+> - `Role` 枚举按权限等级递增（Viewer < Editor < Owner < Admin），可直接用 `<` 比较
+> - Admin 通过 `HashSet` 特殊处理，在策略表查找前短路——Admin 不需要逐项匹配
+> - `DocumentAccessException` 包含操作名和用户角色，方便调用方生成有意义的错误信息或审计日志
+
+> [!tip]- 练习 3 参考答案（可选）
+>
+> ```csharp
+> using System;
+> using System.Collections.Concurrent;
+> using System.Diagnostics;
+> using System.Reflection;
+> using System.Threading.Tasks;
+>
+> // ============================================
+> // 统计存储（线程安全）
+> // ============================================
+> public static class MethodStats
+> {
+>     private static readonly ConcurrentDictionary<string, (long Count, long TotalTicks)> _stats = new();
+>
+>     public static void Record(string methodName, long ticks)
+>     {
+>         _stats.AddOrUpdate(methodName,
+>             _ => (1, ticks),
+>             (_, existing) => (existing.Count + 1, existing.TotalTicks + ticks));
+>     }
+>
+>     public static void PrintStats()
+>     {
+>         Console.WriteLine("\n=== 方法调用统计 ===");
+>         foreach (var kv in _stats.OrderBy(k => k.Key))
+>         {
+>             var (count, totalTicks) = kv.Value;
+>             double avgMs = totalTicks / (double)Stopwatch.Frequency * 1000.0;
+>             double totalMs = totalTicks / (double)Stopwatch.Frequency * 1000.0;
+>             Console.WriteLine($"  {kv.Key}: 调用 {count} 次, 总耗时 {totalMs:F2}ms, 平均 {avgMs / count:F3}ms");
+>         }
+>     }
+> }
+>
+> // ============================================
+> // MetricsProxy<T> — 基于 DispatchProxy 的性能监控代理
+> // ============================================
+> public class MetricsProxy<T> : DispatchProxy where T : class
+> {
+>     private T? _target;
+>
+>     public static T Create(T target)
+>     {
+>         object proxy = Create<T, MetricsProxy<T>>();
+>         var metricsProxy = (MetricsProxy<T>)proxy;
+>         metricsProxy._target = target;
+>         return (T)proxy;
+>     }
+>
+>     public static void PrintStats() => MethodStats.PrintStats();
+>
+>     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args)
+>     {
+>         if (targetMethod == null) return null;
+>
+>         string methodName = $"{typeof(T).Name}.{targetMethod.Name}";
+>         var sw = Stopwatch.StartNew();
+>
+>         try
+>         {
+>             object? result = targetMethod.Invoke(_target, args);
+>
+>             // 处理异步方法：等 Task 完成后再记录耗时
+>             if (result is Task task)
+>             {
+>                 if (targetMethod.ReturnType.IsGenericType)
+>                     return InterceptAsyncWithMetrics(task, methodName, sw);
+>
+>                 return InterceptVoidAsyncWithMetrics(task, methodName, sw);
+>             }
+>
+>             // 同步方法：直接记录
+>             sw.Stop();
+>             MethodStats.Record(methodName, sw.ElapsedTicks);
+>             return result;
+>         }
+>         catch (TargetInvocationException ex) when (ex.InnerException != null)
+>         {
+>             sw.Stop();
+>             // 异常也记录耗时（帮助发现慢查询导致的异常）
+>             MethodStats.Record($"{methodName} (异常)", sw.ElapsedTicks);
+>             throw ex.InnerException;
+>         }
+>     }
+>
+>     private async Task<object?> InterceptAsyncWithMetrics(Task task, string methodName, Stopwatch sw)
+>     {
+>         try
+>         {
+>             await task;
+>         }
+>         finally
+>         {
+>             sw.Stop();
+>             MethodStats.Record(methodName, sw.ElapsedTicks);
+>         }
+>
+>         var resultProperty = task.GetType().GetProperty("Result");
+>         return resultProperty?.GetValue(task);
+>     }
+>
+>     private async Task InterceptVoidAsyncWithMetrics(Task task, string methodName, Stopwatch sw)
+>     {
+>         try { await task; }
+>         finally
+>         {
+>             sw.Stop();
+>             MethodStats.Record(methodName, sw.ElapsedTicks);
+>         }
+>     }
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> // 使用示例 2.3 中的 IOrderService/OrderService
+> var service = MetricsProxy<IOrderService>.Create(new OrderService());
+>
+> Console.WriteLine("=== DispatchProxy 性能监控代理 ===\n");
+>
+> service.GetOrder(1);
+> service.PlaceOrder(new Order(4, "鼠标", 299m));
+>
+> // 异步方法
+> await ((IOrderService)service).GetOrderAsync(2);
+>
+> // 多次调用
+> service.GetOrder(1);
+> service.GetOrder(1);
+>
+> // 触发异常
+> try { service.GetOrder(999); } catch { /* 忽略 */ }
+>
+> // 打印统计
+> MetricsProxy<IOrderService>.PrintStats();
+> ```
+>
+> **关键点**：
+> - `Stopwatch` 在 `Invoke` 开始时启动，在方法完成后（或 Task 完成后）停止——准确测量墙钟时间
+> - 异步方法通过 `InterceptAsyncWithMetrics` / `InterceptVoidAsyncWithMetrics` 在 `await` 后记录，保证测量的包含完整的异步操作耗时
+> - `ConcurrentDictionary.AddOrUpdate` 原子地更新计数和总 ticks——无需显式加锁
+> - 异常的耗时也记录——帮助发现"慢失败"场景
+> - 统计输出中 `方法名 (异常)` 作为独立 key，不影响同名正常调用的统计
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [[12-decorator|装饰器模式]] — 代理和装饰器结构相似但意图不同。装饰器**扩展功能**（可层层叠加），代理**控制访问**（通常一层）。实践中两者的边界有时模糊

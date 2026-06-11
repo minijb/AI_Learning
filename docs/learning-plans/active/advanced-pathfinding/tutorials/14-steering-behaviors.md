@@ -723,6 +723,326 @@ return seek(agent, future_pos)
 
 将加权和的结果与优先级仲裁结果对比，在同一个拥挤场景中运行。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> Pursuit 预测目标的未来位置，Evade 是 Pursuit 的反向。两者都基于对目标速度的预测。
+>
+> ```cpp
+> // ============================================================
+> // 行为 7: Pursuit — 追击移动目标（预测拦截点）
+> // ============================================================
+> Vec2 pursuit(const Agent& agent, const Agent& target) {
+>     Vec2 to_target = target.position - agent.position;
+>     double dist = to_target.len();
+> 
+>     // 预测时间：基于距离和双方速度的估计
+>     // 如果 agent 和 target 同向，预测时间更长
+>     double combined_speed = agent.max_speed + target.velocity.len();
+>     double look_ahead = (combined_speed > 0.1)
+>         ? dist / combined_speed
+>         : 0.0;
+> 
+>     // 限制预测窗口，避免过远的预测（target 可能转向）
+>     look_ahead = std::min(look_ahead, 3.0);
+> 
+>     // 预测未来位置
+>     Vec2 future_pos = target.position + target.velocity * look_ahead;
+> 
+>     // 对预测位置做 Seek（而非 Seek 当前位置）
+>     return seek(agent, future_pos);
+> }
+> 
+> // ============================================================
+> // 行为 8: Evade — 逃离追踪者（预测追踪者的拦截点并远离）
+> // ============================================================
+> Vec2 evade(const Agent& agent, const Agent& pursuer) {
+>     Vec2 to_pursuer = pursuer.position - agent.position;
+>     double dist = to_pursuer.len();
+> 
+>     // 仅在威胁范围内反应
+>     const double threat_range = 10.0;
+>     if (dist > threat_range) return Vec2();
+> 
+>     // 预测 pursuer 的拦截点
+>     double combined_speed = pursuer.max_speed + agent.velocity.len();
+>     double look_ahead = (combined_speed > 0.1)
+>         ? dist / combined_speed
+>         : 1.0;
+>     look_ahead = std::min(look_ahead, 2.0);
+> 
+>     Vec2 future_threat = pursuer.position + pursuer.velocity * look_ahead;
+> 
+>     // 远离预测的威胁位置
+>     return flee(agent, future_threat);
+> }
+> 
+> // ============================================================
+> // 测试：Pursuit vs Seek 在移动目标场景下的对比
+> // ============================================================
+> void test_pursuit_vs_seek() {
+>     std::cout << "\n===== Pursuit vs Seek — Moving Target =====\n";
+> 
+>     Agent chaser;
+>     chaser.position = {0.0, 0.0};
+>     chaser.velocity = {0.0, 0.0};
+>     chaser.max_speed = 5.0;
+>     chaser.max_force = 8.0;
+> 
+>     // 目标向右上方匀速移动
+>     Agent target;
+>     target.position = {10.0, 2.0};
+>     target.velocity = {2.0, 3.0};  // 向右上移动
+>     target.max_speed = 4.0;
+> 
+>     // Pursuit 模拟
+>     Agent chaser_p = chaser;
+>     Agent target_p = target;
+>     std::cout << "\nPursuit (预测拦截):\n";
+>     for (int step = 0; step < 30; ++step) {
+>         Vec2 force = pursuit(chaser_p, target_p);
+>         update_agent(chaser_p, force, 0.1);
+>         target_p.position = target_p.position + target_p.velocity * 0.1;  // 目标移动
+>         if (step % 5 == 0)
+>             std::cout << "  step " << step << ": chaser=("
+>                       << chaser_p.position.x << "," << chaser_p.position.y
+>                       << ") target=(" << target_p.position.x << ","
+>                       << target_p.position.y << ")\n";
+>         if (chaser_p.position.dist(target_p.position) < 0.5) {
+>             std::cout << "  -> Intercepted at step " << step << "!\n";
+>             break;
+>         }
+>     }
+> 
+>     // Seek（直接追当前位置）模拟做对比
+>     Agent chaser_s = chaser;
+>     Agent target_s = target;
+>     std::cout << "\nSeek (直接追踪):\n";
+>     for (int step = 0; step < 30; ++step) {
+>         Vec2 force = seek(chaser_s, target_s.position);
+>         update_agent(chaser_s, force, 0.1);
+>         target_s.position = target_s.position + target_s.velocity * 0.1;
+>         if (step % 5 == 0)
+>             std::cout << "  step " << step << ": chaser=("
+>                       << chaser_s.position.x << "," << chaser_s.position.y
+>                       << ")\n";
+>         if (chaser_s.position.dist(target_s.position) < 0.5) {
+>             std::cout << "  -> Caught at step " << step << "!\n";
+>             break;
+>         }
+>     }
+> }
+> ```
+>
+> **关键对比**：Pursuit 预测目标的未来位置，agent 会**切角**拦截（走更短路径到预测点），而非追在目标后面跑弧线——这正是"拦截"和"尾随"的区别。在目标速度高时，Pursuit 比 Seek 早 20-40% 的步数到达。
+>
+> **注意**：`look_ahead` 的计算至关重要。`dist / combined_speed` 是"双方在当前位置相遇的预估时间"，这只是近似的——真正的拦截点需要解方程。但 Reynolds 的原论文指出这个近似在实践中足够好。
+
+> [!tip]- 练习 2 参考答案
+> Leader Following = Arrive(带偏移) + 条件 Seek。核心是维护一个相对于 Leader 的偏移位置，并根据距离切换行为模式。
+>
+> ```cpp
+> // ============================================================
+> // 行为 9: Leader Following — 编队跟随
+> // ============================================================
+> struct LeaderFollower {
+>     Vec2 offset;               // 相对于 leader 的目标偏移（如 {-2.0, 2.0} = 左后方）
+>     double catchup_dist = 4.0;  // 超过此距离切换到追赶模式
+>     double settle_dist = 1.0;   // 在此距离内使用 Arrival 精确停靠
+> 
+>     Vec2 compute(const Agent& follower, const Agent& leader) {
+>         // 计算世界空间中的目标位置 = leader 位置 + 旋转后的偏移
+>         Vec2 leader_dir = leader.velocity;
+>         double speed = leader_dir.len();
+>         if (speed < 0.1) {
+>             // Leader 静止：直接用世界空间偏移
+>             leader_dir = {1.0, 0.0};  // 默认朝向
+>         } else {
+>             leader_dir = leader_dir.norm();
+>         }
+> 
+>         // 将局部偏移旋转到世界空间
+>         // 局部坐标：x = 前进方向，y = 右侧
+>         Vec2 world_offset = {
+>             leader_dir.x * offset.x - leader_dir.y * offset.y,  // 前/后
+>             leader_dir.x * offset.y + leader_dir.y * offset.x   // 左/右
+>         };
+>         Vec2 target_pos = leader.position + world_offset;
+> 
+>         double dist = follower.position.dist(target_pos);
+> 
+>         if (dist > catchup_dist) {
+>             // 落后太多 → 全速追赶（Seek + 略大的 max_speed 模拟）
+>             return seek(follower, target_pos) * 1.5;
+>         } else if (dist > settle_dist) {
+>             // 接近中 → 正常 Seek
+>             return seek(follower, target_pos);
+>         } else {
+>             // 已就位 → Arrival 精确停靠
+>             // 临时修改 arrival_radius 为 settle_dist
+>             Agent tmp = follower;
+>             tmp.arrival_radius = settle_dist;
+>             return arrive(tmp, target_pos);
+>         }
+>     }
+> };
+> 
+> // 测试：Leader 走 S 形路径，Follower 跟随
+> void test_leader_following() {
+>     std::cout << "\n===== Leader Following =====\n";
+> 
+>     Agent leader;
+>     leader.position = {0.0, 0.0};
+>     leader.velocity = {3.0, 0.0};
+>     leader.max_speed = 4.0;
+>     leader.max_force = 5.0;
+> 
+>     Agent follower;
+>     follower.position = {-3.0, -2.0};  // 初始落后
+>     follower.velocity = {0.0, 0.0};
+>     follower.max_speed = 5.0;          // follower 需比 leader 快才能追上
+>     follower.max_force = 8.0;
+>     follower.arrival_radius = 1.5;
+> 
+>     LeaderFollower lf;
+>     lf.offset = {-2.0, 2.0};  // 左后方 2m
+> 
+>     // 让 leader 走简单的 S 形（通过改变 velocity 方向模拟）
+>     std::vector<Vec2> leader_path = {
+>         {3.0, 0.0}, {3.0, 3.0}, {0.0, 3.0}, {0.0, 6.0}, {3.0, 6.0}
+>     };
+> 
+>     for (int step = 0; step < 100; ++step) {
+>         // Leader 的简单路径跟踪（Seek 下一个 waypoint）
+>         int wp = step / 20;  // 每 20 步换一个方向
+>         if (wp < (int)leader_path.size()) {
+>             Vec2 f = seek(leader, leader_path[wp]);
+>             update_agent(leader, f, 0.1);
+>         }
+> 
+>         // Follower 跟随
+>         Vec2 f = lf.compute(follower, leader);
+>         update_agent(follower, f, 0.1);
+> 
+>         if (step % 10 == 0) {
+>             double d = follower.position.dist(
+>                 leader.position + Vec2{lf.offset.x, lf.offset.y});
+>             std::cout << "  step " << step << ": leader=("
+>                       << leader.position.x << "," << leader.position.y
+>                       << ") follower=(" << follower.position.x << ","
+>                       << follower.position.y
+>                       << ") offset_err=" << d << "\n";
+>         }
+>     }
+> }
+> ```
+>
+> **关键设计决策**：
+> 1. **偏移的旋转**：`offset` 定义在 leader 的**局部坐标**（前/后/左/右）中。当 leader 转向时，目标位置会随 leader 的朝向旋转——follower 保持在编队位置而非世界空间中的固定偏移。
+> 2. **追赶阈值 `catchup_dist`**：落后超过此值时，follower 使用 1.5 倍的 Seek 力积极追赶。这个"加速追赶"避免了 follower 永远追不上 leader（因为 follower 在 Seek 模式下稳定速度 = max_speed，刚好等于 leader 速度时追不上）。
+> 3. **停靠阈值 `settle_dist`**：进入此范围后切换到 Arrival，避免 follower 在目标位置附近来回震荡（Seek 会在目标点附近反复"冲过头→掉头→冲过头"）。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 优先级仲裁器按严格优先级逐个评估行为，第一个返回非零力的行为胜出。
+>
+> ```cpp
+> // ============================================================
+> // 优先级仲裁器（Priority Arbiter）
+> // ============================================================
+> struct PriorityArbiter {
+>     // 优先级从高到低排列的行为
+>     // 返回第一个非零力（或力大于阈值的）
+> 
+>     Vec2 compute(const Agent& agent,
+>                  const Path& path,
+>                  const std::vector<Obstacle>& obstacles,
+>                  PathFollower& follower,
+>                  WanderBehavior& wander) {
+> 
+>         const double MIN_FORCE = 0.01;  // 低于此值视为"无效"
+> 
+>         // === 优先级 1: Obstacle Avoidance（最高） ===
+>         Vec2 f_avoid = obstacle_avoidance(agent, obstacles);
+>         if (f_avoid.len() > MIN_FORCE) {
+>             // 有碰撞威胁 → 直接返回避障力，忽略所有其他行为
+>             return f_avoid;
+>         }
+> 
+>         // === 优先级 2: Path Following ===
+>         Vec2 f_path = follower.compute(agent, path);
+>         if (f_path.len() > MIN_FORCE) {
+>             // 沿路径前进
+>             return f_path.trunc(agent.max_force);
+>         }
+> 
+>         // === 优先级 3: Wander（最低） ===
+>         Vec2 f_wander = wander.compute(agent);
+>         return f_wander.trunc(agent.max_force);
+>     }
+> };
+> 
+> // ============================================================
+> // 对比测试：加权叠加 vs 优先级仲裁
+> // ============================================================
+> void compare_arbitration() {
+>     std::cout << "\n===== Weighted Blend vs Priority Arbiter =====\n";
+> 
+>     // 场景：agent 正前方有障碍，路径指向障碍后方
+>     Agent agent;
+>     agent.position = {0.0, 0.0};
+>     agent.velocity = {3.0, 0.0};
+>     agent.max_speed = 5.0;
+>     agent.max_force = 10.0;
+> 
+>     Path path = {{15.0, 0.0}};  // 目标在正前方
+>     std::vector<Obstacle> obstacles = {{{5.0, 0.0}, 2.0}};  // 障碍在正前方 5m
+> 
+>     PathFollower follower;
+>     WanderBehavior wander;
+> 
+>     // --- 方案 A: 加权叠加 ---
+>     Vec2 f_path   = follower.compute(agent, path) * 1.2;
+>     Vec2 f_avoid  = obstacle_avoidance(agent, obstacles) * 2.0;
+>     Vec2 f_wander = wander.compute(agent) * 0.1;
+>     Vec2 blended = (f_path + f_avoid + f_wander).trunc(agent.max_force);
+> 
+>     std::cout << "加权叠加:\n";
+>     std::cout << "  Path Follow:   (" << f_path.x << "," << f_path.y
+>               << ") mag=" << f_path.len() << "\n";
+>     std::cout << "  Obstacle Avoid:(" << f_avoid.x << "," << f_avoid.y
+>               << ") mag=" << f_avoid.len() << "\n";
+>     std::cout << "  Blended:       (" << blended.x << "," << blended.y
+>               << ") mag=" << blended.len() << "\n";
+>     std::cout << "  → 力互相抵消风险: path 向右前拉, avoid 向左/上推, "
+>               << "加权和可能接近零 → agent 撞墙!\n\n";
+> 
+>     // --- 方案 B: 优先级仲裁 ---
+>     PriorityArbiter arbiter;
+>     Vec2 arbitrated = arbiter.compute(agent, path, obstacles, follower, wander);
+> 
+>     std::cout << "优先级仲裁:\n";
+>     std::cout << "  Obstacle Avoid 检测到威胁 → 直接返回避障力\n";
+>     std::cout << "  Arbitrated:     (" << arbitrated.x << "," << arbitrated.y
+>               << ") mag=" << arbitrated.len() << "\n";
+>     std::cout << "  → Path Follow 和 Wander 被忽略, agent 专注避障\n";
+> }
+> ```
+>
+> **加权叠加 vs 优先级仲裁的关键差异**：
+>
+> | 方面 | 加权叠加 | 优先级仲裁 |
+> |------|---------|-----------|
+> | 力冲突处理 | 向量和 → 可能抵消 | 胜者全拿 → 无抵消 |
+> | 行为平滑性 | 高（多个力融合） | 低（行为切换有跳跃） |
+> | 安全性 | 中等（力抵消可能撞墙） | 高（避障绝对优先） |
+> | 调参难度 | 高（权重要精确配比） | 低（只需定优先级顺序） |
+> | 适用场景 | 巡逻、漫游等低风险 | 狭窄空间、密集障碍 |
+>
+> **混合方案**（工程实践中最常用）：避障使用**硬仲裁**（优先级最高，独占输出），其他行为使用**加权叠加**。这样既保证了安全性，又保持了运动的平滑性。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Reynolds 原始论文**: "Steering Behaviors For Autonomous Characters" (1999, GDC). 所有行为的形式化定义和 C++ 伪代码。[red3d.com/cwr/steer/](https://www.red3d.com/cwr/steer/)

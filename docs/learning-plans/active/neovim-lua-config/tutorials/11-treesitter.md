@@ -175,6 +175,75 @@ Neovim 0.12 内置了 treesitter 增量选择（不需要 nvim-treesitter 插件
 - 反复按 `grn` → 扩展到父节点
 - `grm` → 收缩到子节点
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 对比 treesitter 高亮开关的具体差异：
+>
+> 1. 打开一个包含嵌套结构的 Lua 文件（如一个带多个闭包的模块）
+> 2. 执行 `:lua vim.treesitter.stop()` 后观察：
+>    - 所有 tokens 退化为正则高亮——关键字、字符串、注释只有基本颜色
+>    - **函数参数**失去独立颜色，全部变为默认文本色
+>    - **嵌套函数**内外层函数名颜色相同，无法区分层级
+>    - **模板字符串**中的插值表达式和普通字符串颜色一致
+>    - `@param`、`@return` 等 LuaDoc 标签不再特殊高亮
+> 3. 执行 `:lua vim.treesitter.start()` 恢复：
+>    - **参数 `self`** 被高亮为特殊颜色（`@variable.builtin`）
+>    - **函数调用** `foo(bar)` 中 `foo` 是 `@function` 色，参数 `bar` 是 `@variable.parameter` 色
+>    - **table 构造器**中 key 和 value 可被赋予不同颜色组
+>    - **代码注入**：Markdown 中的 Lua 代码块内部也有正确的 Lua 语法高亮
+>
+> **核心价值**：正则高亮基于文本模式匹配，"看到"的是字符序列；treesitter 基于 AST，"理解"的是语法结构。这就是为什么 treesitter 能正确高亮第 5 层嵌套的函数参数而正则高亮会"迷路"。
+
+> [!tip]- 练习 2 参考答案
+> 手动安装 parser 的详细步骤和输出解读：
+>
+> ```vim
+> " 步骤 1: 查看已安装的 parsers
+> :lua print(vim.inspect(require('nvim-treesitter').get_installed('parsers')))
+> " 预期输出: { "bash", "c", "diff", "html", "lua", "luadoc", "markdown", ... }
+>
+> " 步骤 2: 安装 Rust parser
+> :lua require('nvim-treesitter').install('rust')
+> " 这将异步下载并编译 tree-sitter-rust
+> " 注意：该操作需要 C 编译器（gcc/clang/MSVC）
+>
+> " 步骤 3: 验证
+> :checkhealth treesitter
+> " 检查 "Parser: rust" 行是否显示 "OK"
+> ```
+>
+> `:checkhealth treesitter` 的关键输出行：
+> - `Parser: rust ✓` — parser 已安装且可用
+> - `Highlight (lua) ✓` — lua 的高亮 query 正常工作
+> - `Installation` 部分会显示编译器检测结果（Windows 上常需要额外配置）
+>
+> **Windows 注意事项**：如果没有 C 编译器，`:checkhealth treesitter` 会报告 "No C compiler found"。需要安装 MSVC Build Tools 或 MinGW，并在 PATH 中可用。
+
+> [!tip]- 练习 3 参考答案
+> Neovim 0.12 内置增量选择的完整操作流程：
+>
+> | 按键 | 操作 | 效果 |
+> |------|------|------|
+> | `grn` | `vim.treesitter.incremental_selection('node')` | 选中光标所在的最小语法节点 |
+> | `grn`（重复） | 同上 | 扩展到父节点（如：标识符 → 函数调用 → 赋值语句 → 函数体） |
+> | `grm` | `vim.treesitter.incremental_selection('shrink')` | 收缩到上一级子节点 |
+>
+> **实践示例**（在 Lua 文件中）：
+> 1. 光标放在 `local x = foo(bar(baz))` 的 `baz` 上
+> 2. 按 `grn`：选中 `baz`（标识符节点）
+> 3. 再按 `grn`：选中 `bar(baz)`（函数调用节点）
+> 4. 再按 `grn`：选中 `foo(bar(baz))`（外层函数调用）
+> 5. 再按 `grn`：选中 `foo(bar(baz))` 所属的整个赋值语句
+> 6. 按 `grm`：收缩回 `foo(bar(baz))`
+>
+> **实用场景**：快速选中一个函数体（3 次 `grn`）然后 `y` 复制；选中一组参数（进入参数列表节点）然后 `c` 修改。
+>
+> **注意**：增量选择需要 treesitter parser 已附着到当前 buffer。如果按 `grn` 无反应，检查 treesitter 是否已启用（`:lua print(vim.treesitter.highlighter.active)` 应返回 true）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

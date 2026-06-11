@@ -633,6 +633,220 @@ ToneMap           Graphics  0.4ms   Bloom
 
 设计双缓冲策略使得 Frame N+1 的 culling 不读取 Frame N 正在写入的 depth。画出完整的时间线、barrier 和 fence 序列。实现代码框架。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **识别并行机会 — 对示例 Pass 序列的完整分析**
+> 
+> **原始序列**（题中给出的示例）：
+> 
+> | Pass | Queue | 耗时 | 依赖 |
+> |------|-------|------|------|
+> | Z-Prepass | Graphics | 1.2ms | — |
+> | Shadow Maps | Graphics | 2.5ms | — |
+> | GPU Culling | Graphics | 0.8ms | — |
+> | G-Buffer | Graphics | 3.1ms | Culling |
+> | SSAO | Graphics | 1.8ms | G-Buffer |
+> | Lighting | Graphics | 2.2ms | Shadow+GBuffer+SSAO |
+> | Bloom | Graphics | 1.0ms | Lighting |
+> | ToneMap | Graphics | 0.4ms | Bloom |
+> 
+> **并行化方案分析**：
+> 
+> 1. **GPU Culling → Compute Queue**（与 Z-Prepass + Shadow 并行）
+>    - 依赖：无（Culling 只依赖上一帧的 depth buffer 和物体数据）
+>    - 并行窗口大小：max(1.2+2.5, 0.8) = 3.7ms，节省 0.8ms
+> 
+> 2. **SSAO → Compute Queue**（与 G-Buffer Graphics 并行）
+>    - 依赖：需要 G-Buffer 完成后的 depth/normal（需 fence 同步）
+>    - 但 SSAO 本身可以用前序帧的 depth 近似（TAA 友好），或用本帧 G-Buffer 完成后立即开始
+>    - 严格依赖方案：SSAO 必须等 G-Buffer 完成 → 无法并行
+>    - 宽松方案（TAA reprojection）：SSAO 读上一帧 depth，与当前 G-Buffer 并行 → 节省 1.8ms
+> 
+> 3. **Bloom → Compute Queue**（与 Lighting Graphics 并行）
+>    - 依赖：Bloom 需要 Lighting 的输出（HDR color buffer）
+>    - Bloom 的 downsample 阶段可以提前（从上一帧 HDR 做），但 upsample+composite 必须等 Lighting
+>    - 实际可行方案：Bloom downsample 与 Lighting 并行 → 节省约 0.6ms
+> 
+> **Gantt Chart（优化后）**：
+> ```
+> Graphics: |████ ZPrepass ████|████ ShadowMaps ████|████ G-Buffer ████|████ Lighting ████|██ TMap ██|
+>           | 1.2ms            | 2.5ms              | 3.1ms            | 2.2ms            | 0.4ms |
+> Compute:  |██ GPU Culling ██|                    |████ SSAO ████|████ Bloom ████|              |
+>           | 0.8ms           |                    | 1.8ms        | 1.0ms         |              |
+> ```
+> 
+> **理论节省**：min(3.7, 0.8) + min(3.1, 1.8) + min(2.2, 1.0) = 0.8 + 1.8 + 1.0 = **3.6ms**
+> **原始总时间**：13.0ms → **优化后**：9.4ms（节省 27.7%）
+> 
+> **注意事项**：
+> - 需要双缓冲 SSAO 的输入（上一帧 depth + 当前帧 depth）
+> - Barrier 开销约 0.02~0.05ms per synchronization point
+> - 实际节省约 3.3~3.5ms（减去 barrier overhead）
+> - 此优化对 AMD GPU（多 ACE）收益更大，NVIDIA Turing+ 也有 8-15% 收益
+
+> [!tip]- 练习 2 参考答案
+> **Compute Particle + Graphics 并行 — 代码框架**
+> 
+> ```cpp
+> // DX12 双队列粒子更新与 Shadow Map 并行
+> 
+> void RenderFrameWithAsyncCompute() {
+>     // ===== 准备工作 =====
+>     ResetCommandAllocators();
+> 
+>     // ===== Compute Queue: 粒子更新 =====
+>     {
+>         computeCmdList->SetPipelineState(particleUpdatePSO);
+>         computeCmdList->SetComputeRootSignature(particleRootSig);
+> 
+>         // 设置粒子 buffer (UAV)
+>         computeCmdList->SetComputeRootUnorderedAccessView(0, particleBufferGPUVA);
+>         computeCmdList->SetComputeRoot32BitConstant(1, particleCount, 0);
+>         computeCmdList->SetComputeRoot32BitConstant(1, deltaTimeAsUint, 1);
+> 
+>         UINT numGroups = (particleCount + 255) / 256;
+>         computeCmdList->Dispatch(numGroups, 1, 1);
+> 
+>         // UAV barrier: 确保粒子更新完成后才能被 Graphics 读取
+>         D3D12_RESOURCE_BARRIER uavToSRV = {};
+>         uavToSRV.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+>         uavToSRV.Flags = D3D12_RESOURCE_BARRIER_FLAG_NONE;
+>         uavToSRV.UAV.pResource = particleBuffer;
+>         computeCmdList->ResourceBarrier(1, &uavToSRV);
+> 
+>         computeCmdList->Close();
+>         ID3D12CommandList* computeLists[] = { computeCmdList };
+>         computeQueue->ExecuteCommandLists(1, computeLists);
+> 
+>         // Signal fence: compute → graphics
+>         computeFenceValue++;
+>         computeQueue->Signal(computeFence, computeFenceValue);
+>     }
+> 
+>     // ===== Graphics Queue: Shadow Maps（与 Compute 并行） =====
+>     {
+>         graphicsCmdList->SetPipelineState(shadowPSO);
+>         graphicsCmdList->OMSetRenderTargets(0, nullptr, FALSE,
+>             &shadowDSV.cpuHandle);
+> 
+>         // 渲染 Shadow Maps（不依赖粒子数据）
+>         for (auto& shadowCaster : shadowCasters) {
+>             graphicsCmdList->IASetVertexBuffers(…);
+>             graphicsCmdList->DrawIndexedInstanced(…);
+>         }
+> 
+>         // ===== 等待 Compute 完成 =====
+>         // Graphics queue 等待 compute fence
+>         graphicsQueue->Wait(computeFence, computeFenceValue);
+> 
+>         // 现在粒子 buffer 可以被安全读取
+>         // 状态转换: UAV → SRV (在 Graphics 端读取)
+>         D3D12_RESOURCE_BARRIER particleToSRV = {};
+>         particleToSRV.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+>         particleToSRV.Transition.pResource = particleBuffer;
+>         particleToSRV.Transition.StateBefore = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+>         particleToSRV.Transition.StateAfter = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+>         graphicsCmdList->ResourceBarrier(1, &particleToSRV);
+> 
+>         // ===== 渲染粒子（使用 Compute 更新的 buffer） =====
+>         graphicsCmdList->SetPipelineState(particleRenderPSO);
+>         graphicsCmdList->SetGraphicsRootShaderResourceView(0,
+>             particleBufferGPUVA); // 作为 SRV 读取
+>         graphicsCmdList->DrawInstanced(…);
+> 
+>         graphicsCmdList->Close();
+>         ID3D12CommandList* gfxLists[] = { graphicsCmdList };
+>         graphicsQueue->ExecuteCommandLists(1, gfxLists);
+>     }
+> 
+>     // ===== GPU Timestamp 测量 =====
+>     // 串行版本: 先 particle update → 再 shadow → 再 particle render = total_serial
+>     // 并行版本: particle update || shadow → particle render = total_parallel
+>     // saving = (total_serial - total_parallel) / total_serial × 100%
+> }
+> ```
+> 
+> **关键同步点**：
+> 1. Compute queue 写完 particle buffer → UAV barrier → Signal fence
+> 2. Graphics queue 渲染完 shadow → Wait(compute fence) → 转换 particle buffer 为 SRV → 读粒子数据
+> 3. 这样就保证了 RAW (Read-After-Write) 的正确性
+
+> [!tip]- 练习 3 参考答案
+> **跨帧流水线 — 双缓冲设计与 Barrier/Fence 序列**
+> 
+> **时间线设计**（双缓冲 depth buffer: `DepthBuf[0]` 和 `DepthBuf[1]`）：
+> 
+> ```
+> Frame N (使用 DepthBuf[0]):
+> ═══════════════════════════════════════════════════════════
+> Graphics: | Shadow[0] | G-Buffer[0] | Lighting | PostFX → Present
+> Compute:             |  SSAO(N)   | Bloom(N)|
+>                       (读 DepthBuf[0])
+> 
+> Compute (提前): | GPU Culling for N+1 |
+>                  (读 DepthBuf[0], 因为 N+1 还没开始)
+> ═══════════════════════════════════════════════════════════
+> 
+> Frame N+1 (使用 DepthBuf[1]):
+> ═══════════════════════════════════════════════════════════
+> Graphics: | Shadow[1] | G-Buffer[1] | Lighting | PostFX → Present
+> Compute:             |  SSAO(N+1)  | Bloom(N+1)|
+>                       (读 DepthBuf[1])
+> 
+> Compute (提前): | GPU Culling for N+2 |
+>                  (读 DepthBuf[1])
+> ═══════════════════════════════════════════════════════════
+> ```
+> 
+> **双缓冲策略**：
+> - Frame N 写入 `DepthBuf[N%2]`（G-Buffer 的 depth RT）
+> - Frame N+1 写入 `DepthBuf[(N+1)%2]`——**不同的 buffer！**
+> - Frame N 的 GPU Culling（为 N+1 准备）读取 `DepthBuf[N%2]`
+> - 关键：**读的是上一帧的 depth，写的是当前帧不同的 buffer** → 天然的 WAR 避免
+> 
+> **Barrier 和 Fence 序列（DX12 伪代码）**：
+> ```
+> // ===== Frame N =====
+> // Compute Queue
+> Dispatch(GPUCulling_FrameN);           // 读 DepthBuf[N%2] as SRV
+> Barrier(UAV→COMMON, g_CulledObjects[N%2]); // culling 结果就绪
+> ComputeFence.Value = ++computeFenceValue;
+> ComputeQueue.Signal(ComputeFence, computeFenceValue);
+> 
+> // Graphics Queue
+> RenderShadow(DepthBuf[N%2]);           // 写 DepthBuf[N%2] as DSV
+> GraphicsQueue.Wait(ComputeFence, computeFenceValue); // 等 culling 完成
+> Barrier(COMMON→SRV, g_CulledObjects[N%2]);
+> DrawIndexedInstancedIndirect(..., g_CulledObjects[N%2]);
+> RenderGBuffer(DepthBuf[N%2]);
+> 
+> // ===== Frame N+1 =====
+> // Compute Queue (culling 读 N 的 depth，写 N+1 的 culling buffer)
+> Dispatch(GPUCulling_FrameN1);          // 读 DepthBuf[N%2] as SRV
+> Barrier(UAV→COMMON, g_CulledObjects[(N+1)%2]);
+> ...
+> 
+> // Graphics Queue (渲染到 N+1 的 depth)
+> RenderShadow(DepthBuf[(N+1)%2]);       // 写 DepthBuf[(N+1)%2] — 不同 buffer!
+> GraphicsQueue.Wait(ComputeFence, ...);
+> DrawIndexedInstancedIndirect(..., g_CulledObjects[(N+1)%2]);
+> ```
+> 
+> **资源列表（每帧独立）**：
+> 
+> | 资源 | Frame N | Frame N+1 | 用途 |
+> |------|---------|-----------|------|
+> | DepthBuffer | Buf[0] | Buf[1] | G-Buffer depth (DSV → SRV for culling) |
+> | CulledObjects | Arr[0] | Arr[1] | Culling 输出 (UAV → SRV for DrawIndirect) |
+> | IndirectArgs | Args[0] | Args[1] | DrawIndexedInstancedIndirect 参数 |
+> | SSGI/SSAO buffer | Buf[0] | Buf[1] | Compute 输出供 Lighting 读取 |
+> 
+> **跨帧流水线的额外收益**：除了 per-frame async compute，culling 为下一帧提前完成 → culling latency 从 wait-for-previous-frame 变为 zero（GPU Culling 在上一帧的 compute overlap 中完成，本帧 graphics 直接使用）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

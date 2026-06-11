@@ -660,6 +660,70 @@ Selector (Root)
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **A. 陷阱机关 → FSM**
+>
+> 理由：陷阱机关的状态空间极小（3-4 状态）且状态切换有严格的顺序约束（待机→激活→冷却→待机）。引用维度 1（复杂度天花板）：FSM 在 ≤6 状态时是最优选择——1 个枚举 + 1 个 switch，代码量约 50 行，圈复杂度 < 5。引用维度 5（性能）：陷阱通常在场景中大量存在（20-50+），每个机关的 AI 必须是常数级开销。BT 的每帧树遍历在此场景中是净损失。引用维度 2（模块化）：机关之间独立无交互——不需要 BT 的子树复用和 Blackboard 共享数据。不需要混合方案：纯 FSM 即可。
+>
+> **B. 普通敌人 → BT**
+>
+> 理由：8-12 种顶层行为已超过 FSM 的舒适区（维度 1 拐点约 6-8 种行为）。不同敌人类型共享行为骨架但参数化差异（攻击距离、移动速度、警戒范围）——这正是 BT 的子树参数化优势（维度 2：模块化复用）。设计师预期会新增 2-3 种行为——BT 的"插入新子树"比 FSM 的"修改 N 个状态的转移规则"更安全（维度 3：修改成本模型预测 BT 的已有节点受影响率 0-10% vs FSM 的 80-100%）。建议混合：高层战术决策用 BT（Selector 优先级驱动），低层动画用 Animation State Machine / FSM（严格的 animation blending 和过渡条件需要确定性状态）。中层"追击执行"和"攻击节奏"可保留在 BT 内部（通过 Sequence 拆分子步骤）或下沉到轻量 FSM（如"Attack"状态内部包含 Windup→Swing→Recovery 的动画 FSM）。
+>
+> **C. Boss 战 → 混合：BT（阶段决策）+ FSM（阶段内攻击序列）+ Animator（动画过渡）**
+>
+> 理由：Boss 的**阶段切换**是条件驱动的（HP 阈值 → 阶段变化），BT 的条件评估天然适合——不需要在阶段 1 的每个攻击状态中检查"HP < 66% → 切换到阶段 2"。但**阶段内的攻击序列**有严格顺序要求（"必须先放技能 A，等 2 秒后接技能 B"），这是 FSM 的优势——序列和时序在 FSM 中表达得比 BT 的 Sequence + Wait 更精确（引用维度 4：确定性）。动画过渡要求平滑且可中断，属于低层 Animation State Machine 的职责（引用维度 5：决策频率越高用越简单的机制）。架构设计：高层 = BT（评估阶段切换条件），中层 = 每个阶段一个 FSM/HFSM（定义该阶段的攻击模式序列），低层 = Animator（驱动具体动画混合和过渡）。Blackboard 作为跨层共享总线——BT 写入 `CurrentBossPhase`，FSM 读取后切换模式，Animator 读取 `IsInRecovery` 控制动画混合。
+
+> [!tip]- 练习 2 参考答案
+> **系统审计示例**（基于本教程 §2 示例 A 的 FSM 代码 — 巡逻+追击+攻击+撤退 敌人 AI）：
+>
+> **1. 当前状态和转移边**：
+> - 状态：`Patrol`、`Chase`、`Attack`、`Flee`、`Dead`
+> - 转移边（来源→去向：触发条件）：
+>   - `Patrol → Chase`: `EnemySpotted`; `Patrol → Dead`: `HealthZero`
+>   - `Chase → Attack`: `InMeleeRange`; `Chase → Flee`: `HealthLow`; `Chase → Patrol`: `EnemyLost`; `Chase → Dead`: `HealthZero`
+>   - `Attack → Chase`: `OutOfMeleeRange`; `Attack → Flee`: `HealthLow`; `Attack → Dead`: `HealthZero`
+>   - `Flee → Patrol`: `EnemyLost`; `Flee → Dead`: `HealthZero`
+>   - `Dead`: 无转出
+>
+> **2. 交叉耦合的转移规则**：
+> - `HealthLow → Flee` 存在于 `Chase`、`Attack` 两个状态中。修改 Flee 的条件（如从 30% HP 改为 25% HP + 队友死亡）需要同时修改这两个状态的转移分支——耦合点。
+> - `EnemyLost → Patrol` 存在于 `Chase` 和 `Flee`。如果将来 Patrol 需要携带"上次丢失敌人的位置"参数，两个转移点都需要向 Blackboard 写入。
+> - `HealthZero → Dead` 存在于除 Dead 外的**所有**状态——这是 4 条重复的转移边。在 FSM 中这是典型的"全局转移"问题，HSM 通过父状态统一处理可以解决。
+>
+> **3. 新增 3 个行为后的修改影响**：
+> - **Stunned/硬直**：需要从 `Chase`、`Attack`（可能还有 `Flee`）增加转移边。需要 `Stunned` 状态内维护计时器。结束后需要知道"回到哪个状态"——FSM 不天然支持"中断后返回"，需要额外栈或成员变量。修改状态数：3-4 个已有状态。
+> - **Loot/拾取**：通常发生在敌人死亡后或战斗结束后（Patrol 中看到掉落物）。需要在 `Patrol` 和可能的 `Chase`/`Flee` 后添加转移。修改状态数：2-3 个。
+> - **Taunt/嘲讽**：可能从任何战斗状态触发。需要在 `Chase` 和 `Attack` 添加转移。修改状态数：2 个。
+> - **总修改**：6-9 处，覆盖 80% 的已有状态。
+>
+> **4. 判断：应迁移到 BT（混合方案可选）**：
+> 该系统已处于 FSM 反模式边界——"向已有状态添加补丁代码""修改一条转移会影响另一条""设计师每次提新行为都感到恐惧"。如果项目还有后续迭代计划（新敌人变体、新 AI 行为），迁移到 BT 是更可持续的选择。**分层架构草图**：
+> ```
+> High (BT): Selector → Flee优先 | Attack优先 | Chase | Patrol → 条件驱动决策
+> Mid (无/Func): BT 的 Action 节点直接执行简单逻辑（MoveTo、PlayAnimation）
+> Low (Animator): Idle / Walk / Run / Attack Blend Tree — 从 Blackboard 读取参数
+> ```
+> 如果团队熟悉 FSM 且迁移成本过高（deadline 临近），可以先用 HSM 重构提取全局转移（Dead/Stunned），推迟 BT 迁移到下一个里程碑。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **双实现对比实验参考数据**（基于典型中级开发者的经验值）：
+>
+> | 指标 | FSM | BT |
+> |------|-----|----|
+> | 实现耗时 | ~2h（7 个状态 + 15 条转移边） | ~3h（22 个节点 + Blackboard + ~40 行条件函数） |
+> | 代码行数 | ~180 行（1 个枚举 + 7 个 Update 函数 + 1 个转移表） | ~120 行（树结构定义 50 行 + 节点函数 70 行） |
+> | 初始 bug 数 | 3 个（遗漏 EnemyLost→Patrol、Flee 后没有重置目标、Dead 可以被重复触发） | 2 个（Sequence 中 Condition 顺序错、忘记添加 Repeater） |
+> | 新增 1 个行为 | ~35min（添加状态 + 修改 4 个已有状态的转移规则） | ~15min（添加 1 个 Sequence 子树、3 个节点） |
+> | 修改 1 个行为 | ~20min（修改 2 个函数中的条件判断） | ~8min（修改 1 个 Condition 函数的逻辑） |
+>
+> **与教程预测的差异分析**：
+> 教程预测 BT 的代码行数通常比 FSM 多（因为需要节点框架），但在本实验中 BT 更少——这是因为 7 种行为本身带来了 FSM 转移表的固有开销（每个状态需处理多条转移），而 BT 的复用（`HasTarget` Condition 被多分支共享）减少了重复代码。这个差异取决于**行为之间的条件重叠度**——如果条件重叠高，BT 更省代码；如果每个行为条件独立，FSM 更省。实际项目中这个重叠度是需要测量的。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的分析有充分依据并引用了教程中的比较维度，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 必读材料

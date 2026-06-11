@@ -749,6 +749,448 @@ Console.WriteLine($"Order {order.OrderId}: {order.Items.Count} items, Total: ¥{
 ```
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 完整 Email 构建器实现：
+>
+> ```csharp
+> public enum EmailPriority { Low, Normal, High }
+>
+> public class Email
+> {
+>     public IReadOnlyList<string> To { get; }
+>     public string? From { get; }
+>     public IReadOnlyList<string> CC { get; }
+>     public IReadOnlyList<string> BCC { get; }
+>     public string? Subject { get; }
+>     public string? Body { get; }
+>     public bool IsHtml { get; }
+>     public EmailPriority Priority { get; }
+>     public IReadOnlyList<string> Attachments { get; }
+>
+>     public Email(
+>         IReadOnlyList<string> to,
+>         string? from,
+>         IReadOnlyList<string> cc,
+>         IReadOnlyList<string> bcc,
+>         string? subject,
+>         string? body,
+>         bool isHtml,
+>         EmailPriority priority,
+>         IReadOnlyList<string> attachments)
+>     {
+>         To = to;
+>         From = from;
+>         CC = cc;
+>         BCC = bcc;
+>         Subject = subject;
+>         Body = body;
+>         IsHtml = isHtml;
+>         Priority = priority;
+>         Attachments = attachments;
+>     }
+> }
+>
+> public interface IEmailBuilder
+> {
+>     IEmailBuilder To(params string[] recipients);
+>     IEmailBuilder From(string sender);
+>     IEmailBuilder CC(params string[] recipients);
+>     IEmailBuilder BCC(params string[] recipients);
+>     IEmailBuilder WithSubject(string subject);
+>     IEmailBuilder WithBody(string body, bool isHtml = false);
+>     IEmailBuilder WithPriority(EmailPriority priority);
+>     IEmailBuilder Attach(params string[] filePaths);
+>     Email Build();
+> }
+>
+> public class EmailBuilder : IEmailBuilder
+> {
+>     private readonly List<string> _to = new();
+>     private string? _from;
+>     private readonly List<string> _cc = new();
+>     private readonly List<string> _bcc = new();
+>     private string? _subject;
+>     private string? _body;
+>     private bool _isHtml;
+>     private EmailPriority _priority = EmailPriority.Normal;
+>     private readonly List<string> _attachments = new();
+>
+>     public IEmailBuilder To(params string[] recipients)
+>     {
+>         _to.AddRange(recipients);
+>         return this;
+>     }
+>
+>     public IEmailBuilder From(string sender)
+>     {
+>         _from = sender;
+>         return this;
+>     }
+>
+>     public IEmailBuilder CC(params string[] recipients)
+>     {
+>         _cc.AddRange(recipients);
+>         return this;
+>     }
+>
+>     public IEmailBuilder BCC(params string[] recipients)
+>     {
+>         _bcc.AddRange(recipients);
+>         return this;
+>     }
+>
+>     public IEmailBuilder WithSubject(string subject)
+>     {
+>         _subject = subject;
+>         return this;
+>     }
+>
+>     public IEmailBuilder WithBody(string body, bool isHtml = false)
+>     {
+>         _body = body;
+>         _isHtml = isHtml;
+>         return this;
+>     }
+>
+>     public IEmailBuilder WithPriority(EmailPriority priority)
+>     {
+>         _priority = priority;
+>         return this;
+>     }
+>
+>     public IEmailBuilder Attach(params string[] filePaths)
+>     {
+>         // 验证文件存在（可选，取决于业务需求）
+>         foreach (var path in filePaths)
+>         {
+>             if (!File.Exists(path))
+>                 throw new FileNotFoundException($"Attachment not found: {path}");
+>         }
+>         _attachments.AddRange(filePaths);
+>         return this;
+>     }
+>
+>     public Email Build()
+>     {
+>         // 必填验证：至少一个收件人
+>         if (_to.Count == 0)
+>             throw new InvalidOperationException(
+>                 "At least one recipient is required. Call To() before Build().");
+>
+>         // 验证收件人邮箱格式（可选增强）
+>         ValidateEmails(_to, "To");
+>         ValidateEmails(_cc, "CC");
+>         ValidateEmails(_bcc, "BCC");
+>
+>         return new Email(
+>             _to.AsReadOnly(),
+>             _from,
+>             _cc.AsReadOnly(),
+>             _bcc.AsReadOnly(),
+>             _subject,
+>             _body,
+>             _isHtml,
+>             _priority,
+>             _attachments.AsReadOnly());
+>     }
+>
+>     private static void ValidateEmails(List<string> emails, string field)
+>     {
+>         foreach (var email in emails)
+>         {
+>             if (!email.Contains('@'))
+>                 throw new InvalidOperationException(
+>                     $"Invalid email in {field}: '{email}'");
+>         }
+>     }
+> }
+>
+> // ═══ 使用 ═══
+> var email = new EmailBuilder()
+>     .To("alice@example.com", "bob@example.com")
+>     .From("noreply@myapp.com")
+>     .CC("manager@example.com")
+>     .WithSubject("Welcome!")
+>     .WithBody("<h1>Hello</h1><p>Thanks for signing up.</p>", isHtml: true)
+>     .WithPriority(EmailPriority.High)
+>     .Attach("welcome-guide.pdf")
+>     .Build();
+>
+> Console.WriteLine($"To: {string.Join(", ", email.To)}");
+> Console.WriteLine($"Subject: {email.Subject}");
+> Console.WriteLine($"Priority: {email.Priority}");
+> ```
+>
+> **设计要点：**
+> - `To` 支持多次调用逐步添加收件人（`params` + `AddRange`）
+> - `Build()` 是唯一验证关口——至少一个收件人、邮箱格式检查
+> - 所有集合使用 `.AsReadOnly()` 防御性拷贝，防止构造后外部修改 Builder 内部状态
+> - `IEmailBuilder` 接口允许未来替换 Builder 实现（如测试 mock）
+
+> [!tip]- 练习 2 参考答案
+> 带完整跨字段验证的 `DatabaseConfigBuilder`：
+>
+> ```csharp
+> public class DatabaseConfig
+> {
+>     public string Host { get; }
+>     public int Port { get; }
+>     public string Database { get; }
+>     public string? Username { get; }
+>     public string? Password { get; }
+>     public bool UsePooling { get; }
+>     public int MaxPoolSize { get; }
+>     public bool Encrypt { get; }
+>     public bool TrustServerCertificate { get; }
+>
+>     public DatabaseConfig(
+>         string host, int port, string database,
+>         string? username, string? password,
+>         bool usePooling, int maxPoolSize,
+>         bool encrypt, bool trustServerCertificate)
+>     {
+>         Host = host;
+>         Port = port;
+>         Database = database;
+>         Username = username;
+>         Password = password;
+>         UsePooling = usePooling;
+>         MaxPoolSize = maxPoolSize;
+>         Encrypt = encrypt;
+>         TrustServerCertificate = trustServerCertificate;
+>     }
+> }
+>
+> public class DatabaseConfigBuilder
+> {
+>     private string? _host;
+>     private int _port = 1433;           // SQL Server 默认端口
+>     private string? _database;
+>     private string? _username;
+>     private string? _password;
+>     private bool _usePooling = true;
+>     private int _maxPoolSize = 100;      // 默认连接池大小
+>     private bool _encrypt;
+>     private bool _trustServerCertificate;
+>
+>     public DatabaseConfigBuilder WithHost(string host)
+>     {
+>         _host = host;
+>         return this;
+>     }
+>
+>     public DatabaseConfigBuilder WithPort(int port)
+>     {
+>         _port = port;
+>         return this;
+>     }
+>
+>     public DatabaseConfigBuilder WithDatabase(string database)
+>     {
+>         _database = database;
+>         return this;
+>     }
+>
+>     public DatabaseConfigBuilder WithCredentials(string username, string password)
+>     {
+>         _username = username;
+>         _password = password;
+>         return this;
+>     }
+>
+>     public DatabaseConfigBuilder WithPooling(bool usePooling, int maxPoolSize = 100)
+>     {
+>         _usePooling = usePooling;
+>         _maxPoolSize = maxPoolSize;
+>         return this;
+>     }
+>
+>     public DatabaseConfigBuilder WithEncrypt(bool encrypt)
+>     {
+>         _encrypt = encrypt;
+>         return this;
+>     }
+>
+>     public DatabaseConfigBuilder WithTrustServerCertificate(bool trust)
+>     {
+>         _trustServerCertificate = trust;
+>         return this;
+>     }
+>
+>     /// <summary>
+>     /// 集中验证所有字段和跨字段约束，抛出精确的错误信息
+>     /// </summary>
+>     public DatabaseConfig Build()
+>     {
+>         var errors = new List<string>();
+>
+>         // 1. 必填字段
+>         if (string.IsNullOrWhiteSpace(_host))
+>             errors.Add("Host is required. Call WithHost() before Build().");
+>         if (string.IsNullOrWhiteSpace(_database))
+>             errors.Add("Database name is required. Call WithDatabase() before Build().");
+>
+>         // 2. 端口范围
+>         if (_port < 1 || _port > 65535)
+>             errors.Add($"Port must be between 1 and 65535, got {_port}.");
+>
+>         // 3. 连接池约束
+>         if (_usePooling && (_maxPoolSize <= 0 || _maxPoolSize > 1000))
+>             errors.Add(
+>                 $"MaxPoolSize must be > 0 and <= 1000 when pooling is enabled, got {_maxPoolSize}.");
+>
+>         // 4. 加密互斥约束
+>         if (_encrypt && _trustServerCertificate)
+>             errors.Add(
+>                 "Encrypt and TrustServerCertificate cannot both be true. " +
+>                 "Either disable encryption or use a trusted certificate.");
+>
+>         if (errors.Count > 0)
+>             throw new InvalidOperationException(
+>                 $"DatabaseConfig validation failed with {errors.Count} error(s):\n" +
+>                 string.Join("\n", errors.Select((e, i) => $"  {i + 1}. {e}")));
+>
+>         return new DatabaseConfig(
+>             _host!, _port, _database!,
+>             _username, _password,
+>             _usePooling, _maxPoolSize,
+>             _encrypt, _trustServerCertificate);
+>     }
+> }
+>
+> // ═══ 测试边界条件 ═══
+> // 1. 成功用例
+> var valid = new DatabaseConfigBuilder()
+>     .WithHost("db.example.com")
+>     .WithDatabase("MyApp")
+>     .Build();
+> Console.WriteLine($"OK: {valid.Host}/{valid.Database}");
+>
+> // 2. 缺少 Host → InvalidOperationException
+> try
+> {
+>     var noHost = new DatabaseConfigBuilder()
+>         .WithDatabase("MyApp")
+>         .Build();
+> }
+> catch (InvalidOperationException ex)
+> {
+>     Console.WriteLine($"Expected error: {ex.Message}");
+> }
+>
+> // 3. Encrypt + TrustServerCertificate 互斥 → InvalidOperationException
+> try
+> {
+>     var conflict = new DatabaseConfigBuilder()
+>         .WithHost("db.example.com")
+>         .WithDatabase("MyApp")
+>         .WithEncrypt(true)
+>         .WithTrustServerCertificate(true)
+>         .Build();
+> }
+> catch (InvalidOperationException ex)
+> {
+>     Console.WriteLine($"Expected error: {ex.Message}");
+> }
+> ```
+>
+> **设计要点：**
+> - `Build()` 收集所有验证错误后统一抛出，而非逐个失败——用户一次看到所有问题，减少调试往返
+> - 错误信息包含具体值和操作指引（如 "Call WithHost() before Build()"），不止于"无效"
+> - 跨字段约束（`Encrypt` + `TrustServerCertificate`）只可能在 `Build()` 中验证——在 `WithEncrypt` 中检查时 `TrustServerCertificate` 可能还没设置
+
+> [!tip]- 练习 3 参考答案（可选）
+> Builder 生成不可变 `record`——`Build()` 自动计算 `TotalAmount`：
+>
+> ```csharp
+> public record OrderItem(string Product, int Quantity, decimal UnitPrice);
+>
+> public record Order(
+>     string OrderId,
+>     IReadOnlyList<OrderItem> Items,
+>     decimal TotalAmount,
+>     DateTime CreatedAt);
+>
+> public class OrderBuilder
+> {
+>     private string _orderId = string.Empty;
+>     private readonly List<OrderItem> _items = new();
+>     private DateTime _createdAt = DateTime.UtcNow;
+>
+>     public OrderBuilder WithOrderId(string orderId)
+>     {
+>         _orderId = orderId;
+>         return this;
+>     }
+>
+>     public OrderBuilder AddItem(string product, int quantity, decimal unitPrice)
+>     {
+>         if (string.IsNullOrWhiteSpace(product))
+>             throw new ArgumentException("Product name is required.", nameof(product));
+>         if (quantity <= 0)
+>             throw new ArgumentException(
+>                 $"Quantity must be positive, got {quantity}.", nameof(quantity));
+>         if (unitPrice < 0)
+>             throw new ArgumentException(
+>                 $"Unit price cannot be negative, got {unitPrice}.", nameof(unitPrice));
+>
+>         _items.Add(new OrderItem(product, quantity, unitPrice));
+>         return this;
+>     }
+>
+>     public OrderBuilder WithCreatedAt(DateTime createdAt)
+>     {
+>         _createdAt = createdAt;
+>         return this;
+>     }
+>
+>     /// <summary>
+>     /// 构建不可变 Order record。TotalAmount 由所有 OrderItem 自动计算。
+>     /// </summary>
+>     public Order Build()
+>     {
+>         if (string.IsNullOrWhiteSpace(_orderId))
+>             throw new InvalidOperationException(
+>                 "OrderId is required. Call WithOrderId() before Build().");
+>
+>         if (_items.Count == 0)
+>             throw new InvalidOperationException(
+>                 "Order must contain at least one item. Call AddItem() before Build().");
+>
+>         // 自动计算总金额（防御性拷贝转为只读列表）
+>         var items = _items.AsReadOnly();
+>         var totalAmount = _items.Sum(i => i.Quantity * i.UnitPrice);
+>
+>         return new Order(_orderId, items, totalAmount, _createdAt);
+>     }
+> }
+>
+> // ═══ 使用 ═══
+> var order = new OrderBuilder()
+>     .WithOrderId("ORD-2026-001")
+>     .AddItem("键盘", 2, 299.00m)
+>     .AddItem("鼠标", 1, 149.00m)
+>     .AddItem("显示器", 1, 2499.00m)
+>     .Build();
+>
+> Console.WriteLine($"Order {order.OrderId}: {order.Items.Count} items, Total: ¥{order.TotalAmount:N2}");
+> // 输出: Order ORD-2026-001: 3 items, Total: ¥3,246.00
+>
+> // record 不可变验证
+> // order with { TotalAmount = 0 };  // ✓ 创建新对象，原对象不变
+> // order.Items.Add(...);            // ✗ IReadOnlyList 禁止修改
+> ```
+>
+> **设计要点：**
+> - `Build()` 自动计算 `TotalAmount`——调用方无需手动求和，避免遗漏/计算错误
+> - `record` 类型提供值相等和 `with` 表达式支持，适合需要比较订单快照或创建变体的场景
+> - `AddItem` 在每次调用时验证参数合法性（提前失败），与 `Build()` 的必填验证（最后关口）相互补充
+> - `IReadOnlyList<OrderItem>` 确保订单一旦创建，明细不可修改——符合订单不可变语义
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

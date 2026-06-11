@@ -186,6 +186,91 @@ void (Foo::* pmf)() = &Foo::f;
 不使用 `<cstddef> ` 中的 `offsetof` 宏，用纯 C++ 实现一个 `my_offsetof(Class, member)`。注意：你的实现必须在编译期求值（可用 `constexpr`），并且不能触发 UB。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **继承方式 `Derived : public Empty`：** `sizeof(Derived) == sizeof(int) == 4`。
+>
+> **组合方式 `Derived { Empty e; int x; }`：** `sizeof(Derived) == 8`（`Empty e` 占 1 字节 + 3 字节 padding 到 int 对齐边界 + `int x` 4 字节）。
+>
+> **为什么不同：** 这是**空基类优化（Empty Base Optimization, EBO）**。C++ 标准允许（但非强制）编译器在派生类中不为空基类子对象分配空间——空基类的 size 虽为 1，但作为基类时可以"折叠"进派生类的起始地址，不占用额外空间。如果作为成员（组合），空类必须占至少 1 字节来保证地址唯一性（`&obj.e1 != &obj.e2`），连带触发对齐 padding。
+>
+> **标准库中的应用：**
+> - `std::unique_ptr<T, Deleter>` 利用 EBO 存储删除器：当 `Deleter` 是空类（如 `std::default_delete<T>`）时，不增加 `unique_ptr` 的大小
+> - `std::vector<T, Allocator>` 同理存储分配器
+> - `std::tuple` 对空类型利用 EBO 减少总大小
+> - 所有标准库容器在存储无状态函数对象或分配器时都受益于 EBO
+
+> [!tip]- 练习 2 参考答案
+> 在 x86-64 Itanium ABI (GCC/Clang) 上：
+>
+> - `sizeof(pmi)`（指向 `int` 成员的指针）= **4 或 8 字节**（取决于编译器实现，通常等于 `ptrdiff_t` 的大小——它本质上是一个偏移量）
+> - `sizeof(pmf)`（指向成员函数的指针）= **16 字节**（通常）
+>
+> **为什么有区别：**
+> 1. **成员数据指针（pointer-to-member-data）**：本质是"该成员在对象中的偏移量"。对一个简单类，`&Foo::a` 就是 `offsetof(Foo, a) = 0`，`&Foo::b` 就是 `offsetof(Foo, b) = 8`。因此 `sizeof(pmi)` 只需存储一个偏移量，通常 4 或 8 字节。
+> 2. **成员函数指针（pointer-to-member-function）**：比数据指针复杂得多——它可能需要存储：
+>    - 函数地址（8 字节）
+>    - `this` 指针调整量（虚继承/多继承时需要调整 this）
+>    - 虚函数偏移（如果是虚函数，存储的是虚表中的索引而非实际地址）
+>
+>    在 Itanium ABI 中，`sizeof(pmf)` 通常是 16 字节（两个指针大小），以支持上述所有情况。MSVC 上，单继承下可能是 4/8 字节，多继承或未知继承时扩大到 12/16 字节。
+>
+> **验证代码：**
+> ```cpp
+> #include <iostream>
+> class Foo { int a; double b; void f(); };
+> int main() {
+>     int Foo::* pmi = &Foo::a;
+>     void (Foo::* pmf)() = &Foo::f;
+>     std::cout << "sizeof(pmi) = " << sizeof(pmi) << "\n";
+>     std::cout << "sizeof(pmf) = " << sizeof(pmf) << "\n";
+> }
+> ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> #include <cstddef>
+>
+> template<typename Class, typename Member>
+> constexpr size_t my_offsetof(Member Class::* member) {
+>     // 核心技巧：将 nullptr 强制转为 Class*，再加上成员偏移，
+>     // 再转为 char* 得到字节偏移
+>     // 注意：reinterpret_cast 不能用于 constexpr，所以用以下方式：
+>
+>     // 用 0 作为假想的对象地址（标准布局类型有效）
+>     Class* null_obj = nullptr; // 或 reinterpret_cast<Class*>(0)，但 nullptr 更安全
+>
+>     // 取成员的地址：成员指针解引用需要一个对象
+>     // &(null_obj->*member) 在标准布局类型上定义良好
+>     auto* member_addr = &(null_obj->*member);
+>
+>     // 将绝对地址转为 size_t：对于地址 0 上的对象，成员地址 = 偏移
+>     return reinterpret_cast<const char*>(member_addr)
+>          - reinterpret_cast<const char*>(null_obj);
+> }
+>
+> // 使用 macro 封装模板函数的 constexpr 用法
+> #define MY_OFFSETOF(Class, Member) \
+>     my_offsetof<Class, decltype(Class::Member)>(&Class::Member)
+>
+> // 测试
+> #include <iostream>
+> struct Test { char a; int b; double c; };
+>
+> int main() {
+>     constexpr size_t off = MY_OFFSETOF(Test, b);
+>     std::cout << "offsetof(Test, b) = " << off << "\n";
+>     // off 在 x86-64 上应为 4
+>     static_assert(off == 4);  // 编译期验证
+> }
+> ```
+>
+> **注意：** 上述实现依赖 "nullptr 解引用成员指针" 这一技巧，在 C++ 标准中属于有条件支持（标准布局类型 + Itanium ABI）。`nullptr->*member` 形式上是 UB，但在三大编译器（GCC/Clang/MSVC）的 `offsetof` 宏实现中均使用此技巧。更严格的实现需要 `reinterpret_cast<Class*>(0)` ——这同样不是严格符合标准的，但这是 `offsetof` 的 `#define` 宏版本用了几十年的技巧。C++20 的 `std::is_standard_layout_v` 和 C++23 的 `std::offsetof` 替代了自定义实现的需要。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 
 ## 4. 扩展阅读
 

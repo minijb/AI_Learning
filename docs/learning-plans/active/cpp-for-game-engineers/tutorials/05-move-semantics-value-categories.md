@@ -569,6 +569,376 @@ g++ -std=c++20 -O2 nrvo_bench.cpp -o nrvo_bench && ./nrvo_bench
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：UniquePtr<T> 实现
+> ```cpp
+> // unique_ptr_impl.cpp — 简化版 UniquePtr<T>
+> // 编译: g++ -std=c++20 -O2 unique_ptr_impl.cpp -o unique_ptr_impl && ./unique_ptr_impl
+>
+> #include <iostream>
+> #include <utility>    // std::exchange
+> #include <vector>
+> #include <cassert>
+>
+> template<typename T>
+> class UniquePtr {
+> public:
+>     // 默认构造
+>     UniquePtr() noexcept : ptr_(nullptr) {}
+>
+>     // 从裸指针构造
+>     explicit UniquePtr(T* p) noexcept : ptr_(p) {}
+>
+>     // 析构
+>     ~UniquePtr() noexcept {
+>         delete ptr_;
+>     }
+>
+>     // 移动构造（noexcept）
+>     UniquePtr(UniquePtr&& other) noexcept
+>         : ptr_(std::exchange(other.ptr_, nullptr)) {}
+>
+>     // 移动赋值（noexcept）
+>     UniquePtr& operator=(UniquePtr&& other) noexcept {
+>         if (this != &other) {
+>             delete ptr_;                           // 释放自己的旧资源
+>             ptr_ = std::exchange(other.ptr_, nullptr);
+>         }
+>         return *this;
+>     }
+>
+>     // 拷贝 = delete
+>     UniquePtr(const UniquePtr&) = delete;
+>     UniquePtr& operator=(const UniquePtr&) = delete;
+>
+>     // --- 操作 ---
+>
+>     // 放弃所有权，返回裸指针
+>     T* release() noexcept {
+>         return std::exchange(ptr_, nullptr);
+>     }
+>
+>     // 替换管理的对象（删除旧对象）
+>     void reset(T* p = nullptr) noexcept {
+>         T* old = ptr_;
+>         ptr_ = p;
+>         delete old;
+>     }
+>
+>     // 获取裸指针（不转移所有权）
+>     T* get() const noexcept { return ptr_; }
+>
+>     // 解引用
+>     T& operator*() const noexcept { return *ptr_; }
+>
+>     // 成员访问
+>     T* operator->() const noexcept { return ptr_; }
+>
+>     // bool 转换
+>     explicit operator bool() const noexcept { return ptr_ != nullptr; }
+>
+> private:
+>     T* ptr_ = nullptr;
+> };
+>
+> // ===== 测试 =====
+> struct TestObj {
+>     int value;
+>     static inline int aliveCount = 0;
+>     explicit TestObj(int v) : value(v) { ++aliveCount; }
+>     ~TestObj() { --aliveCount; }
+> };
+>
+> int main() {
+>     std::cout << "=== UniquePtr<T> Test ===\n\n";
+>
+>     // 1. 基本构造和访问
+>     UniquePtr<TestObj> p1(new TestObj(42));
+>     std::cout << "p1->value = " << p1->value << '\n';
+>     std::cout << "(*p1).value = " << (*p1).value << '\n';
+>     assert(p1);  // operator bool
+>
+>     // 2. 移动构造：源指针变空
+>     UniquePtr<TestObj> p2 = std::move(p1);
+>     std::cout << "After move: p1=" << (p1 ? "non-null" : "null")
+>               << ", p2->value=" << p2->value << '\n';
+>     assert(!p1);
+>     assert(p2);
+>
+>     // 3. release：放弃所有权
+>     TestObj* raw = p2.release();
+>     std::cout << "After release: p2=" << (p2 ? "non-null" : "null")
+>               << ", raw->value=" << raw->value << '\n';
+>     assert(!p2);
+>
+>     // 4. reset：替换管理对象
+>     p1.reset(raw);              // 重新接管 raw
+>     p1.reset(new TestObj(99));  // 释放旧对象，管理新对象
+>     std::cout << "After reset: p1->value=" << p1->value
+>               << ", alive=" << TestObj::aliveCount << '\n';
+>     assert(TestObj::aliveCount == 1);  // 只有 p1 管理的对象存活
+>
+>     // 5. vector 扩容使用 noexcept 移动
+>     std::vector<UniquePtr<TestObj>> vec;
+>     vec.push_back(UniquePtr<TestObj>(new TestObj(1)));
+>     vec.push_back(UniquePtr<TestObj>(new TestObj(2)));
+>     vec.push_back(UniquePtr<TestObj>(new TestObj(3)));
+>     std::cout << "Vector size=" << vec.size()
+>               << ", alive=" << TestObj::aliveCount << '\n';
+>     for (size_t i = 0; i < vec.size(); ++i) {
+>         std::cout << "  vec[" << i << "]->value=" << vec[i]->value << '\n';
+>     }
+>
+>     std::cout << "\n=== All tests passed ===\n";
+>     return 0;
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：值类别追踪
+> ```cpp
+> // value_category_trace.cpp — 表达式值类别验证
+> // 编译: g++ -std=c++20 -O0 value_category_trace.cpp -o value_category_trace && ./value_category_trace
+>
+> #include <iostream>
+> #include <type_traits>
+> #include <utility>
+>
+> // 辅助：判定表达式 T 是 lvalue 还是 rvalue
+> // decltype((expr)) 带双括号：
+> //   lvalue → T&
+> //   xvalue → T&&
+> //   prvalue → T
+> template<typename T>
+> const char* category() {
+>     if constexpr (std::is_lvalue_reference_v<T>) return "lvalue";
+>     else if constexpr (std::is_rvalue_reference_v<T>) return "xvalue";
+>     else return "prvalue";
+> }
+>
+> #define CHECK(expr) \
+>     std::cout << #expr << " → " << category<decltype((expr))>() << '\n'
+>
+> // 辅助函数
+> int& getRef() { static int v = 0; return v; }
+> int  getValue() { return 42; }
+>
+> struct Obj { int member = 7; };
+>
+> int main() {
+>     std::cout << "=== Value Category Trace ===\n\n";
+>
+>     int x = 10;
+>     int y = 20;
+>     Obj obj;
+>
+>     // 1. 局部变量
+>     std::cout << "1. "; CHECK(x);
+>     static_assert(std::is_lvalue_reference_v<decltype((x))>);
+>
+>     // 2. 字面量
+>     std::cout << "2. "; CHECK(42);
+>     static_assert(!std::is_reference_v<decltype((42))>);
+>
+>     // 3. 返回引用的函数
+>     std::cout << "3. "; CHECK(getRef());
+>     static_assert(std::is_lvalue_reference_v<decltype((getRef()))>);
+>
+>     // 4. 返回值的函数
+>     std::cout << "4. "; CHECK(getValue());
+>     static_assert(!std::is_reference_v<decltype((getValue()))>);
+>
+>     // 5. std::move(x)
+>     std::cout << "5. "; CHECK(std::move(x));
+>     static_assert(std::is_rvalue_reference_v<decltype((std::move(x)))>);
+>
+>     // 6. x + y（算术表达式）
+>     std::cout << "6. "; CHECK(x + y);
+>     static_assert(!std::is_reference_v<decltype((x + y))>);
+>
+>     // 7. 字符串字面量
+>     std::cout << "7. "; CHECK("hello");
+>     // 注意：字符串字面量是 lvalue！（const char[6] 类型的左值）
+>     static_assert(std::is_lvalue_reference_v<decltype(("hello"))>);
+>
+>     // 8. std::forward<T>(arg) — 取决于 T
+>     auto forwardLvalue = [](auto&& arg) -> decltype(auto) {
+>         return std::forward<decltype(arg)>(arg);
+>     };
+>     // forward<int&>(x) → lvalue
+>     std::cout << "8a. "; CHECK(forwardLvalue(x));
+>     static_assert(std::is_lvalue_reference_v<
+>                   decltype((std::forward<int&>(x)))>);
+>     // forward<int&&>(std::move(x)) → xvalue
+>     std::cout << "8b. "; CHECK(std::forward<int&&>(x));
+>     static_assert(std::is_rvalue_reference_v<
+>                   decltype((std::forward<int&&>(x)))>);
+>
+>     // 9. 条件表达式 true ? x : y（两者都是 lvalue → 结果是 lvalue）
+>     std::cout << "9. "; CHECK(true ? x : y);
+>     static_assert(std::is_lvalue_reference_v<decltype((true ? x : y))>);
+>
+>     // 10. 成员访问
+>     std::cout << "10. "; CHECK(obj.member);
+>     static_assert(std::is_lvalue_reference_v<decltype((obj.member))>);
+>
+>     std::cout << "\n=== Summary ===\n";
+>     std::cout << "lvalue:  x, getRef(), \"hello\", true?x:y, obj.member\n";
+>     std::cout << "prvalue: 42, getValue(), x+y\n";
+>     std::cout << "xvalue:  std::move(x), std::forward<int&&>(x)\n";
+>
+>     std::cout << "\n=== All static_asserts passed ===\n";
+>     return 0;
+> }
+> ```
+
+> [!info]- 练习 3 思考题参考答案：不必要的拷贝检测
+> ```cpp
+> // copy_detector.cpp — 渲染管线中的拷贝/移动追踪
+> // 编译: g++ -std=c++20 -O2 copy_detector.cpp -o copy_detector && ./copy_detector
+>
+> #include <iostream>
+> #include <vector>
+> #include <cstring>
+> #include <iomanip>
+>
+> // "重"资源类，带日志
+> class LargeBuffer {
+>     static inline int constructCount_ = 0;
+>     static inline int copyCount_ = 0;
+>     static inline int moveCount_ = 0;
+>     static inline int destructCount_ = 0;
+>
+> public:
+>     static constexpr size_t kSize = 1024 * 1024; // 1 MB
+>     std::vector<char> data;
+>
+>     LargeBuffer() : data(kSize) {
+>         ++constructCount_;
+>         std::cout << "  [ctor]     default (" << constructCount_ << ")\n";
+>     }
+>
+>     explicit LargeBuffer(size_t sz) : data(sz) {
+>         ++constructCount_;
+>         std::cout << "  [ctor]     sized " << sz << " (" << constructCount_ << ")\n";
+>     }
+>
+>     LargeBuffer(const LargeBuffer& other) : data(other.data) {
+>         ++copyCount_;
+>         std::cout << "  [COPY]     " << data.size() << " bytes (" << copyCount_ << ")\n";
+>     }
+>
+>     LargeBuffer(LargeBuffer&& other) noexcept : data(std::move(other.data)) {
+>         ++moveCount_;
+>         std::cout << "  [move]     (" << moveCount_ << ")\n";
+>     }
+>
+>     ~LargeBuffer() {
+>         ++destructCount_;
+>     }
+>
+>     static void reset() {
+>         constructCount_ = copyCount_ = moveCount_ = destructCount_ = 0;
+>     }
+>
+>     static void report(const char* phase) {
+>         std::cout << "\n--- " << phase << " ---\n";
+>         std::cout << "  constructs: " << constructCount_ << '\n';
+>         std::cout << "  copies:     " << copyCount_ << '\n';
+>         std::cout << "  moves:      " << moveCount_ << '\n';
+>         std::cout << "  destructs:  " << destructCount_ << '\n';
+>     }
+> };
+>
+> // ===== 模拟渲染管线 =====
+>
+> // 阶段 1：加载（产生资源）
+> LargeBuffer loadMesh(const char* name) {
+>     std::cout << "  loadMesh: creating buffer for " << name << '\n';
+>     LargeBuffer buf(512 * 1024);  // 512 KB
+>     return buf;  // NRVO 或隐式移动
+> }
+>
+> // 阶段 2：变换（接收并返回）
+> LargeBuffer transformMesh(LargeBuffer buf) {  // 按值接收 → 可能造成拷贝/移动
+>     std::cout << "  transformMesh: processing\n";
+>     return buf;  // NRVO 候选
+> }
+>
+> // ===== 优化前：有不必要的拷贝 =====
+> void pipelineBeforeOptimization() {
+>     std::cout << "\n===== BEFORE Optimization =====\n";
+>     LargeBuffer::reset();
+>
+>     // 加载
+>     LargeBuffer mesh = loadMesh("player");      // NRVO: 0 拷贝
+>
+>     // 变换 —— 按值传递造成拷贝！
+>     LargeBuffer transformed = transformMesh(mesh);  // ❌ 拷贝！mesh 是 lvalue
+>
+>     // 提交到 vector —— 拷贝！
+>     std::vector<LargeBuffer> renderList;
+>     renderList.push_back(transformed);  // ❌ 拷贝！transformed 是 lvalue
+>
+>     LargeBuffer::report("Before Optimization");
+> }
+>
+> // ===== 优化后：零拷贝 =====
+> void pipelineAfterOptimization() {
+>     std::cout << "\n===== AFTER Optimization =====\n";
+>     LargeBuffer::reset();
+>
+>     // 加载
+>     LargeBuffer mesh = loadMesh("player");     // NRVO: 0 拷贝
+>
+>     // 变换 —— 使用 std::move 避免拷贝
+>     LargeBuffer transformed = transformMesh(std::move(mesh));  // ✅ 移动
+>
+>     // 提交到 vector —— 使用 emplace_back 或 std::move
+>     std::vector<LargeBuffer> renderList;
+>     renderList.push_back(std::move(transformed));  // ✅ 移动
+>
+>     LargeBuffer::report("After Optimization");
+> }
+>
+> // ===== 进一步优化：完全消除拷贝 =====
+> LargeBuffer createAndTransform(const char* name) {
+>     LargeBuffer buf = loadMesh(name);
+>     std::cout << "  createAndTransform: transforming in-place\n";
+>     // 原地变换，不产生额外对象
+>     return buf;  // NRVO
+> }
+>
+> void pipelineOptimized() {
+>     std::cout << "\n===== OPTIMIZED Pipeline =====\n";
+>     LargeBuffer::reset();
+>
+>     // 合并 load + transform
+>     LargeBuffer mesh = createAndTransform("player");
+>
+>     // emplace_back 直接在容器中构造
+>     std::vector<LargeBuffer> renderList;
+>     renderList.push_back(std::move(mesh));
+>
+>     LargeBuffer::report("Optimized");
+> }
+>
+> int main() {
+>     pipelineBeforeOptimization();
+>     pipelineAfterOptimization();
+>     pipelineOptimized();
+>
+>     std::cout << "\n=== Optimization Summary ===\n";
+>     std::cout << "Before:  copies = 2 (1 pass by value + 1 push_back lvalue)\n";
+>     std::cout << "After:   copies = 0 (use std::move everywhere)\n";
+>     std::cout << "Further: merge phases to reduce object count\n";
+>     return 0;
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了编译和测试，或分析得出了合理结论，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读] C++ Reference — Value categories:** https://en.cppreference.com/w/cpp/language/value_category — 值类别的 ISO 标准定义

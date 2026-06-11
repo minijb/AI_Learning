@@ -501,6 +501,163 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **逐效果禁用测量法（Unity/UE Profiler）：**
+>
+> **操作步骤：**
+> 1. 创建测试场景：放置一些几何体和光源，确保场景复杂度稳定
+> 2. 固定摄像机位置和朝向（消除视角变化导致的测量波动）
+> 3. 打开 Profiler（Unity: Window → Analysis → Profiler; UE: `stat gpu` 控制台命令）
+>
+> **逐一禁用后处理效果并记录 GPU 时间：**
+>
+> ```
+> 配置                     GPU 时间 (ms)   单项成本 (ms)   占比
+> ────────────────────────────────────────────────────────────────
+> 全部效果关闭 (基线)        6.2            —              —
+> 仅 Tone Mapping           6.5            0.3            2%
+> + Bloom (全分辨率 4 级)    8.9            2.4            14%
+> + DOF (全分辨率)          12.1            3.2            19%
+> + Motion Blur             14.0            1.9            11%
+> + SSAO (32 采样)          17.5            3.5            21%
+> + SSR                     21.8            4.3            26%
+> + Film Grain/Vignette     22.1            0.3            2%
+> ────────────────────────────────────────────────────────────────
+> 总计                      22.1           15.9           95%*
+> (* 95% 因为部分效果有交互开销)
+> ```
+>
+> **与本文排名表对比**：
+> | 效果 | 本文排名 | 实测排名 | 是否一致 |
+> |------|---------|---------|---------|
+> | Tone Mapping | 1× | 最轻 | ✓ |
+> | Bloom | 3-8× | 中等 (2.4ms) | ✓ |
+> | SSAO | 8-20× | 较高 (3.5ms) | ✓ |
+> | SSR | 10-30× | 最高 (4.3ms) | ✓ |
+>
+> **异常分析**：如果某个效果的实测成本远高于预期排名，检查：
+> - 是否未做降采样（全分辨率 SSAO 会很贵）
+> - 是否采样数设置过高
+> - Shader 复杂度是否异常
+
+> [!tip]- 练习 2 参考答案
+> **Shader Graph / HLSL 实现 Bloom 降采样链：**
+>
+> ```hlsl
+> // BloomDownsample.hlsl — Bloom 降采样链 (Unity Shader Graph Custom Function 或独立 Pass)
+>
+> // ===== Pass 1: 亮部提取 (全分辨率) =====
+> float4 ExtractBright(float2 uv, Texture2D sceneColor, SamplerState samp) {
+>     float3 color = sceneColor.SampleLevel(samp, uv, 0).rgb;
+>     float brightness = dot(color, float3(0.2126, 0.7152, 0.0722));
+>     float3 bright = color * smoothstep(1.0, 1.2, brightness); // threshold=1.0, knee=0.2
+>     return float4(bright, 1.0);
+> }
+>
+> // ===== Pass 2-4: 降采样 (每次分辨率减半) =====
+> float4 Downsample(float2 uv, Texture2D inputTex, SamplerState samp,
+>                    float2 texelSize) {
+>     // 3×3 tent filter (比 2×2 box filter 效果更好)
+>     float3 color = 0;
+>     color += inputTex.SampleLevel(samp, uv + float2(-1,-1)*texelSize, 0).rgb * 1.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2( 0,-1)*texelSize, 0).rgb * 2.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2( 1,-1)*texelSize, 0).rgb * 1.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2(-1, 0)*texelSize, 0).rgb * 2.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2( 0, 0)*texelSize, 0).rgb * 4.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2( 1, 0)*texelSize, 0).rgb * 2.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2(-1, 1)*texelSize, 0).rgb * 1.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2( 0, 1)*texelSize, 0).rgb * 2.0/16.0;
+>     color += inputTex.SampleLevel(samp, uv + float2( 1, 1)*texelSize, 0).rgb * 1.0/16.0;
+>     return float4(color, 1.0);
+> }
+>
+> // ===== Pass 5-7: 上采样 (从低分辨率放大并叠加) =====
+> float4 Upsample(float2 uv, Texture2D lowResTex, float2 texelSize,
+>                 SamplerState samp) {
+>     // 使用与降采样相同的 tent filter 进行上采样
+>     float3 color = 0;
+>     // 9-tap tent filter (同上，权重按高斯分布)
+>     color += lowResTex.SampleLevel(samp, uv + float2(-1,-1)*texelSize, 0).rgb * 1.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2( 0,-1)*texelSize, 0).rgb * 2.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2( 1,-1)*texelSize, 0).rgb * 1.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2(-1, 0)*texelSize, 0).rgb * 2.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2( 0, 0)*texelSize, 0).rgb * 4.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2( 1, 0)*texelSize, 0).rgb * 2.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2(-1, 1)*texelSize, 0).rgb * 1.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2( 0, 1)*texelSize, 0).rgb * 2.0/16.0;
+>     color += lowResTex.SampleLevel(samp, uv + float2( 1, 1)*texelSize, 0).rgb * 1.0/16.0;
+>     return float4(color, 1.0);
+> }
+>
+> // ===== Pass 最终: 合成 =====
+> float4 Composite(float2 uv, Texture2D sceneColor, Texture2D bloom,
+>                   float bloomIntensity, SamplerState samp) {
+>     float3 scene = sceneColor.SampleLevel(samp, uv, 0).rgb;
+>     float3 bloomColor = bloom.SampleLevel(samp, uv, 0).rgb;
+>     return float4(scene + bloomColor * bloomIntensity, 1.0);
+> }
+> ```
+>
+> **帧率对比预期**（1080p）：
+> ```
+> 方案                          Pass 数    像素处理量    GPU 时间    FPS
+> ───────────────────────────────────────────────────────────────────
+> 全分辨率 Bloom (5 Pass)         5         10.4M        ~3.5ms      45
+> 降采样 Bloom (提取+3降+3升+合成)  8         5.5M         ~1.5ms      55
+> 提升                                                      ~57%       +22%
+> ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> **4 档画质设置设计：**
+>
+> ```
+> 效果              Low (集成/移动)    Medium (中端)     High (高端)       Ultra (发烧)
+> ────────────────────────────────────────────────────────────────────────────────────
+> Tone Mapping      ✓ 全分辨率        ✓ 全分辨率        ✓ 全分辨率        ✓ 全分辨率
+> Color Grading     ✓ 全分辨率        ✓ 全分辨率        ✓ 全分辨率        ✓ 全分辨率
+> Bloom             1/4 res, 3级     1/2 res, 4级     全分辨率, 4级     全分辨率, 5级
+>                   降采样链         降采样链         降采样链         降采样链
+> DOF               ✗                ✗               1/2 res           全分辨率
+> Motion Blur       ✗                ✗               1/4 res           1/2 res
+> SSAO              ✗               1/2 res, 8采样   1/2 res, 16采样   全分辨率, 32采样
+> SSR               ✗                ✗               1/2 res           全分辨率
+> Film Grain        ✗                ✓                ✓                 ✓
+> Vignette          ✓ 全分辨率        ✓ 全分辨率        ✓ 全分辨率        ✓ 全分辨率
+> ────────────────────────────────────────────────────────────────────────────────────
+> 预估 GPU 时间      ~1.0 ms          ~2.5 ms          ~4.5 ms          ~6.0 ms
+> Ultra - Low 差值   —                —                —                5.0 ms ✓ (<5ms)
+> ```
+>
+> **运行时切换实现（Unity 示例）**：
+> ```csharp
+> public enum PostProcessQuality { Low, Medium, High, Ultra }
+>
+> public void SetPostProcessQuality(PostProcessQuality quality) {
+>     var volume = GetComponent<UnityEngine.Rendering.Volume>();
+>
+>     // 通过 Volume Profile 切换，或直接操作组件
+>     if (volume.profile.TryGet<Bloom>(out var bloom)) {
+>         bloom.active = quality != PostProcessQuality.Low;
+>         bloom.downsample.value = quality switch {
+>             PostProcessQuality.Low    => 4,  // 1/4 res
+>             PostProcessQuality.Medium => 2,  // 1/2 res
+>             _                         => 1,  // full res
+>         };
+>     }
+>     // 同理配置 DOF, SSAO, SSR 等
+> }
+> ```
+>
+> **验证方法**：
+> - 用 Profiler 在每一档下记录 GPU 时间，确保 Ultra - Low < 5ms
+> - 确保 Low 档在目标低端设备上仍能达到 30fps
+> - 视觉检查每档的降级是否可接受（Bloom 降采样 > DOF 关闭 > SSAO 关闭 的感知降级递增）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Next-Gen Post Processing in Call of Duty (GDC 2015)** — Activision 的后处理管线分享，大量降采样技术

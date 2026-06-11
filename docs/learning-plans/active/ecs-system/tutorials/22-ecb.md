@@ -495,6 +495,436 @@ public partial struct ManualPlaybackSystem : ISystem
 - 处理完后销毁事件实体
 - 确保帧内产生的事件能在同一帧被处理
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Collections;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> // === WaveSpawner 组件 ===
+> public struct WaveSpawner : IComponentData
+> {
+>     public Entity EnemyPrefab;
+>     public int TotalSpawnCount;      // 总共要生成的敌人数
+>     public int SpawnedSoFar;          // 已生成数量
+>     public float SpawnInterval;       // 生成间隔（秒）
+>     public float IntervalTimer;       // 间隔计时器
+>     public float3 SpawnOrigin;        // 生成位置基准
+>     public float SpawnRadius;         // 随机偏移半径
+> }
+>
+> [BurstCompile]
+> public partial struct WaveSpawnerSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<WaveSpawner>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float deltaTime = SystemAPI.Time.DeltaTime;
+>         var ecbSingleton = SystemAPI.GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>();
+>         var ecb = ecbSingleton.CreateCommandBuffer(state.WorldUnmanaged);
+>
+>         // 使用 Random 生成种子（这里用固定种子简化）
+>         var random = new Unity.Mathematics.Random(12345);
+>
+>         foreach (var (spawner, entity) in
+>                  SystemAPI.Query<RefRW<WaveSpawner>>().WithEntityAccess())
+>         {
+>             // 已生成完毕，跳过
+>             if (spawner.ValueRO.SpawnedSoFar >= spawner.ValueRO.TotalSpawnCount)
+>                 continue;
+>
+>             // 更新间隔计时器
+>             spawner.ValueRW.IntervalTimer -= deltaTime;
+>
+>             if (spawner.ValueRO.IntervalTimer <= 0f)
+>             {
+>                 // 重置计时器
+>                 spawner.ValueRW.IntervalTimer = spawner.ValueRO.SpawnInterval;
+>
+>                 // 生成一个敌人
+>                 Entity enemy = ecb.Instantiate(spawner.ValueRO.EnemyPrefab);
+>
+>                 // 随机位置（在 SpawnOrigin 周围的圆内）
+>                 float angle = random.NextFloat(0f, math.PI * 2f);
+>                 float dist = random.NextFloat(0f, spawner.ValueRO.SpawnRadius);
+>                 float3 offset = new float3(
+>                     math.cos(angle) * dist,
+>                     0f,
+>                     math.sin(angle) * dist);
+>
+>                 ecb.SetComponent(enemy, new LocalTransform
+>                 {
+>                     Position = spawner.ValueRO.SpawnOrigin + offset,
+>                     Rotation = quaternion.identity,
+>                     Scale = 1f
+>                 });
+>
+>                 // 设置敌人的初始属性
+>                 ecb.SetComponent(enemy, new Health
+>                 {
+>                     Current = 100f,
+>                     Max = 100f
+>                 });
+>
+>                 // 记录已生成数量
+>                 spawner.ValueRW.SpawnedSoFar++;
+>
+>                 // 达到总数后，可以选择销毁生成器或保留
+>                 // if (spawner.ValueRO.SpawnedSoFar >= spawner.ValueRO.TotalSpawnCount)
+>                 //     ecb.DestroyEntity(entity);
+>             }
+>         }
+>     }
+> }
+> ```
+>
+> **设计要点：**
+> - `IntervalTimer` 在 `RefRW` 中递减，Burst 兼容的浮点计时
+> - ECB 延迟执行：`ecb.Instantiate` + `ecb.SetComponent` 记录操作，在 SimulationSystemGroup 结束时批量 Playback
+> - `SpawnedSoFar` 跟踪进度，避免无限生成
+> - 使用 `ecb.SetComponent` 而非 `ecb.AddComponent`，因为 Prefab 已包含该组件（Set 覆盖已有值）
+> - 可通过不销毁 `WaveSpawner` Entity 实现多波次：重置 `SpawnedSoFar = 0` 和 `IntervalTimer`
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Jobs;
+> using Unity.Collections;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> // === 组件 ===
+> public struct BulletLifetime : IComponentData
+> {
+>     public float Remaining;
+> }
+>
+> public struct BulletSpeed : IComponentData
+> {
+>     public float Value;
+> }
+>
+> // 子子弹标记（不可再次分裂）
+> public struct SubBulletTag : IComponentData { }
+>
+> // === 子弹移动 + 碰撞 + 分裂 ===
+> [BurstCompile]
+> public partial struct BulletChainReactionJob : IJobEntity
+> {
+>     public float DeltaTime;
+>     public EntityCommandBuffer.ParallelWriter Ecb;
+>
+>     void Execute(
+>         [ChunkIndexInQuery] int sortKey,
+>         ref LocalTransform transform,
+>         ref BulletLifetime lifetime,
+>         in BulletSpeed speed,
+>         in Entity entity)
+>     {
+>         // 移动（沿前方）
+>         float3 forward = math.forward(transform.Rotation);
+>         transform.Position += forward * speed.Value * DeltaTime;
+>
+>         // 生命周期
+>         lifetime.Remaining -= DeltaTime;
+>
+>         if (lifetime.Remaining <= 0f)
+>         {
+>             Ecb.DestroyEntity(sortKey, entity);
+>             return;
+>         }
+>
+>         // 简化碰撞：Y < 0 视为命中地面（实际应使用物理查询）
+>         if (transform.Position.y < 0f)
+>         {
+>             // 非子子弹才分裂（使用 Entity 上的 SubBulletTag 判断）
+>             // 注意：Job 中不能直接检查组件存在性，
+>             // 需要在 System 调度层面用 [WithNone(typeof(SubBulletTag))] 分离
+>
+>             // 分裂逻辑在实际的 SplitJob 中处理（见下方）
+>             Ecb.DestroyEntity(sortKey, entity);
+>         }
+>     }
+> }
+>
+> // === 分裂 Job（只处理非子子弹） ===
+> [BurstCompile]
+> [WithNone(typeof(SubBulletTag))]
+> public partial struct BulletSplitJob : IJobEntity
+> {
+>     public float DeltaTime;
+>     public EntityCommandBuffer.ParallelWriter Ecb;
+>     public Entity ChildBulletPrefab; // 子子弹 Prefab
+>
+>     void Execute(
+>         [ChunkIndexInQuery] int sortKey,
+>         ref LocalTransform transform,
+>         ref BulletLifetime lifetime,
+>         in Entity entity)
+>     {
+>         // 碰撞检测（与移动 Job 相同，这里简化为统一在命中后触发）
+>         lifetime.Remaining -= DeltaTime;
+>
+>         if (lifetime.Remaining <= 0f)
+>         {
+>             Ecb.DestroyEntity(sortKey, entity);
+>             return;
+>         }
+>
+>         // 命中检测
+>         if (transform.Position.y < 0f)
+>         {
+>             // 生成 3 个子子弹，随机方向散射
+>             var random = Unity.Mathematics.Random.CreateFromIndex((uint)(sortKey + entity.Index));
+>
+>             for (int i = 0; i < 3; i++)
+>             {
+>                 Entity child = Ecb.Instantiate(sortKey, ChildBulletPrefab);
+>
+>                 // 随机散射方向（锥形 60° 范围内）
+>                 float angleY = random.NextFloat(-math.PI / 6f, math.PI / 6f);  // ±30° 水平
+>                 float angleX = random.NextFloat(-math.PI / 6f, math.PI / 6f);   // ±30° 垂直
+>
+>                 quaternion scatterRot = math.mul(
+>                     transform.Rotation,
+>                     math.mul(
+>                         quaternion.RotateY(angleY),
+>                         quaternion.RotateX(angleX)));
+>
+>                 Ecb.SetComponent(sortKey, child, new LocalTransform
+>                 {
+>                     Position = transform.Position,
+>                     Rotation = scatterRot,
+>                     Scale = 1f
+>                 });
+>
+>                 // 标记为子子弹（不可再分裂）
+>                 Ecb.AddComponent<SubBulletTag>(sortKey, child);
+>
+>                 // 设置子子弹属性（速度减半，生命周期更短）
+>                 Ecb.SetComponent(sortKey, child, new BulletSpeed { Value = 5f });
+>                 Ecb.SetComponent(sortKey, child, new BulletLifetime { Remaining = 1f });
+>             }
+>
+>             // 销毁母子弹
+>             Ecb.DestroyEntity(sortKey, entity);
+>         }
+>     }
+> }
+>
+> // === 调度 System ===
+> [BurstCompile]
+> public partial struct BulletChainReactionSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float deltaTime = SystemAPI.Time.DeltaTime;
+>         var ecbSingleton = SystemAPI.GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>();
+>         var ecb = ecbSingleton.CreateCommandBuffer(state.WorldUnmanaged);
+>
+>         // 获取子子弹 Prefab（假设有单例提供）
+>         Entity childPrefab = Entity.Null;
+>         foreach (var data in SystemAPI.Query<RefRO<ChildBulletPrefabData>>())
+>         {
+>             childPrefab = data.ValueRO.PrefabEntity;
+>             break;
+>         }
+>
+>         if (childPrefab == Entity.Null) return;
+>
+>         // 先分裂（母子弹命中后生成子子弹）
+>         var splitJob = new BulletSplitJob
+>         {
+>             DeltaTime = deltaTime,
+>             Ecb = ecb.AsParallelWriter(),
+>             ChildBulletPrefab = childPrefab
+>         };
+>         state.Dependency = splitJob.ScheduleParallel(state.Dependency);
+>
+>         // 再移动所有子弹（包括母和子）
+>         var moveJob = new BulletChainReactionJob
+>         {
+>             DeltaTime = deltaTime,
+>             Ecb = ecb.AsParallelWriter()
+>         };
+>         state.Dependency = moveJob.ScheduleParallel(state.Dependency);
+>     }
+> }
+>
+> public struct ChildBulletPrefabData : IComponentData
+> {
+>     public Entity PrefabEntity;
+> }
+> ```
+>
+> **关键设计：**
+> - `[WithNone(typeof(SubBulletTag))]` 确保两次调度分离：母子弹走 SplitJob，子子弹只走移动
+> - `SubBulletTag` 是纯标记组件，阻止无限递归分裂
+> - `Unity.Mathematics.Random.CreateFromIndex((uint)(sortKey + entity.Index))` 为每个线程/Entity 产生确定性随机
+> - 散射方向使用 `quaternion` 乘法组合旋转，避免万向锁
+> - 执行顺序：先 Split（生成子子弹）→ 后 Move（移动所有子弹），子子弹在同一帧内就能移动
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> using Unity.Burst;
+> using Unity.Entities;
+> using Unity.Collections;
+> using Unity.Mathematics;
+> using Unity.Transforms;
+>
+> // === 事件类型定义 ===
+> public enum EventType : byte
+> {
+>     PlayVFX,       // 播放特效
+>     DealDamage,    // 造成伤害
+>     PlaySound,     // 播放音效
+>     SpawnEntity,   // 生成实体
+> }
+>
+> // === 通用事件组件 ===
+> public struct GameEvent : IComponentData
+> {
+>     public EventType Type;
+>     public float3 Position;
+>     public float FloatParam;      // 通用参数：伤害值/持续时间等
+>     public int IntParam;          // 通用参数：音效 ID/实体类型等
+>     public Entity TargetEntity;   // 可选：关联的目标 Entity
+> }
+>
+> // === 事件分发 System ===
+> [BurstCompile]
+> [UpdateInGroup(typeof(SimulationSystemGroup))]
+> [UpdateAfter(typeof(EndSimulationEntityCommandBufferSystem))]
+> public partial struct EventDispatcherSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         float deltaTime = SystemAPI.Time.DeltaTime;
+>         var ecbSingleton = SystemAPI.GetSingleton<EndSimulationEntityCommandBufferSystem.Singleton>();
+>         var ecb = ecbSingleton.CreateCommandBuffer(state.WorldUnmanaged);
+>
+>         foreach (var (gameEvent, entity) in
+>                  SystemAPI.Query<RefRO<GameEvent>>().WithEntityAccess())
+>         {
+>             switch (gameEvent.ValueRO.Type)
+>             {
+>                 case EventType.PlayVFX:
+>                     HandlePlayVFX(ecb, gameEvent.ValueRO, entity);
+>                     break;
+>
+>                 case EventType.DealDamage:
+>                     HandleDealDamage(ecb, gameEvent.ValueRO, entity, ref state);
+>                     break;
+>
+>                 case EventType.PlaySound:
+>                     HandlePlaySound(ecb, gameEvent.ValueRO, entity);
+>                     break;
+>
+>                 case EventType.SpawnEntity:
+>                     HandleSpawnEntity(ecb, gameEvent.ValueRO, entity);
+>                     break;
+>             }
+>         }
+>     }
+>
+>     private void HandlePlayVFX(
+>         EntityCommandBuffer ecb, GameEvent evt, Entity eventEntity)
+>     {
+>         // 创建 VFX 实体（带生命周期）
+>         Entity vfxEntity = ecb.CreateEntity();
+>         ecb.AddComponent(vfxEntity, LocalTransform.FromPosition(evt.Position));
+>         ecb.AddComponent(vfxEntity, new TemporaryEffect
+>         {
+>             RemainingLifetime = evt.FloatParam, // 持续时间
+>             EffectType = (EffectType)evt.IntParam
+>         });
+>
+>         // 销毁事件实体
+>         ecb.DestroyEntity(eventEntity);
+>     }
+>
+>     private void HandleDealDamage(
+>         EntityCommandBuffer ecb, GameEvent evt, Entity eventEntity,
+>         ref SystemState state)
+>     {
+>         // 对目标 Entity 造成伤害
+>         if (evt.TargetEntity != Entity.Null &&
+>             SystemAPI.Exists(evt.TargetEntity))
+>         {
+>             var health = SystemAPI.GetComponentRW<Health>(evt.TargetEntity);
+>             health.ValueRW.Current -= evt.FloatParam;
+>         }
+>
+>         ecb.DestroyEntity(eventEntity);
+>     }
+>
+>     private void HandlePlaySound(
+>         EntityCommandBuffer ecb, GameEvent evt, Entity eventEntity)
+>     {
+>         // 创建音效事件实体（供音效 System 处理）
+>         Entity soundEvent = ecb.CreateEntity();
+>         ecb.AddComponent(soundEvent, new SoundEventData
+>         {
+>             SoundId = evt.IntParam,
+>             Position = evt.Position
+>         });
+>
+>         // 销毁原始事件
+>         ecb.DestroyEntity(eventEntity);
+>     }
+>
+>     private void HandleSpawnEntity(
+>         EntityCommandBuffer ecb, GameEvent evt, Entity eventEntity)
+>     {
+>         // IntParam 存储 Entity 模板 ID（需配合查找表使用）
+>         // Entity spawned = ecb.Instantiate(prefabLookup[evt.IntParam]);
+>         // ecb.SetComponent(spawned, LocalTransform.FromPosition(evt.Position));
+>
+>         ecb.DestroyEntity(eventEntity);
+>     }
+> }
+>
+> // 音效数据（供后续处理）
+> public struct SoundEventData : IComponentData
+> {
+>     public int SoundId;
+>     public float3 Position;
+> }
+> ```
+>
+> **同一帧内事件处理的关键：**
+> - **调度顺序至关重要**：
+>   ```
+>   SimulationSystemGroup
+>     ├── AttackSystem (产生 GameEvent 实体，写入 ECB)
+>     ├── EndSimulationEntityCommandBufferSystem (Playback: 事件实体正式创建)
+>     ├── EffectSystem (产生更多 GameEvent)
+>     ├── EndSimulationEntityCommandBufferSystem (Playback: 第二批事件)
+>     ├── EventDispatcherSystem ([UpdateAfter]: 处理上一帧+当前帧的所有事件)
+>     └── 下一帧开始
+>   ```
+> - 实际上，到 `EventDispatcherSystem` 执行时，同一帧创建的事件实体已经存在
+> - 如果需要在**同一帧内**处理事件（产生者 → 消费者），需要将 Dispatcher 放在 `[UpdateAfter(typeof(EndSimulationEntityCommandBufferSystem))]`
+> - 或者使用**手动 Playback**：Producer 立即 Playback ECB，然后 Consumer 查询新 Entity
+>
+> **扩展设计：**
+> - 可以使用 `DynamicBuffer<GameEvent>` 替代创建/销毁实体，减少内存分配
+> - 单例 `EventQueue` Buffer 作为全局事件总线
+> - 多个 Consumer System 订阅不同类型事件（EventType mask 过滤）
 ---
 
 ## 4. 扩展阅读

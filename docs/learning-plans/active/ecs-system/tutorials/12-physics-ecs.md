@@ -398,6 +398,111 @@ g++ -std=c++17 -O2 -march=native physics_ecs.cpp -o physics_ecs && ./physics_ecs
 ### 练习 3: 约束求解器（挑战）
 实现距离约束（`DistanceConstraint` 组件，绑定两个实体+目标距离）。用 Position-Based Dynamics (PBD) 迭代求解约束。这是软体/布料/绳索模拟的基础。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // ========== 新增 Drag 组件 ==========
+> struct Drag { float linearDrag = 0.1f; };
+>
+> // 在 World 中添加 ComponentStorage<Drag> drag;
+> // 创建粒子时添加 drag 组件（如 w.drag.add(e)->linearDrag = 0.02f）
+>
+> // ========== DragSystem 实现 ==========
+> void DragSystem(World& w, float dt) {
+>     auto& vs = w.vel.all();
+>     auto& es = w.vel.entities();
+>     for (size_t i = 0; i < es.size(); i++) {
+>         auto* d = w.drag.get(es[i]);
+>         if (!d) continue;  // 只有带 Drag 组件的实体受阻力影响
+>         // velocity *= (1 - linearDrag * dt) —— 指数衰减而非线性削减
+>         // 确保 drag*dt < 1 避免反转方向
+>         float factor = 1.0f - min(d->linearDrag * dt, 0.95f);
+>         vs[i].vx *= factor;
+>         vs[i].vy *= factor;
+>     }
+> }
+>
+> // System 调用顺序（在主循环中）：
+> // GravitySystem → DragSystem → MovementSystem → CollisionSystem
+> // 阻力应在移动前施加，因为阻力影响的是速度，而速度影响下一帧的位置
+> ```
+>
+> **验证方法：** 给一半粒子 `linearDrag=0.1`（高阻力），另一半 `linearDrag=0.001`（低阻力）。运行约 100 帧后，高阻力粒子速度趋近于零（仅受重力 → 阻力抵消后低速下落），低阻力粒子仍有明显动能。
+
+> [!tip]- 练习 2 参考答案
+> **四叉树 vs 均匀网格的关键差异分析：**
+>
+> 1. **数据结构替换要点：**
+>    ```cpp
+>    struct QuadNode {
+>        float x, y, halfW, halfH;        // 节点边界
+>        static const int MAX_ENTITIES = 8; // 分裂阈值
+>        vector<Entity> entities;           // 存储在此节点的实体
+>        unique_ptr<QuadNode> children[4];  // NW, NE, SW, SE
+>        bool isLeaf() const { return children[0] == nullptr; }
+>    };
+>    ```
+>    插入时递归划分：当节点内实体数超过阈值时，分裂为 4 个子节点并按空间重分配。
+>
+> 2. **性能对比：**
+>    - **均匀网格优势**：实体分布均匀、密度高时，O(1) insert + 常数相邻查询，cache 友好
+>    - **四叉树优势**：实体分布极不均匀（稀疏区+密集区共存）时，四叉树自适应调整粒度，节省大量空单元格内存
+>    - **均匀网格劣势**：大场景+稀疏分布时，大部分单元格为空，遍历所有单元格开销大
+>    - **四叉树劣势**：指针跳转多（不 cache 友好），分裂/合并有额外开销
+>    - **结论**：粒子数量 500+、范围 160×120 的中等密度场景，均匀网格通常更快；实体数 10-50 个在 10000×10000 的大世界，四叉树胜出
+>
+> 3. **关键实现细节：** `queryCircle` 在四叉树中改为递归——检查圆是否与节点边界相交，相交则深入子节点；不相交则剪枝跳过。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // ========== DistanceConstraint 组件 ==========
+> struct DistanceConstraint {
+>     Entity entityA;
+>     Entity entityB;
+>     float restLength;   // 目标距离
+>     float stiffness;    // 刚度 [0,1]，1=完全刚性
+> };
+>
+> // ========== PBD 约束求解器 ==========
+> void PBDSolveConstraint(World& w, const DistanceConstraint& c,
+>                         int iterations = 5) {
+>     for (int iter = 0; iter < iterations; iter++) {
+>         auto* pa = w.pos.get(c.entityA);
+>         auto* pb = w.pos.get(c.entityB);
+>         auto* ma = w.mass.get(c.entityA);
+>         auto* mb = w.mass.get(c.entityB);
+>         if (!pa || !pb) continue;
+>
+>         float dx = pb->x - pa->x;
+>         float dy = pb->y - pa->y;
+>         float dist = sqrt(dx*dx + dy*dy);
+>         if (dist < 0.0001f) continue;
+>
+>         float nx = dx / dist, ny = dy / dist;
+>         float wa = (ma && !ma->isStatic) ? ma->invMass : 0;
+>         float wb = (mb && !mb->isStatic) ? mb->invMass : 0;
+>         float total = wa + wb;
+>         if (total == 0) continue;
+>
+>         // PBD 核心：沿约束梯度方向修正位置
+>         float correction = (dist - c.restLength) * c.stiffness / total;
+>         pa->x += nx * correction * wa;
+>         pa->y += ny * correction * wa;
+>         pb->x -= nx * correction * wb;
+>         pb->y -= ny * correction * wb;
+>     }
+> }
+>
+> // 在 CollisionSystem 之后调用约束求解
+> // 多次迭代让约束"传播"——一条链中 A-B 约束修正后，B-C 约束看到新位置再次修正
+> ```
+>
+> **扩展：** 用此法可构建绳索（n 个实体 + n-1 个 `DistanceConstraint`）、布料（三角形网格约束）、软体（体积保持约束）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

@@ -465,6 +465,274 @@ public struct PlayerPrefabData : IComponentData
 - 在 `PlayerSpawnSystem` 中同时实例化角色和武器，并设置 `Parent` 关系
 - 提示：使用 `ECB.Instantiate` + `ECB.SetComponent` 设置 `Parent`
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```csharp
+> using Unity.Entities;
+> using Unity.Mathematics;
+> using UnityEngine;
+>
+> // === 组件定义 ===
+> public struct Obstacle : IComponentData
+> {
+>     public float Radius;
+>     public float DamagePerSecond;
+> }
+>
+> public struct CircleCollider : IComponentData
+> {
+>     public float Radius;
+> }
+>
+> // === Authoring ===
+> public class ObstacleAuthoring : MonoBehaviour
+> {
+>     [Header("障碍物属性")]
+>     public float Radius = 1f;
+>     public float DamagePerSecond = 10f;
+>
+>     class Baker : Baker<ObstacleAuthoring>
+>     {
+>         public override void Bake(ObstacleAuthoring authoring)
+>         {
+>             // 障碍物在运行时位置不变（或通过物理移动），但需要 Transform 组件
+>             // 使用 Dynamic 以支持 LocalTransform 组件的读写访问
+>             var entity = GetEntity(TransformUsageFlags.Dynamic);
+>
+>             AddComponent(entity, new Obstacle
+>             {
+>                 Radius = authoring.Radius,
+>                 DamagePerSecond = authoring.DamagePerSecond
+>             });
+>
+>             AddComponent(entity, new CircleCollider
+>             {
+>                 Radius = authoring.Radius
+>             });
+>         }
+>     }
+> }
+> ```
+>
+> **TransformUsageFlags 选择说明：**
+> - `Dynamic`：障碍物可能需要被物理系统移动，或需要读写 Transform → 生成 LocalTransform + LocalToWorld
+> - `None`：纯数据实体（不需要位置信息的配置表等）
+> - `Renderable`：静态装饰物，不需要运行时修改 Transform
+> - **核心原则**：用 `Dynamic` 当 System 需要 `RefRW<LocalTransform>` 访问；用 `None` 当 Entity 只是数据载体
+
+> [!tip]- 练习 2 参考答案
+> ```csharp
+> using Unity.Entities;
+> using Unity.Collections;
+> using Unity.Mathematics;
+> using UnityEngine;
+>
+> // === BlobAsset 数据结构 ===
+> public struct SkillTableBlob
+> {
+>     public BlobArray<SkillEntry> Skills;
+> }
+>
+> public struct SkillEntry
+> {
+>     public FixedString32Bytes Name;
+>     public float Damage;
+>     public float Cooldown;
+>     public FixedString32Bytes IconName;
+> }
+>
+> // === 运行时使用的引用组件（单例） ===
+> public struct SkillTable : IComponentData
+> {
+>     public BlobAssetReference<SkillTableBlob> Data;
+> }
+>
+> // === 中间数据组件（仅在 Baking 期间存在） ===
+> public struct SkillDataTag : IComponentData { }
+>
+> public struct SkillDataBuffer : IBufferElementData
+> {
+>     public FixedString32Bytes Name;
+>     public float Damage;
+>     public float Cooldown;
+>     public FixedString32Bytes IconName;
+> }
+>
+> // === Authoring ===
+> public class SkillDataAuthoring : MonoBehaviour
+> {
+>     public SkillEntryData[] Skills;
+>
+>     [System.Serializable]
+>     public struct SkillEntryData
+>     {
+>         public string Name;
+>         public float Damage;
+>         public float Cooldown;
+>         public string IconName;
+>     }
+>
+>     class Baker : Baker<SkillDataAuthoring>
+>     {
+>         public override void Bake(SkillDataAuthoring authoring)
+>         {
+>             var entity = GetEntity(TransformUsageFlags.None);
+>
+>             // 标记此 Entity 需要后处理
+>             AddComponent<SkillDataTag>(entity);
+>
+>             // 将技能数据存入 DynamicBuffer
+>             var buffer = AddBuffer<SkillDataBuffer>(entity);
+>             foreach (var skill in authoring.Skills)
+>             {
+>                 buffer.Add(new SkillDataBuffer
+>                 {
+>                     Name = skill.Name,
+>                     Damage = skill.Damage,
+>                     Cooldown = skill.Cooldown,
+>                     IconName = skill.IconName
+>                 });
+>             }
+>         }
+>     }
+> }
+>
+> // === BakingSystem：后处理生成 BlobAsset ===
+> [WorldSystemFilter(WorldSystemFilterFlags.BakingSystem)]
+> public partial struct SkillDataBakingSystem : ISystem
+> {
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // 查找所有带有 SkillDataTag 的 Entity
+>         foreach (var (buffer, entity) in
+>                  SystemAPI.Query<DynamicBuffer<SkillDataBuffer>>()
+>                      .WithAll<SkillDataTag>()
+>                      .WithEntityAccess())
+>         {
+>             // 创建 BlobAsset
+>             using var blobBuilder = new BlobBuilder(Allocator.Temp);
+>             ref var root = ref blobBuilder.ConstructRoot<SkillTableBlob>();
+>
+>             var skills = blobBuilder.Allocate(ref root.Skills, buffer.Length);
+>             for (int i = 0; i < buffer.Length; i++)
+>             {
+>                 skills[i] = new SkillEntry
+>                 {
+>                     Name = buffer[i].Name,
+>                     Damage = buffer[i].Damage,
+>                     Cooldown = buffer[i].Cooldown,
+>                     IconName = buffer[i].IconName
+>                 };
+>             }
+>
+>             var blobRef = blobBuilder.CreateBlobAssetReference<SkillTableBlob>(Allocator.Persistent);
+>
+>             // 存入单例组件（整个 World 只有一份技能表）
+>             var singletonEntity = state.EntityManager.CreateEntity();
+>             state.EntityManager.AddComponentData(singletonEntity, new SkillTable { Data = blobRef });
+>
+>             // 移除中间数据
+>             var ecb = new EntityCommandBuffer(Allocator.Temp);
+>             ecb.RemoveComponent<SkillDataTag>(entity);
+>             ecb.RemoveComponent<SkillDataBuffer>(entity);
+>             ecb.DestroyEntity(entity); // 中间 Entity 已完成使命
+>             ecb.Playback(state.EntityManager);
+>             ecb.Dispose();
+>
+>             // 只处理第一个匹配的 Entity（技能表是单例）
+>             break;
+>         }
+>     }
+> }
+> ```
+>
+> **关键设计决策：**
+> - Baker 只收集原始数据（存入 DynamicBuffer），不做重量级操作
+> - BakingSystem 在所有 Baker 运行之后执行，此时数据完整
+> - 中间 Entity 在 BakingSystem 中被销毁，只保留单例 SkillTable Entity
+> - BlobAsset 内存由 SkillTable 组件的引用计数管理
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> using Unity.Entities;
+> using Unity.Transforms;
+> using Unity.Collections;
+> using Unity.Mathematics;
+>
+> // === 角色 Prefab 的 Authoring（同教程示例） ===
+> // PlayerPrefabAuthoring 已在 2.5 节中定义
+>
+> // === 改进的 PlayerSpawnSystem：同时实例化角色和武器 ===
+> [BurstCompile]
+> public partial struct PlayerSpawnSystem : ISystem
+> {
+>     [BurstCompile]
+>     public void OnCreate(ref SystemState state)
+>     {
+>         state.RequireForUpdate<PlayerPrefabData>();
+>         state.RequireForUpdate<WeaponPrefabData>();
+>     }
+>
+>     [BurstCompile]
+>     public void OnUpdate(ref SystemState state)
+>     {
+>         // 获取 Prefab 引用
+>         Entity playerPrefab = Entity.Null;
+>         Entity weaponPrefab = Entity.Null;
+>
+>         foreach (var data in SystemAPI.Query<RefRO<PlayerPrefabData>>())
+>         {
+>             playerPrefab = data.ValueRO.PrefabEntity;
+>             break;
+>         }
+>         foreach (var data in SystemAPI.Query<RefRO<WeaponPrefabData>>())
+>         {
+>             weaponPrefab = data.ValueRO.PrefabEntity;
+>             break;
+>         }
+>
+>         if (playerPrefab == Entity.Null || weaponPrefab == Entity.Null)
+>             return;
+>
+>         var ecb = new EntityCommandBuffer(Allocator.Temp);
+>
+>         // 1. 实例化角色
+>         Entity playerInstance = ecb.Instantiate(playerPrefab);
+>         ecb.SetComponent(playerInstance, LocalTransform.FromPosition(0, 1, 0));
+>
+>         // 2. 实例化武器
+>         Entity weaponInstance = ecb.Instantiate(weaponPrefab);
+>
+>         // 3. 建立 Parent 关系（武器跟随角色）
+>         // 方式 A：使用 Parent 组件（推荐）
+>         ecb.AddComponent(weaponInstance, new Parent { Value = playerInstance });
+>
+>         // 方式 B：使用 Child 组件在角色侧
+>         // ecb.AddComponent(playerInstance, new Child { Value = weaponInstance });
+>
+>         // 4. 设置武器的本地偏移（相对角色的挂点位置）
+>         ecb.SetComponent(weaponInstance, LocalTransform.FromPosition(0.5f, 0.8f, 0.3f));
+>
+>         ecb.Playback(state.EntityManager);
+>         ecb.Dispose();
+>     }
+> }
+>
+> // 武器 Prefab 引用单例
+> public struct WeaponPrefabData : IComponentData
+> {
+>     public Entity PrefabEntity;
+> }
+> ```
+>
+> **Parent 关系说明：**
+> - `Parent` 组件放在子实体上，指向父实体
+> - `ParentSystem`（内置 System）自动根据 Parent 关系计算子实体的 LocalToWorld
+> - 父实体移动时，子实体自动跟随
+> - 武器使用 `LocalTransform.FromPosition(offset)` 设置相对父节点的本地偏移
+> - 注意：武器 Prefab 本身也需要通过 Baking 生成（`AddComponent<Prefab>(weaponEntity)`）
 ---
 
 ## 4. 扩展阅读

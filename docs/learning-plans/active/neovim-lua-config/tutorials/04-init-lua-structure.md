@@ -195,6 +195,83 @@ vim.opt.listchars = { tab = "» ", trail = "·" }
 -- 在 Neovim 中测试，观察差异
 ```
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 以下是将常见 Vimscript `set` 命令翻译为 Lua 的对照表（在 Neovim 中验证）：
+>
+> | Vimscript | Lua |
+> |---|---|
+> | `set number` | `vim.o.number = true` |
+> | `set relativenumber` | `vim.o.relativenumber = true` |
+> | `set tabstop=4` | `vim.o.tabstop = 4` |
+> | `set shiftwidth=4` | `vim.o.shiftwidth = 4` |
+> | `set expandtab` | `vim.o.expandtab = true` |
+> | `set mouse=a` | `vim.o.mouse = "a"` |
+> | `set ignorecase` | `vim.o.ignorecase = true` |
+> | `set smartcase` | `vim.o.smartcase = true` |
+> | `set cursorline` | `vim.o.cursorline = true` |
+> | `set termguicolors` | `vim.o.termguicolors = true` |
+> | `set scrolloff=10` | `vim.o.scrolloff = 10` |
+> | `set signcolumn=yes` | `vim.o.signcolumn = "yes"` |
+> | `set undofile` | `vim.o.undofile = true` |
+> | `set splitright` | `vim.o.splitright = true` |
+> | `set splitbelow` | `vim.o.splitbelow = true` |
+> | `set list` | `vim.o.list = true` |
+> | `set listchars=tab:»\ ,trail:·` | `vim.opt.listchars = { tab = "» ", trail = "·" }` |
+> | `set inccommand=split` | `vim.o.inccommand = "split"` |
+> | `set clipboard=unnamedplus` | `vim.o.clipboard = "unnamedplus"` |
+>
+> **翻译规则：**
+> - 布尔选项：`set X` → `vim.o.X = true`；`set noX` → `vim.o.X = false`
+> - 数值/字符串选项：`set X=Y` → `vim.o.X = Y`（字符串需引号）
+> - 含特殊字符的选项（如 `listchars`）：用 `vim.opt.X = { ... }` table 形式
+> - `clipboard` 建议放在 `vim.schedule()` 中延迟设置以加速启动
+
+> [!tip]- 练习 2 参考答案
+> 在 Neovim 中执行以下命令并观察输出：
+>
+> ```lua
+> -- 先设置初始值
+> vim.opt.listchars = { tab = "» ", trail = "·" }
+>
+> -- 查看当前值（vim.inspect 格式化输出）
+> :lua print(vim.inspect(vim.opt.listchars))
+> -- 输出类似: { tab = "» ", trail = "·" }
+>
+> -- 使用 append 追加
+> :lua vim.opt.listchars:append({ extends = ">" })
+>
+> -- 再次查看
+> :lua print(vim.inspect(vim.opt.listchars))
+> -- 输出: { tab = "» ", trail = "·", extends = ">" }
+> ```
+>
+> **理解：** `vim.opt.listchars` 返回的是一个特殊的 option 对象（不是普通 Lua table），它支持 `:append()`、`:prepend()`、`:remove()` 方法。`vim.inspect` 可以将它序列化为可读的 table 形式。这些方法模拟了 Vimscript 的 `set listchars+=extends:>` 语法。
+
+> [!tip]- 练习 3 参考答案
+> **两者不等价，有重要差异：**
+>
+> ```lua
+> -- 形式 A: vim.o（字符串赋值）
+> vim.o.listchars = "tab:» ,trail:·"
+>
+> -- 形式 B: vim.opt（table 赋值）
+> vim.opt.listchars = { tab = "» ", trail = "·" }
+> ```
+>
+> | 特性 | `vim.o` | `vim.opt` |
+> |---|---|---|
+> | 值类型 | 字符串 | table |
+> | 语义 | 整体替换，必须用 NVim 内部格式 | 逐个键值设置，自动处理内部格式 |
+> | 追加/删除 | 需手动拼接字符串 | 支持 `:append()` / `:prepend()` / `:remove()` |
+> | Vimscript 兼容 | 等价于 `:set X=Y` | 更接近 Vimscript 的 `:set` 语义 |
+>
+> **结论：** 对 `listchars` 这类复合选项，**强烈推荐用 `vim.opt` + table 形式**（形式 B），因为不需要记忆内部格式（`tab:» ` vs `tab:»\ `），也不容易出现转义错误。`vim.o.listchars = "…"` 虽然能工作，但可读性和可维护性都更差。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

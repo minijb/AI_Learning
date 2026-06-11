@@ -359,6 +359,268 @@ IEnumerator VisualizeSearch(List<Vector2Int> searchOrder, List<Vector2Int> path)
 ### 练习 3: 迷宫生成器 + DFS 求解（挑战）
 用递归回溯算法（Recursive Backtracker）生成一个迷宫，然后用 DFS 求解。比较生成迷宫时的递归 DFS 和求解时的迭代 DFS 在代码结构上的异同。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **核心修改：** 在 DX/DY 数组中增加 4 个对角线方向。
+>
+> ```cpp
+> // 8 方向移动: 上、下、左、右、左上、右上、左下、右下
+> constexpr int DX8[] = {1, -1, 0, 0, -1, -1, 1, 1};
+> constexpr int DY8[] = {0, 0, 1, -1, -1, 1, -1, 1};
+> ```
+>
+> 修改 bfs 函数中的循环：
+>
+> ```cpp
+> for (int d = 0; d < 8; ++d) {
+>     int nx = v.x + DX8[d];
+>     int ny = v.y + DY8[d];
+>     // 边界和障碍物检查不变
+>     if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) continue;
+>     if (grid[nx][ny] == '#')          continue;
+>     if (visited[nx][ny])              continue;
+>
+>     visited[nx][ny] = true;
+>     parent[nx][ny] = v;
+>     q.push({nx, ny});
+> }
+> ```
+>
+> **关于"是否仍然给出最短路径"：** 是，BFS 在 8 方向下仍然保证最短路径（步数最少）。前提是图中每条边的**权重相同**——这里 8 个方向每一步都算 1 步，所以仍然是**无权图**，BFS 的最短路径性质成立。注意这里的最短路径是以步数衡量的，不是欧几里得距离——在没有障碍物时，8 方向 BFS 会得到一条贴对角线走的路径（Chebyshev 距离意义上的最短），路径上的步数 ≤ 4 方向 BFS 的步数。对于有障碍物的地图，8 方向 BFS 的路径步数也一定不超过 4 方向 BFS。
+>
+> **完整的 8 方向 BFS 函数：**
+>
+> ```cpp
+> constexpr int DX8[] = {1, -1, 0, 0, -1, -1, 1, 1};
+> constexpr int DY8[] = {0, 0, 1, -1, -1, 1, -1, 1};
+> constexpr int ND8 = 8;
+>
+> auto bfs_8dir(const Grid& grid, Point start, Point goal,
+>               std::vector<Point>& out_search_order)
+>     -> std::vector<Point>
+> {
+>     int rows = static_cast<int>(grid.size());
+>     int cols = static_cast<int>(grid[0].size());
+>
+>     std::vector<std::vector<bool>> visited(rows, std::vector<bool>(cols, false));
+>     std::vector<std::vector<Point>> parent(rows, std::vector<Point>(cols, {-1, -1}));
+>
+>     std::queue<Point> q;
+>     q.push(start);
+>     visited[start.x][start.y] = true;
+>
+>     while (!q.empty()) {
+>         Point v = q.front(); q.pop();
+>         out_search_order.push_back(v);
+>
+>         if (v.x == goal.x && v.y == goal.y) {
+>             std::vector<Point> path;
+>             for (Point p = goal; p.x != -1; p = parent[p.x][p.y])
+>                 path.push_back(p);
+>             std::reverse(path.begin(), path.end());
+>             return path;
+>         }
+>
+>         for (int d = 0; d < ND8; ++d) {
+>             int nx = v.x + DX8[d];
+>             int ny = v.y + DY8[d];
+>             if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) continue;
+>             if (grid[nx][ny] == '#')          continue;
+>             if (visited[nx][ny])              continue;
+>
+>             visited[nx][ny] = true;
+>             parent[nx][ny] = v;
+>             q.push({nx, ny});
+>         }
+>     }
+>     return {};
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **双向 BFS** 同时从起点和终点出发搜索，当两个搜索前沿相遇时停止。关键：维护两个 visited 数组（正向和反向），当某个节点**在两个方向上都被访问**时，路径找到。
+>
+> ```cpp
+> #include <unordered_set>
+> #include <queue>
+>
+> // 用 size_t 哈希 Point 以便放入 unordered_set
+> struct PointHash {
+>     size_t operator()(Point p) const {
+>         return static_cast<size_t>(p.x) << 32 | static_cast<uint32_t>(p.y);
+>     }
+> };
+>
+> auto bidirectional_bfs(const Grid& grid, Point start, Point goal,
+>                         std::vector<Point>& out_search_order)
+>     -> std::vector<Point>
+> {
+>     int rows = static_cast<int>(grid.size());
+>     int cols = static_cast<int>(grid[0].size());
+>
+>     // 两个方向的 parent 和 visited
+>     std::vector<std::vector<Point>> parent_fwd(rows, std::vector<Point>(cols, {-1, -1}));
+>     std::vector<std::vector<Point>> parent_bwd(rows, std::vector<Point>(cols, {-1, -1}));
+>
+>     std::vector<std::vector<int>> visited(rows, std::vector<int>(cols, 0));
+>     // visited == 1 表示被正向搜索访问过，2 表示被反向搜索访问过
+>
+>     std::queue<Point> q_fwd, q_bwd;
+>     q_fwd.push(start); visited[start.x][start.y] = 1;
+>     q_bwd.push(goal);  visited[goal.x][goal.y]  = 2;
+>
+>     Point meet_point = {-1, -1}; // 两个搜索前沿相遇的点
+>
+>     while (!q_fwd.empty() && !q_bwd.empty()) {
+>         // === 正向扩展一层 ===
+>         size_t fwd_size = q_fwd.size();
+>         for (size_t i = 0; i < fwd_size; ++i) {
+>             Point v = q_fwd.front(); q_fwd.pop();
+>             out_search_order.push_back(v);
+>
+>             for (int d = 0; d < 4; ++d) {
+>                 int nx = v.x + DX[d], ny = v.y + DY[d];
+>                 if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) continue;
+>                 if (grid[nx][ny] == '#') continue;
+>
+>                 if (visited[nx][ny] == 2) { // 遇到了反向搜索的节点！
+>                     parent_fwd[nx][ny] = v;
+>                     meet_point = {nx, ny};
+>                     goto found;
+>                 }
+>                 if (visited[nx][ny] == 0) {
+>                     visited[nx][ny] = 1;
+>                     parent_fwd[nx][ny] = v;
+>                     q_fwd.push({nx, ny});
+>                 }
+>             }
+>         }
+>
+>         // === 反向扩展一层 ===
+>         size_t bwd_size = q_bwd.size();
+>         for (size_t i = 0; i < bwd_size; ++i) {
+>             Point v = q_bwd.front(); q_bwd.pop();
+>
+>             for (int d = 0; d < 4; ++d) {
+>                 int nx = v.x + DX[d], ny = v.y + DY[d];
+>                 if (nx < 0 || nx >= rows || ny < 0 || ny >= cols) continue;
+>                 if (grid[nx][ny] == '#') continue;
+>
+>                 if (visited[nx][ny] == 1) { // 遇到了正向搜索的节点！
+>                     parent_bwd[nx][ny] = v;
+>                     meet_point = {nx, ny};
+>                     goto found;
+>                 }
+>                 if (visited[nx][ny] == 0) {
+>                     visited[nx][ny] = 2;
+>                     parent_bwd[nx][ny] = v;
+>                     q_bwd.push({nx, ny});
+>                 }
+>             }
+>         }
+>     }
+>
+> found:
+>     if (meet_point.x == -1) return {}; // 不可达
+>
+>     // 从相遇点向两个方向回溯，拼接路径
+>     std::vector<Point> path;
+>     // 正向回溯到 start
+>     for (Point p = meet_point; p.x != -1; p = parent_fwd[p.x][p.y])
+>         path.push_back(p);
+>     std::reverse(path.begin(), path.end());
+>     // 反向回溯到 goal（跳过 meet_point 本身，因为已被正向包含）
+>     for (Point p = parent_bwd[meet_point.x][meet_point.y];
+>          p.x != -1; p = parent_bwd[p.x][p.y])
+>         path.push_back(p);
+>
+>     return path;
+> }
+> ```
+>
+> **复杂度分析：** 单方向 BFS 搜索深度 d 时需要 O(b^d) 个节点（b 为分支因子）。双向 BFS 每边搜索约 d/2 深度，各需要 O(b^(d/2)) 个节点，总计约 2 * O(b^(d/2))，在大深度场景下比 O(b^d) 快指数级别。
+
+> [!tip]- 练习 3 参考答案（挑战）
+> **1. 递归回溯迷宫生成器（Recursive Backtracker）：**
+>
+> ```cpp
+> #include <random>
+> #include <algorithm>
+>
+> // 迷宫表示：grid[x][y] = '#' 代表墙，'.' 代表通道
+> // 迷宫尺寸为奇数：实际通道在奇数坐标 (1,1), (1,3), (3,3) ...
+> // 墙在偶数坐标
+> // 例如 15x15 迷宫：7x7 的单元格，加上外围墙 = 2*7+1 = 15
+>
+> void dfs_maze_gen(std::vector<std::string>& maze, int x, int y,
+>                   std::mt19937& rng) {
+>     // 定义四个方向，每步跨 2 格（从单元格中心到相邻单元格中心）
+>     constexpr int dirs[4][2] = {{2,0}, {-2,0}, {0,2}, {0,-2}};
+>
+>     // 随机打乱方向
+>     int order[4] = {0, 1, 2, 3};
+>     std::shuffle(order, order + 4, rng);
+>
+>     for (int i = 0; i < 4; ++i) {
+>         int nx = x + dirs[order[i]][0];
+>         int ny = y + dirs[order[i]][1];
+>
+>         if (nx < 1 || nx >= static_cast<int>(maze.size()) - 1 ||
+>             ny < 1 || ny >= static_cast<int>(maze[0].size()) - 1)
+>             continue; // 边界
+>         if (maze[nx][ny] == '.') continue; // 已经挖过
+>
+>         // 挖开中间的墙（通道格子）
+>         int wx = x + dirs[order[i]][0] / 2;
+>         int wy = y + dirs[order[i]][1] / 2;
+>         maze[wx][wy] = '.';
+>         maze[nx][ny] = '.';
+>
+>         dfs_maze_gen(maze, nx, ny, rng); // 递归进入下一个单元格
+>     }
+> }
+>
+> auto generate_maze(int cell_rows, int cell_cols, unsigned int seed = 42)
+>     -> std::vector<std::string>
+> {
+>     int maze_rows = 2 * cell_rows + 1;
+>     int maze_cols = 2 * cell_cols + 1;
+>
+>     // 初始全是墙
+>     std::vector<std::string> maze(maze_rows, std::string(maze_cols, '#'));
+>
+>     std::mt19937 rng(seed);
+>     // 从 (1,1) 开始挖掘
+>     maze[1][1] = '.';
+>     dfs_maze_gen(maze, 1, 1, rng);
+>
+>     // 设置起点和终点
+>     maze[1][1] = 'S';                // 入口
+>     maze[maze_rows-2][maze_cols-2] = 'G';  // 出口
+>
+>     return maze;
+> }
+> ```
+>
+> **2. 迭代 DFS 求解迷宫（复用代码示例中的 dfs 函数）：** 上述生成的迷宫实质是一个连通图，可以用代码示例中的迭代 DFS 直接求解。只需生成迷宫后调用 `dfs(maze, start, goal, order)`。
+>
+> **3. 递归生成 vs 迭代求解的代码结构对比：**
+>
+> | 方面 | 递归生成器 (生成迷宫) | 迭代 DFS (求解迷宫) |
+> |------|---------------------|-------------------|
+> | 状态管理 | 调用栈隐式管理 | `std::stack` 显式管理 |
+> | visited 判断 | 检查格子是否已挖开 (`maze[nx][ny] == '.'`) | 单独的 visited 二维数组 |
+> | 邻居遍历 | 每次随机打乱方向（生成随机迷宫） | 固定方向顺序（确定性的求解） |
+> | 步长 | 每次跨越 2 格 + 1 格墙 | 每次只走 1 格 |
+> | 终止条件 | 所有可达单元格都被访问 | 找到目标立即停止 |
+> | 路径记录 | 无（只关心连通性） | parent 数组回溯构造路径 |
+>
+> **核心洞察：** 递归回溯迷宫生成器本质上是 DFS 的递归形式——沿着一条随机路径走到尽头，撞墙则回溯到上一个分叉点继续。唯一的区别是它在回溯前"挖开"了路径上的墙壁。递归形式在这里更自然，因为不需要显式维护栈状态（"走到哪里了，还有哪些分叉没试"），调用栈天然追踪回溯链。而求解时的迭代 DFS 需要显式的 parent 追踪，以便构造求解路径。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Red Blob Games: Introduction to Pathfinding** — 交互式可视化，展示 BFS/DFS/Dijkstra/A* 的区别

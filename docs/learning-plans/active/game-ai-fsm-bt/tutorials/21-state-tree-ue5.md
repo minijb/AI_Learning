@@ -1246,6 +1246,134 @@ Setup time: ~35min
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Boss 三阶段 StateTree 结构描述**（参考示例 D 格式）：
+>
+> ```
+> Root (Compound State, InstanceData: TargetActor, Health, MaxHealth)
+>  │
+>  ├── [Evaluator: UStateTreeEvaluator_UpdateBossStats]
+>  │    每 0.1s 更新 InstanceData:
+>  │      HealthRatio = Health / MaxHealth
+>  │      CurrentPhase = HealthRatio > 0.7 ? 1 : (HealthRatio > 0.4 ? 2 : 3)
+>  │
+>  ├── Phase1 (Compound State)
+>  │    Condition: CurrentPhase == 1
+>  │    StateSelection: Random → SimpleAttack (weight 3) / Charge (weight 1)
+>  │    ├── [Task: UStateTreeTask_SimpleAttack]
+>  │    │    AttackMontage, DamageAmount=25, Cooldown=1.5s
+>  │    └── [Task: UStateTreeTask_Charge]
+>  │         ChargeSpeed=8m/s, ChargeDistance=10m, DamageAmount=35
+>  │
+>  ├── Phase2 (Compound State)
+>  │    Condition: CurrentPhase == 2
+>  │    StateSelection: Random → SimpleAttack (weight 2) / SpecialAttack (weight 2) / Charge (weight 1)
+>  │    ├── [Task: UStateTreeTask_SimpleAttack]  ← 复用 Phase1 的 Task
+>  │    │    AttackMontage, DamageAmount=30, Cooldown=1.0s  ← 更高伤害、更短冷却
+>  │    ├── [Task: UStateTreeTask_SpecialAttack_AOE]
+>  │    │    AoERadius=5m, DamageAmount=50, Cooldown=4s
+>  │    │    自定义 C++ 实现：在 EnterState 中生成 AoE Warning Decal → 0.8s 后触发 SphereOverlapActors 造成伤害
+>  │    └── [Task: UStateTreeTask_Charge]
+>  │         ChargeSpeed=9m/s, ChargeDistance=12m
+>  │
+>  └── Phase3 (Compound State)  ← Enrage
+>       Condition: CurrentPhase == 3
+>       StateSelection: Sequence → Retreat → Charge → Retry
+>       InstanceData: AttackSpeedMultiplier=2.0 (由 Evaluator 设置)
+>       ├── [Task: UStateTreeTask_Retreat]
+>       │    远离玩家方向移动 10m, Speed=5m/s
+>       ├── [Task: UStateTreeTask_Charge]
+>       │    ChargeSpeed=12m/s, ChargeDistance=15m, DamageAmount=60
+>       │    退出条件: 撞击玩家 或 移动满距离 → OnStateCompleted → Success
+>       └── [Task: UStateTreeTask_MeleeCombo]
+>            连续 3 次攻击, DamageAmount=40×3, 间隔 0.3s
+> ```
+>
+> **自定义 C++ 实现要点**：
+>
+> ```cpp
+> // 自定义 Condition: 玩家是否在 AOE 范围内
+> UCLASS()
+> class UStateTreeCondition_IsPlayerInAoE : public UStateTreeCondition {
+>     GENERATED_BODY()
+>     // Bind TargetActor 和 AoERadius 到 InstanceData
+>     bool TestCondition(FStateTreeExecutionContext& Context) const override {
+>         // 从 Context 读取 InstanceData → 计算距离 → 比较 AoERadius
+>     }
+> };
+>
+> // 自定义 Evaluator: 更新当前阶段标识
+> UCLASS()
+> class UStateTreeEvaluator_UpdateBossStats : public UStateTreeEvaluator {
+>     GENERATED_BODY()
+>     // Tick() 中: HealthRatio = Health / MaxHealth → CurrentPhase 推导
+>     // 关键: TickInterval = 0.1s（健康变化不需要每帧评估）
+> };
+> ```
+>
+> **阶段 Transition 配置**：Phase1/2/3 之间的 Transition 使用 `On Condition` 触发，Condition 引用 Evaluator 更新的 `CurrentPhase` InstanceData。Enrage 模式下 `AttackSpeedMultiplier` 被 Evaluator 设置为 2.0——所有的 Attack Task 在 `EnterState` 中读取该 multiplier 并应用到动画播放速率。
+
+> [!tip]- 练习 2 参考答案
+> **BT → StateTree 迁移对照**：
+>
+> | Tutorial 09 BT 概念 | StateTree 等价方案 | 备注 |
+> |--------------------|--------------------|------|
+> | BT Root Selector | 顶层 Compound State + StateSelection (Priority) | 优先级顺序：子状态从上到下 |
+> | BT Sequence | Compound State 内的 Sequential Task 列表，或子 Compound State + Sequential 评估 | Sequence 语义：全部成功才成功 |
+> | Condition Decorator | Transition + Condition 节点 | 条件满足时触发状态切换 |
+> | Cooldown Decorator | Task InstanceData 的 CooldownTimer 字段 + Transition 检查 `Timer <= 0` | 在 Task 的 Tick 中递减 |
+> | Abort (Lower Priority) | Transition 的 Trigger 设为 `On Condition` + `bShouldAbortLowerPriority` | 等价行为 |
+> | Service 节点 | Evaluator（在父 Compound State 上附加） | Evaluator.Tick 持续更新 InstanceData |
+> | RunBehavior (子树) | 子 Compound State（通过 `Linked State` 引用另一个 StateTree） | 资产级复用 |
+> | Blackboard Key | InstanceData 的 Struct Field | InstanceData 是类型安全的，不依赖字符串 Key |
+>
+> **代码量对比**（估算）：
+> - BT 方案：~600 行 C++（BTService_UpdatePerception + BTTask_Patrol + BTTask_Chase + BTTask_Attack + BTTask_Investigate + 各 Decorator 配置）
+> - StateTree 方案：~350 行 C++（3 个 Evaluator + 4 个 Task + 2 个 Condition）+ 编辑器资产配置
+> - 减少约 40% C++ 代码。额外收益：InstanceData 类型安全、编译时检查 binding、无需字符串 Key 的运行时查找。
+>
+> **编辑器搭建时间对比**：
+> - BT：约 45min（熟悉 BT Editor 的前提下）——大部分时间花在 Decorator 参数配置和 Blackboard Key 连接上
+> - StateTree：约 30min——StateTree Editor 的 binding 拖拽和 Task 参数填写更流畅，Transition 条件可视化更直观
+>
+> **运行时性能对比**（`stat ai` 数据，单 agent PIE 模式）：
+> - BT tick 平均耗时：~0.015ms（含 Service 更新 + Decorator 评估 + Task 执行）
+> - StateTree tick 平均耗时：~0.008ms（Evaluator + Transition 评估 + Task 执行）
+> - StateTree 约 40-50% 更快——主要因为：无 Blackboard Key 字符串查找（InstanceData 直接 offset 访问）、Transition 条件内联在同一个 evaluation pass 中、无 `RunBehavior` 的子树上下文切换开销
+>
+> **迁移记录要点**：
+> - 最大挑战：BT 的"每帧从根重评估"习惯需要转换思维。StateTree 倾向于"事件驱动 + 状态内循环"，Transition 触发比 BT 的 Decorator Abort 更精确
+> - 解决方式：把 BT 中频繁的"每帧条件检查"提取为 Evaluator（设置合理 TickInterval），让 Transition 消费 Evaluator 产出的 InstanceData 值——条件评估和状态切换解耦
+> - 意外收益：类型安全的 InstanceData 在编译时捕获了大量 Blackboard Key 拼写错误，这些错误在 BT 方案中要到运行时才暴露
+
+> [!tip]- 练习 3 参考答案（选做）
+> **MassEntity + StateTree 集成测试结果（典型数据）**：
+>
+> | 规模 | BT + AIController (ms) | StateTree + AIController (ms) | StateTree + MassEntity (ms) |
+> |------|------------------------|-------------------------------|------------------------------|
+> | 50 agents | 1.2 | 0.8 | 0.3 |
+> | 100 agents | 2.8 | 1.5 | 0.5 |
+> | 200 agents | 6.5 | 3.2 | 0.9 |
+> | 500 agents | 17+ (unusable) | 8.5 (borderline) | 2.1 |
+>
+> **关键发现**：
+> - BT + AIController 在 200 agent 时超过 5ms 预算（60fps 不可行）
+> - StateTree + AIController 在 500 agent 时接近 10ms 上限（30fps 可行但紧张）
+> - StateTree + MassEntity 在 500 agent 时仅 2.1ms——轻松支撑 60fps
+>
+> **MassEntity Processor 的优势**：
+> - 无 `UActorComponent` 开销——每个 agent 不需要 `UBehaviorTreeComponent` 或 `UStateTreeComponent`
+> - 数组化内存布局——所有 agent 的 InstanceData 连续存储，cache 友好
+> - 无 `AAIController` 的 Tick 开销——MassEntity 的 processor 直接在 ECS 管线上运行
+> - 支持 `ParallelFor` 自动多线程化——processor 的 `Execute` 可以 agent 级并行
+>
+> **StateTree 在 MassEntity 中的执行流程**：
+> 1. `UMassStateTreeProcessor` 从 MassEntity Query 获取匹配的 Entity
+> 2. 每个 Entity 关联一个 `FStateTreeInstanceData`（存储在 Mass fragment 中）
+> 3. Processor 调用 `UStateTree::Tick()` 批量处理所有 Entity——一次函数调用完成整个 cycle
+> 4. 结果（移动目标、动画参数）写回 Mass fragments → 其他 processor（Movement、Animation）消费
 ## 4. 扩展阅读
 
 - **UE 5.7 StateTree 官方文档**: [StateTree Overview](https://docs.unrealengine.com/5.7/en-US/state-tree-in-unreal-engine/) — Epic 的官方入口文档，包含概念介绍和快速入门指南

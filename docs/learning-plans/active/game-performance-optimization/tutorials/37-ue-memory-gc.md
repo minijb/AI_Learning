@@ -544,6 +544,156 @@ void TestWeakPointer()
 4. 模拟内存压力场景（大量生成 Actor 后销毁），观察你的标签内存曲线的变化
 5. 检查是否有内存泄漏：重复压力场景 10 次，看你的标签内存是否持续增长
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **步骤 4 解析 — memreport 解读要点：**
+>
+> 1. **占用内存最多的前 5 个 Class**：在 `.memreport` 文件的 `Class` 段中按 `Size` 降序查找。典型排名（以 Lyra Starter 为例）：
+>    - `StaticMesh` — 关卡中的所有静态网格体
+>    - `Texture2D` — 所有 2D 纹理（若包含 GPU 内存，通常占第一）
+>    - `SkeletalMesh` — 骨骼网格体及其 LOD
+>    - `AnimSequence` — 动画数据（曲线压缩后通常在几 MB）
+>    - `Material` / `MaterialInstance` — 材质实例及其 Shader 缓存
+>
+> 2. **占用内存最多的前 3 个 Package**：在 `Package` 段中按 `Size` 排序。典型排名：
+>    - `/Game/Maps/YourLevel` — 关卡本身引用的所有资产
+>    - `/Engine/...` — 引擎共享资源（渲染资源、默认材质等）
+>    - `/Game/Characters/...` — 角色相关资产（骨骼、动画、纹理）
+>
+> 3. **Total Physical vs Total Virtual 差值**：Physical = OS 从物理 RAM 分配的量，Virtual = 进程保留的虚拟地址空间（含未提交的）。差值 > 2GB 说明内存碎片化严重——大量小块分配导致虚拟空间膨胀，但物理内存尚未爆满。碎片化会导致分配速度下降（FMalloc 需要更长时间找到合适的空闲块）。
+>
+> 4. **意外大消耗排查**：
+>    - 如果发现 `MediaTexture` 或 `MediaPlayer` 占用 500MB+ → 检查是否有未关闭的视频播放器
+>    - 如果发现某个用户目录（如 `/Game/OldAssets`）占用了大量内存 → 考虑清理未使用的资产
+>    - 使用 `obj refs name=XXX` 命令追踪具体对象的引用链
+
+> [!tip]- 练习 2 参考答案
+> **实现步骤与关键代码补充：**
+>
+> ```cpp
+> // 基于示例 B 的 FProjectilePool，补充测量代码
+> // 在游戏 GameMode 或测试 Actor 中添加：
+>
+> UCLASS()
+> class AObjectPoolBenchmark : public AActor
+> {
+>     GENERATED_BODY()
+>
+> public:
+>     UPROPERTY(EditAnywhere)
+>     int32 SpawnCount = 1000;
+>
+>     UPROPERTY(EditAnywhere)
+>     int32 PoolSize = 200;
+>
+>     UPROPERTY(EditAnywhere)
+>     TSubclassOf<AMyPooledProjectile> ProjectileClass;
+>
+>     // 模式 1: 原始 SpawnActor/Destroy 模式
+>     UFUNCTION(BlueprintCallable)
+>     void RunSpawnDestroyTest()
+>     {
+>         TArray<AMyPooledProjectile*> Projectiles;
+>         for (int32 i = 0; i < SpawnCount; ++i)
+>         {
+>             AMyPooledProjectile* Proj = GetWorld()->SpawnActor<AMyPooledProjectile>(
+>                 ProjectileClass, FVector::ZeroVector, FRotator::ZeroRotator);
+>             Projectiles.Add(Proj);
+>         }
+>         // 销毁全部 → GC 压力
+>         for (AMyPooledProjectile* Proj : Projectiles)
+>         {
+>             Proj->Destroy();
+>         }
+>     }
+>
+>     // 模式 2: 对象池模式
+>     UFUNCTION(BlueprintCallable)
+>     void RunPoolTest()
+>     {
+>         FProjectilePool Pool;
+>         Pool.Prewarm(GetWorld(), PoolSize, ProjectileClass);
+>
+>         TArray<AMyPooledProjectile*> Active;
+>         for (int32 i = 0; i < SpawnCount; ++i)
+>         {
+>             Active.Add(Pool.Acquire(GetWorld(), FVector::ZeroVector,
+>                 FRotator::ZeroRotator, 1500.0f, 25.0f, ProjectileClass));
+>         }
+>         // 归还池子
+>         for (AMyPooledProjectile* Proj : Active)
+>         {
+>             Proj->ReturnToPool();
+>         }
+>     }
+> };
+> ```
+>
+> **预期对比数据**（1000 个 Actor 场景）：
+>
+> | 指标 | Spawn/Destroy | 对象池 | 改善 |
+> |------|--------------|--------|------|
+> | 内存分配次数 | ~3000-5000 | ~PoolSize（首次） | 95%+ |
+> | GC 触发次数（60s） | 2-4 次 | 0-1 次 | 75%+ |
+> | 平均帧时间 | +3-8ms spikes | 稳定 <1ms | 大幅减少抖动 |
+> | 内存抖动百分比 | 基准 | 减少 80-95% | — |
+>
+> **关键测量命令**：
+> ```bash
+> # 录制 Insights
+> stat startfile
+> # … 运行场景 60 秒 …
+> stat stopfile
+> # 在 Insights Memory 视图中对比:
+> # 1. Alloc/Free 事件计数
+> # 2. GC Mark/Sweep 时间戳
+> # 3. 每帧分配内存曲线（GC spikes 对比）
+> ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> **LLM 标签实现步骤：**
+>
+> ```cpp
+> // 1. 在项目头文件中声明三个 LLM Tag
+> // MyGameLLMTags.h
+> #pragma once
+> #include "HAL/LowLevelMemTracker.h"
+>
+> LLM_DEFINE_TAG(MyGameWeapons,  TEXT("MyGame/Weapons"),  TEXT("Game"), GET_STATFNAME(STAT_MyGameWeaponsLLM));
+> LLM_DEFINE_TAG(MyGameAI,       TEXT("MyGame/AI"),       TEXT("Game"), GET_STATFNAME(STAT_MyGameAILLM));
+> LLM_DEFINE_TAG(MyGameUI,       TEXT("MyGame/UI"),       TEXT("Game"), GET_STATFNAME(STAT_MyGameUILLM));
+>
+> // 2. 在各子系统中添加作用域标签
+> void AWeapon::Fire()
+> {
+>     LLM_SCOPE(MyGameWeapons);
+>     // 子弹/弹壳/粒子，所有内存分配归类到 Weapons
+> }
+>
+> void UAIController::ProcessDecision()
+> {
+>     LLM_SCOPE(MyGameAI);
+>     // 行为树/黑板/寻路缓存
+> }
+>
+> void UMyHUD::UpdateHealthBar()
+> {
+>     LLM_SCOPE(MyGameUI);
+>     // UI Widget 的动态纹理/材质分配
+> }
+> ```
+>
+> **内存泄漏检测方法**：
+> 1. 以 `-LLM -LLMCSV` 启动游戏，10 次重复"生成-销毁"压力循环
+> 2. 打开 `Saved/Profiling/LLM/*.csv`，筛选 `MyGame/Weapons` 列
+> 3. 绘制曲线：X=时间，Y=内存占用
+> 4. **泄漏判定**：如果 10 个循环后内存占用持续上升 → 泄漏。如果每次循环后回落到基准线 → 无泄漏
+> 5. 额外检查：`stat LLMFULL` → 查看 `MyGame/Weapons` 的 `Current` vs `Peak`——如果 Current 稳定在 Peak 附近说明分配后未释放
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 ## 4. 扩展阅读
 

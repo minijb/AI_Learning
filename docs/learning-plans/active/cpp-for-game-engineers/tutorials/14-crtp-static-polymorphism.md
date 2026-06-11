@@ -648,6 +648,472 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> > // crtp_event_handler.cpp — CRTP 事件处理器系统
+> > #include <iostream>
+> > #include <string>
+> > 
+> > // ============================================================
+> > // 事件类型
+> > // ============================================================
+> > struct MouseEvent    { int x, y; int buttons; };
+> > struct KeyboardEvent { int key; bool pressed; };
+> > struct GamepadEvent  { int button; float axis_value; };
+> > 
+> > // ============================================================
+> > // CRTP 基类: EventHandler<Derived>
+> > // ============================================================
+> > template <typename Derived>
+> > class EventHandler {
+> > public:
+> >     template <typename Event>
+> >     void handle(const Event& e) {
+> >         static_cast<Derived*>(this)->handle_impl(e);
+> >     }
+> > };
+> > 
+> > // ============================================================
+> > // 具体处理器
+> > // ============================================================
+> > class MouseHandler : public EventHandler<MouseHandler> {
+> > public:
+> >     void handle_impl(const MouseEvent& e) {
+> >         std::cout << "  [MouseHandler] pos=(" << e.x << "," << e.y
+> >                   << ") buttons=" << e.buttons << "\n";
+> >     }
+> >     // handle_impl(const KeyboardEvent&) 不存在 → 编译期阻止错误类型
+> >     void handle_impl(const GamepadEvent&) {
+> >         std::cout << "  [MouseHandler] 不处理 GamepadEvent\n";
+> >     }
+> > };
+> > 
+> > class KeyboardHandler : public EventHandler<KeyboardHandler> {
+> > public:
+> >     void handle_impl(const KeyboardEvent& e) {
+> >         std::cout << "  [KeyboardHandler] key=" << e.key
+> >                   << " pressed=" << (e.pressed ? "true" : "false") << "\n";
+> >     }
+> >     void handle_impl(const MouseEvent&) {
+> >         std::cout << "  [KeyboardHandler] 不处理 MouseEvent\n";
+> >     }
+> >     void handle_impl(const GamepadEvent&) {
+> >         std::cout << "  [KeyboardHandler] 不处理 GamepadEvent\n";
+> >     }
+> > };
+> > 
+> > class GamepadHandler : public EventHandler<GamepadHandler> {
+> > public:
+> >     void handle_impl(const GamepadEvent& e) {
+> >         std::cout << "  [GamepadHandler] button=" << e.button
+> >                   << " axis=" << e.axis_value << "\n";
+> >     }
+> >     void handle_impl(const MouseEvent&) {
+> >         std::cout << "  [GamepadHandler] 不处理 MouseEvent\n";
+> >     }
+> >     void handle_impl(const KeyboardEvent&) {
+> >         std::cout << "  [GamepadHandler] 不处理 KeyboardEvent\n";
+> >     }
+> > };
+> > 
+> > // ============================================================
+> > // 类型安全的事件分发
+> > // ============================================================
+> > template <typename Event, typename Handler>
+> > void dispatch(const Event& e, EventHandler<Handler>& h) {
+> >     h.handle(e);  // 编译期：如果 Handler 没有 handle_impl(Event) → 编译错误
+> > }
+> > 
+> > // ============================================================
+> > // 测试
+> > // ============================================================
+> > int main() {
+> >     MouseHandler    mouse;
+> >     KeyboardHandler keyboard;
+> >     GamepadHandler  gamepad;
+> > 
+> >     std::cout << "=== 正确分发 ===\n";
+> >     MouseEvent    me{100, 200, 3};
+> >     KeyboardEvent ke{65, true};   // key 'A'
+> >     GamepadEvent  ge{0, 0.75f};
+> > 
+> >     dispatch(me, mouse);
+> >     dispatch(ke, keyboard);
+> >     dispatch(ge, gamepad);
+> > 
+> >     std::cout << "\n=== 交叉分发（验证编译期类型检查）===\n";
+> >     dispatch(ge, mouse);     // 允许（MouseHandler 有 handle_impl(GamepadEvent)）
+> >     dispatch(me, keyboard);  // 允许（KeyboardHandler 有 handle_impl(MouseEvent)）
+> > 
+> >     // 下面这行如果取消注释会编译失败（编译期类型安全）：
+> >     // dispatch(ge, keyboard);
+> >     // 错误: GamepadHandler::handle_impl(KeyboardEvent) is private / not defined
+> >     // 这正是 CRTP + 模板 dispatch 编译期阻止错误事件类型传递的效果
+> > 
+> >     std::cout << "\n编译期类型检查: 阻止了错误事件类型传递 ✓\n";
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > // virtual_vs_crtp_benchmark.cpp — 虚函数 vs CRTP 粒子性能对比
+> > #include <iostream>
+> > #include <vector>
+> > #include <memory>
+> > #include <chrono>
+> > #include <iomanip>
+> > #include <cmath>
+> > 
+> > // ============================================================
+> > // 虚函数版本
+> > // ============================================================
+> > struct IVirtualParticle {
+> >     virtual void update_simple(float dt) = 0;
+> >     virtual void update_complex(float dt) = 0;
+> >     virtual ~IVirtualParticle() = default;
+> > };
+> > 
+> > struct VirtualParticle : IVirtualParticle {
+> >     float x=0, y=0, z=0, vx=1, vy=0.5f, vz=0.2f;
+> >     float lifetime=10.0f, color[3]={1,0,0};
+> > 
+> >     void update_simple(float dt) override {
+> >         x += vx * dt;
+> >         y += vy * dt;
+> >     }
+> >     void update_complex(float dt) override {
+> >         x += vx * dt;
+> >         y += vy * dt;
+> >         z += vz * dt;
+> >         lifetime -= dt;
+> >         color[0] = lifetime / 10.0f;  // fade out
+> >         color[1] = 1.0f - lifetime / 10.0f;
+> >     }
+> > };
+> > 
+> > // ============================================================
+> > // CRTP 版本
+> > // ============================================================
+> > template <typename Derived>
+> > class CRTPUpdatable {
+> > public:
+> >     void update_simple(float dt) {
+> >         static_cast<Derived*>(this)->update_simple_impl(dt);
+> >     }
+> >     void update_complex(float dt) {
+> >         static_cast<Derived*>(this)->update_complex_impl(dt);
+> >     }
+> > };
+> > 
+> > struct CRTPParticle : CRTPUpdatable<CRTPParticle> {
+> >     float x=0, y=0, z=0, vx=1, vy=0.5f, vz=0.2f;
+> >     float lifetime=10.0f, color[3]={1,0,0};
+> > 
+> >     void update_simple_impl(float dt) {
+> >         x += vx * dt;
+> >         y += vy * dt;
+> >     }
+> >     void update_complex_impl(float dt) {
+> >         x += vx * dt;
+> >         y += vy * dt;
+> >         z += vz * dt;
+> >         lifetime -= dt;
+> >         color[0] = lifetime / 10.0f;
+> >         color[1] = 1.0f - lifetime / 10.0f;
+> >     }
+> > };
+> > 
+> > // ============================================================
+> > // 基准测试工具
+> > // ============================================================
+> > using Clock = std::chrono::high_resolution_clock;
+> > 
+> > template <typename InitFn, typename UpdateFn>
+> > double measure(InitFn init, UpdateFn update, size_t particle_count, size_t iterations) {
+> >     init();
+> >     auto start = Clock::now();
+> >     for (size_t i = 0; i < iterations; ++i) {
+> >         update();
+> >     }
+> >     auto end = Clock::now();
+> >     auto total_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count();
+> >     return static_cast<double>(total_ns) / iterations;  // ns/iteration
+> > }
+> > 
+> > int main() {
+> >     const size_t particle_counts[] = {100, 1000, 10000};
+> >     const size_t iterations = 1000;
+> > 
+> >     std::cout << std::fixed << std::setprecision(2);
+> >     std::cout << "==============================================================\n";
+> >     std::cout << "  虚函数 vs CRTP 粒子更新性能对比\n";
+> >     std::cout << "==============================================================\n\n";
+> > 
+> >     for (size_t N : particle_counts) {
+> >         std::cout << "--- " << N << " 粒子 ---\n";
+> > 
+> >         // ─── 简单更新（仅位置）───
+> >         std::cout << "  [简单更新：仅位置]\n";
+> > 
+> >         // 虚函数
+> >         std::vector<std::unique_ptr<IVirtualParticle>> vparts(N);
+> >         auto v_init = [&]() {
+> >             for (size_t i = 0; i < N; ++i) vparts[i] = std::make_unique<VirtualParticle>();
+> >         };
+> >         auto v_update = [&]() {
+> >             for (auto& p : vparts) p->update_simple(0.016f);
+> >         };
+> >         double v_simple = measure(v_init, v_update, N, iterations);
+> > 
+> >         // CRTP
+> >         std::vector<CRTPParticle> cparts(N);
+> >         auto c_update = [&]() {
+> >             for (auto& p : cparts) p.update_simple(0.016f);
+> >         };
+> >         double c_simple = measure([](){}, c_update, N, iterations);
+> > 
+> >         std::cout << "    虚函数: " << std::setw(8) << v_simple << " ns/iter\n";
+> >         std::cout << "    CRTP:   " << std::setw(8) << c_simple << " ns/iter\n";
+> >         std::cout << "    加速比: " << std::setw(8) << v_simple / c_simple << "x\n";
+> > 
+> >         // ─── 复杂更新（位置+速度+生命周期+颜色）───
+> >         std::cout << "  [复杂更新：位置+速度+生命周期+颜色]\n";
+> > 
+> >         auto v_complex_init = [&]() {
+> >             for (size_t i = 0; i < N; ++i) vparts[i] = std::make_unique<VirtualParticle>();
+> >         };
+> >         auto v_complex_update = [&]() {
+> >             for (auto& p : vparts) p->update_complex(0.016f);
+> >         };
+> >         double v_complex = measure(v_complex_init, v_complex_update, N, iterations);
+> > 
+> >         auto c_complex_update = [&]() {
+> >             for (auto& p : cparts) p.update_complex(0.016f);
+> >         };
+> >         double c_complex = measure([](){}, c_complex_update, N, iterations);
+> > 
+> >         std::cout << "    虚函数: " << std::setw(8) << v_complex << " ns/iter\n";
+> >         std::cout << "    CRTP:   " << std::setw(8) << c_complex << " ns/iter\n";
+> >         std::cout << "    加速比: " << std::setw(8) << v_complex / c_complex << "x\n";
+> > 
+> >         // 虚函数开销占比
+> >         double simple_overhead = (v_simple - c_simple) / v_simple * 100;
+> >         double complex_overhead = (v_complex - c_complex) / v_complex * 100;
+> >         std::cout << "    虚函数开销占比: simple=" << simple_overhead
+> >                   << "%, complex=" << complex_overhead << "%\n\n";
+> >     }
+> > 
+> >     // ─── 分析 ───
+> >     std::cout << "==============================================================\n";
+> >     std::cout << "  分析\n";
+> >     std::cout << "==============================================================\n";
+> >     std::cout << "1. 简单更新时虚函数开销占比更大:\n";
+> >     std::cout << "   - 因为虚函数调用本身有固定开销（vtable 查找 + 间接跳转）\n";
+> >     std::cout << "   - 当方法体很简单（仅几条指令），虚函数开销占比高\n";
+> >     std::cout << "   - 当方法体复杂（更多计算），虚函数开销被摊薄\n\n";
+> > 
+> >     std::cout << "2. CRTP 优势:\n";
+> >     std::cout << "   - 编译期绑定 → 直接调用（无 vtable 间接）\n";
+> >     std::cout << "   - 编译器可以内联 CRTP::update → 消除函数调用\n";
+> >     std::cout << "   - 但代价是代码膨胀（每个 Derived 生成一份代码）\n\n";
+> > 
+> >     std::cout << "3. 引擎建议:\n";
+> >     std::cout << "   - 粒子/实体等高频更新的小对象 → CRTP\n";
+> >     std::cout << "   - 复杂的游戏对象/需要多态容器 → 虚函数\n";
+> >     std::cout << "   - 关键路径避免虚函数，非关键路径允许虚函数\n";
+> > 
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案（选做·挑战）
+> ```cpp
+> > // crtp_mixin_system.cpp — Singleton + Cloneable + Serializable CRTP Mixin
+> > #include <memory>
+> > #include <fstream>
+> > #include <string>
+> > #include <cstring>
+> > #include <iostream>
+> > #include <type_traits>
+> > 
+> > // ============================================================
+> > // 1. Singleton<Derived> — Meyer's Singleton
+> > // ============================================================
+> > template <typename Derived>
+> > class Singleton {
+> > public:
+> >     static Derived& instance() {
+> >         static Derived inst;
+> >         return inst;
+> >     }
+> > protected:
+> >     Singleton() = default;
+> >     Singleton(const Singleton&) = delete;
+> >     Singleton& operator=(const Singleton&) = delete;
+> > };
+> > 
+> > // ============================================================
+> > // 2. Cloneable<Derived> — 深拷贝
+> > // ============================================================
+> > template <typename Derived>
+> > class Cloneable {
+> > public:
+> >     std::unique_ptr<Derived> clone() const {
+> >         return std::make_unique<Derived>(static_cast<const Derived&>(*this));
+> >     }
+> > };
+> > 
+> > // ============================================================
+> > // 3. Serializable<Derived> — 文件读写
+> > // ============================================================
+> > struct Archive {
+> >     std::string data;
+> > };
+> > 
+> > template <typename Derived>
+> > class Serializable {
+> > public:
+> >     bool save_to_file(const char* path) const {
+> >         Archive ar;
+> >         static_cast<const Derived*>(this)->serialize(ar);
+> > 
+> >         std::ofstream out(path, std::ios::binary);
+> >         if (!out) return false;
+> >         out.write(ar.data.c_str(), ar.data.size());
+> >         return out.good();
+> >     }
+> > 
+> >     bool load_from_file(const char* path) {
+> >         std::ifstream in(path, std::ios::binary);
+> >         if (!in) return false;
+> > 
+> >         // 读取文件到 string
+> >         std::string content((std::istreambuf_iterator<char>(in)),
+> >                              std::istreambuf_iterator<char>());
+> > 
+> >         Archive ar;
+> >         ar.data = std::move(content);
+> >         static_cast<Derived*>(this)->deserialize(ar);
+> >         return true;
+> >     }
+> > };
+> > 
+> > // ============================================================
+> > // 4. ConfigManager — 使用三个 Mixin
+> > // ============================================================
+> > class ConfigManager
+> >     : public Singleton<ConfigManager>
+> >     , public Cloneable<ConfigManager>
+> >     , public Serializable<ConfigManager>
+> > {
+> > public:
+> >     int    volume   = 75;
+> >     float  master_fx = 0.8f;
+> >     bool   vsync    = true;
+> >     int    resolution_w = 1920;
+> >     int    resolution_h = 1080;
+> > 
+> >     // Serializable 要求: serialize + deserialize
+> >     void serialize(Archive& ar) const {
+> >         ar.data += "volume="  + std::to_string(volume)  + "\n";
+> >         ar.data += "master_fx=" + std::to_string(master_fx) + "\n";
+> >         ar.data += "vsync="   + std::to_string(vsync)   + "\n";
+> >         ar.data += "res=" + std::to_string(resolution_w)
+> >                   + "x" + std::to_string(resolution_h) + "\n";
+> >     }
+> > 
+> >     void deserialize(const Archive& ar) {
+> >         // 简化: 解析 "key=value\n" 格式
+> >         const auto& d = ar.data;
+> >         auto pos = d.find("volume=");
+> >         if (pos != std::string::npos)
+> >             volume = std::stoi(d.substr(pos + 7));
+> >         pos = d.find("master_fx=");
+> >         if (pos != std::string::npos)
+> >             master_fx = std::stof(d.substr(pos + 10));
+> >         pos = d.find("vsync=");
+> >         if (pos != std::string::npos)
+> >             vsync = (d[pos+6] == '1');
+> >     }
+> > 
+> >     void print() const {
+> >         std::cout << "ConfigManager {\n"
+> >                   << "  volume:    " << volume << "\n"
+> >                   << "  master_fx: " << master_fx << "\n"
+> >                   << "  vsync:     " << (vsync ? "true" : "false") << "\n"
+> >                   << "  res:       " << resolution_w << "x" << resolution_h << "\n"
+> >                   << "}\n";
+> >     }
+> > };
+> > 
+> > // ============================================================
+> > // 测试
+> > // ============================================================
+> > int main() {
+> >     std::cout << "=== CRTP Mixin 系统验证 ===\n\n";
+> > 
+> >     // ─── 1. Singleton ───
+> >     std::cout << "--- Singleton ---\n";
+> >     auto& cfg1 = ConfigManager::instance();
+> >     auto& cfg2 = ConfigManager::instance();
+> >     std::cout << "cfg1 == cfg2: " << (&cfg1 == &cfg2 ? "true ✓" : "false ✗") << "\n";
+> >     std::cout << "Singleton 保证全局唯一\n\n";
+> > 
+> >     // ─── 2. Cloneable ───
+> >     std::cout << "--- Cloneable ---\n";
+> >     auto& original = ConfigManager::instance();
+> >     original.volume = 80;
+> >     original.vsync  = false;
+> >     auto cloned = original.clone();
+> >     std::cout << "original:\n"; original.print();
+> >     std::cout << "cloned:\n";   cloned->print();
+> >     std::cout << "Cloneable 支持深拷贝 ✓\n\n";
+> > 
+> >     // ─── 3. Serializable ───
+> >     std::cout << "--- Serializable ---\n";
+> >     const char* path = "config_save.txt";
+> >     bool saved = original.save_to_file(path);
+> >     std::cout << "Saved: " << (saved ? "true ✓" : "false ✗") << "\n";
+> > 
+> >     // 修改原始配置
+> >     original.volume = 50;
+> >     original.master_fx = 0.5f;
+> >     std::cout << "Modified config:\n"; original.print();
+> > 
+> >     // 从文件恢复
+> >     bool loaded = original.load_from_file(path);
+> >     std::cout << "Loaded: " << (loaded ? "true ✓" : "false ✗") << "\n";
+> >     std::cout << "Restored config:\n"; original.print();
+> > 
+> >     // ─── 4. EBO 内存分析 ───
+> >     std::cout << "\n--- Empty Base Optimization 分析 ---\n";
+> >     std::cout << "sizeof(Singleton<ConfigManager>)    = "
+> >               << sizeof(Singleton<ConfigManager>) << "\n";
+> >     std::cout << "sizeof(Cloneable<ConfigManager>)    = "
+> >               << sizeof(Cloneable<ConfigManager>) << "\n";
+> >     std::cout << "sizeof(Serializable<ConfigManager>) = "
+> >               << sizeof(Serializable<ConfigManager>) << "\n";
+> >     std::cout << "sizeof(ConfigManager) = "
+> >               << sizeof(ConfigManager) << "\n";
+> >     std::cout << "\n三个 Mixin 类都是空基类（无成员变量）\n";
+> >     std::cout << "EBO 保证继承时不增加 Derived 的大小\n";
+> >     if (sizeof(ConfigManager) == sizeof(int)*3 + sizeof(float) + sizeof(bool) + 4 /*padding*/) {
+> >         std::cout << "内存开销为零 ✓\n";
+> >     }
+> > 
+> >     // 清理测试文件
+> >     std::remove(path);
+> > 
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **CRTP 维基百科**：[Curiously Recurring Template Pattern](https://en.wikipedia.org/wiki/Curiously_recurring_template_pattern)

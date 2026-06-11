@@ -511,6 +511,372 @@ PhysicsBatch batches[4];  // 每个线程一个
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <vector>
+> > #include <chrono>
+> > #include <iomanip>
+> > #include <cstdlib>
+> >
+> > constexpr size_t NUM_PARTICLES = 1'000'000;
+> > constexpr float  DT            = 0.016f;
+> >
+> > // ============ AoS 布局 ============
+> > struct ParticleAoS {
+> >     float pos_x, pos_y, pos_z;
+> >     float vel_x, vel_y, vel_z;
+> >     float lifetime;
+> >     int   active;
+> > };
+> >
+> > // ============ SoA 布局 ============
+> > struct ParticleSystemSoA {
+> >     float* pos_x, *pos_y, *pos_z;
+> >     float* vel_x, *vel_y, *vel_z;
+> >     float* lifetime;
+> >     int*   active;
+> >     size_t count;
+> >
+> >     ParticleSystemSoA(size_t n) : count(n) {
+> >         pos_x    = new float[n]();
+> >         pos_y    = new float[n]();
+> >         pos_z    = new float[n]();
+> >         vel_x    = new float[n]();
+> >         vel_y    = new float[n]();
+> >         vel_z    = new float[n]();
+> >         lifetime = new float[n]();
+> >         active   = new int[n]();
+> >     }
+> >     ~ParticleSystemSoA() {
+> >         delete[] pos_x; delete[] pos_y; delete[] pos_z;
+> >         delete[] vel_x; delete[] vel_y; delete[] vel_z;
+> >         delete[] lifetime; delete[] active;
+> >     }
+> >     // 禁止拷贝
+> >     ParticleSystemSoA(const ParticleSystemSoA&) = delete;
+> > };
+> >
+> > // ============ 初始化 ============
+> > void init_aos(std::vector<ParticleAoS>& p) {
+> >     for (size_t i = 0; i < p.size(); ++i) {
+> >         p[i].pos_x = static_cast<float>(i);
+> >         p[i].pos_y = static_cast<float>(i * 2);
+> >         p[i].pos_z = static_cast<float>(i * 3);
+> >         p[i].vel_x = 1.0f;
+> >         p[i].vel_y = 0.5f;
+> >         p[i].vel_z = 0.0f;
+> >         p[i].lifetime = 5.0f;
+> >         p[i].active = 1;
+> >     }
+> > }
+> >
+> > void init_soa(ParticleSystemSoA& s) {
+> >     for (size_t i = 0; i < s.count; ++i) {
+> >         s.pos_x[i] = static_cast<float>(i);
+> >         s.pos_y[i] = static_cast<float>(i * 2);
+> >         s.pos_z[i] = static_cast<float>(i * 3);
+> >         s.vel_x[i] = 1.0f;
+> >         s.vel_y[i] = 0.5f;
+> >         s.vel_z[i] = 0.0f;
+> >         s.lifetime[i] = 5.0f;
+> >         s.active[i] = 1;
+> >     }
+> > }
+> >
+> > // ============ AoS 更新（全字段） ============
+> > void update_aos(std::vector<ParticleAoS>& particles) {
+> >     for (size_t i = 0; i < particles.size(); ++i) {
+> >         if (!particles[i].active) continue;
+> >         particles[i].pos_x += particles[i].vel_x * DT;
+> >         particles[i].pos_y += particles[i].vel_y * DT;
+> >         particles[i].pos_z += particles[i].vel_z * DT;
+> >         particles[i].lifetime -= DT;
+> >         if (particles[i].lifetime <= 0) particles[i].active = 0;
+> >     }
+> > }
+> >
+> > // ============ SoA 更新（全字段） ============
+> > void update_soa(ParticleSystemSoA& sys) {
+> >     for (size_t i = 0; i < sys.count; ++i) {
+> >         if (!sys.active[i]) continue;
+> >         sys.pos_x[i] += sys.vel_x[i] * DT;
+> >         sys.pos_y[i] += sys.vel_y[i] * DT;
+> >         sys.pos_z[i] += sys.vel_z[i] * DT;
+> >         sys.lifetime[i] -= DT;
+> >         if (sys.lifetime[i] <= 0) sys.active[i] = 0;
+> >     }
+> > }
+> >
+> > // ============ 仅位置更新 — 展示 SoA 优势 ============
+> > void update_aos_pos_only(std::vector<ParticleAoS>& particles) {
+> >     for (size_t i = 0; i < particles.size(); ++i) {
+> >         particles[i].pos_x += particles[i].vel_x * DT;
+> >         particles[i].pos_y += particles[i].vel_y * DT;
+> >         particles[i].pos_z += particles[i].vel_z * DT;
+> >     }
+> > }
+> >
+> > void update_soa_pos_only(ParticleSystemSoA& sys) {
+> >     for (size_t i = 0; i < sys.count; ++i) {
+> >         sys.pos_x[i] += sys.vel_x[i] * DT;
+> >         sys.pos_y[i] += sys.vel_y[i] * DT;
+> >         sys.pos_z[i] += sys.vel_z[i] * DT;
+> >     }
+> > }
+> >
+> > // ============ 基准工具 ============
+> > template<typename F>
+> > double bench(F&& f, int iters = 30) {
+> >     for (int i = 0; i < 3; ++i) f();  // 预热
+> >     double best = 1e18;
+> >     for (int i = 0; i < iters; ++i) {
+> >         auto t1 = std::chrono::high_resolution_clock::now();
+> >         f();
+> >         auto t2 = std::chrono::high_resolution_clock::now();
+> >         double ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+> >         if (ms < best) best = ms;
+> >     }
+> >     return best;
+> > }
+> >
+> > int main() {
+> >     // 初始化
+> >     std::vector<ParticleAoS> aos(NUM_PARTICLES);
+> >     init_aos(aos);
+> >     ParticleSystemSoA soa(NUM_PARTICLES);
+> >     init_soa(soa);
+> >
+> >     // 全字段更新基准
+> >     double aos_ms = bench([&]() { update_aos(aos); });
+> >     double soa_ms = bench([&]() { update_soa(soa); });
+> >     std::cout << "=== 全字段更新 ===\n";
+> >     std::cout << "AoS: " << aos_ms << " ms\n";
+> >     std::cout << "SoA: " << soa_ms << " ms\n";
+> >     std::cout << "加速比: " << aos_ms / soa_ms << "x\n\n";
+> >
+> >     // 仅位置更新基准（展示 SoA 优势）
+> >     double aos_pos = bench([&]() { update_aos_pos_only(aos); });
+> >     double soa_pos = bench([&]() { update_soa_pos_only(soa); });
+> >     std::cout << "=== 仅位置更新 ===\n";
+> >     std::cout << "AoS pos-only: " << aos_pos << " ms\n";
+> >     std::cout << "SoA pos-only: " << soa_pos << " ms\n";
+> >     std::cout << "加速比: " << aos_pos / soa_pos << "x\n";
+> >     // SoA 优势显著：只接触连续内存，每缓存行满载 16 个 pos_x
+> >
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <cstddef>
+> > #include <atomic>
+> > #include <thread>
+> > #include <chrono>
+> > #include <vector>
+> >
+> > // ============ 1. 分析伪共享 ============
+> > // 原代码问题：
+> > // struct alignas(64) PhysicsBatch {
+> > //     float total_impulse;   // 4B
+> > //     float total_energy;    // 4B  ← 与前一个字段在同一缓存行
+> > //     int   collision_count; // 4B  ← 仍在同一缓存行
+> > //     //  ... 总共 < 64B → 都在一个缓存行内
+> > // };
+> > // PhysicsBatch batches[4];  // 连续数组
+> > //
+> > // 问题：alignas(64) 作用于整个 struct 而非数组元素间隔。
+> > // batches[0] 起始地址 64B 对齐，batches[1] 紧跟其后（偏移 64B 以内），
+> > // 所以 batches[0] 和 batches[1] 如果 struct 大小 < 64B，
+> > // 它们会落在同一缓存行内 → 伪共享！
+> > //
+> > // 假设 PhysicsBatch 大小 ≈ 20B，则 batches[0] 占用 [0..20)，
+> > // batches[1] 占用 [20..40)，仍在同一 64B 缓存行。
+> > // 线程 A 写 batches[0].total_impulse，线程 B 写 batches[1].total_energy
+> > // → 同一个缓存行在两个核心间弹跳 → 性能灾难
+> >
+> > // ============ ❌ 伪共享版本 ============
+> > struct PhysicsBatchBad {
+> >     float total_impulse   = 0.0f;
+> >     float total_energy    = 0.0f;
+> >     int   collision_count = 0;
+> >     // 假设 struct 大小远小于 64B
+> > };
+> > // sizeof(PhysicsBatchBad) = 12 (packed)，4 个连续 → 全部在 1 个缓存行
+> >
+> > // ============ ✅ 修复版本 ============
+> > struct alignas(64) PhysicsBatchFixed {
+> >     float total_impulse   = 0.0f;
+> >     float total_energy    = 0.0f;
+> >     int   collision_count = 0;
+> >     // alignas(64) 强制每个实例占 64B → 各自独占一个缓存行
+> > };
+> > // sizeof(PhysicsBatchFixed) = 64，每个实例独占缓存行
+> >
+> > // 或者使用 C++17 的 hardware_destructive_interference_size
+> > // (如果编译器提供了该常量)
+> > #include <new>
+> > struct PhysicsBatchModern {
+> >     alignas(std::hardware_destructive_interference_size)
+> >         float total_impulse = 0.0f;
+> >     alignas(std::hardware_destructive_interference_size)
+> >         float total_energy = 0.0f;
+> >     // 每个字段强制隔离到不同缓存行（粒度过细，但概念演示）
+> > };
+> >
+> > // ============ 基准对比 ============
+> > template<typename T>
+> > void benchmark_false_sharing(const char* label) {
+> >     constexpr int ITERS = 100'000'000;
+> >     T batches[4];
+> >
+> >     auto start = std::chrono::high_resolution_clock::now();
+> >     std::thread t0([&]() {
+> >         for (int i = 0; i < ITERS; ++i) batches[0].total_impulse += 1.0f;
+> >     });
+> >     std::thread t1([&]() {
+> >         for (int i = 0; i < ITERS; ++i) batches[1].total_energy += 1.0f;
+> >     });
+> >     std::thread t2([&]() {
+> >         for (int i = 0; i < ITERS; ++i) batches[2].collision_count += 1;
+> >     });
+> >     std::thread t3([&]() {
+> >         for (int i = 0; i < ITERS; ++i) batches[3].total_impulse += 1.0f;
+> >     });
+> >     t0.join(); t1.join(); t2.join(); t3.join();
+> >     auto end = std::chrono::high_resolution_clock::now();
+> >
+> >     double ms = std::chrono::duration<double, std::milli>(end - start).count();
+> >     std::cout << label << ": " << ms << " ms\n";
+> > }
+> >
+> > int main() {
+> >     std::cout << "sizeof(PhysicsBatchBad)   = " << sizeof(PhysicsBatchBad) << '\n';
+> >     std::cout << "sizeof(PhysicsBatchFixed) = " << sizeof(PhysicsBatchFixed) << '\n';
+> >     benchmark_false_sharing<PhysicsBatchBad>("Bad (false sharing)");
+> >     benchmark_false_sharing<PhysicsBatchFixed>("Fixed (alignas(64))");
+> >     // 预期：Fixed 显著快于 Bad（伪共享消除）
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> > #include <iostream>
+> > #include <cstdlib>
+> > #include <chrono>
+> > #include <cstring>
+> >
+> > constexpr size_t BLOCK_SIZE = 16;        // SIMD 宽度
+> > constexpr size_t NUM_BLOCKS = 65536;     // 共 65536×16 ≈ 1M 粒子
+> > constexpr size_t TOTAL      = NUM_BLOCKS * BLOCK_SIZE;
+> > constexpr float  DT         = 0.016f;
+> >
+> > // ============ AoSoA 布局 ============
+> > struct alignas(64) ParticleBlock {
+> >     float pos_x[BLOCK_SIZE], pos_y[BLOCK_SIZE], pos_z[BLOCK_SIZE];
+> >     float vel_x[BLOCK_SIZE], vel_y[BLOCK_SIZE], vel_z[BLOCK_SIZE];
+> >     float lifetime[BLOCK_SIZE];
+> >     uint16_t active_mask;  // 位掩码：bit i = 1 表示粒子 i 活跃
+> >     uint16_t _pad[3];      // 填充对齐
+> > };
+> > // 每个 Block：3×4×16(pos) + 3×4×16(vel) + 4×16(lifetime) + 8(mask+pad) = 448B
+> > // 448B = 7 个缓存行（略浪费但保证对齐）
+> >
+> > struct AoSoASystem {
+> >     ParticleBlock* blocks;
+> >     size_t num_blocks;
+> >
+> >     AoSoASystem(size_t n) : num_blocks(n) {
+> >         blocks = new ParticleBlock[n]();  // 零初始化
+> >     }
+> >     ~AoSoASystem() { delete[] blocks; }
+> > };
+> >
+> > // ============ 初始化 ============
+> > void init_aosoa(AoSoASystem& s) {
+> >     for (size_t b = 0; b < s.num_blocks; ++b) {
+> >         auto& blk = s.blocks[b];
+> >         for (size_t i = 0; i < BLOCK_SIZE; ++i) {
+> >             size_t global_i = b * BLOCK_SIZE + i;
+> >             blk.pos_x[i] = static_cast<float>(global_i);
+> >             blk.pos_y[i] = static_cast<float>(global_i * 2);
+> >             blk.pos_z[i] = static_cast<float>(global_i * 3);
+> >             blk.vel_x[i] = 1.0f;
+> >             blk.vel_y[i] = 0.5f;
+> >             blk.vel_z[i] = 0.0f;
+> >             blk.lifetime[i] = 5.0f;
+> >         }
+> >         blk.active_mask = 0xFFFF;  // 全部活跃
+> >     }
+> > }
+> >
+> > // ============ AoSoA 更新 ============
+> > void update_aosoa(AoSoASystem& s) {
+> >     for (size_t b = 0; b < s.num_blocks; ++b) {
+> >         auto& blk = s.blocks[b];
+> >         uint16_t mask = blk.active_mask;
+> >         if (mask == 0) continue;  // 整块跳过
+> >
+> >         for (size_t i = 0; i < BLOCK_SIZE; ++i) {
+> >             if (!(mask & (1u << i))) continue;
+> >             blk.pos_x[i] += blk.vel_x[i] * DT;
+> >             blk.pos_y[i] += blk.vel_y[i] * DT;
+> >             blk.pos_z[i] += blk.vel_z[i] * DT;
+> >             blk.lifetime[i] -= DT;
+> >             if (blk.lifetime[i] <= 0)
+> >                 mask &= ~(1u << i);  // 标记死亡
+> >         }
+> >         blk.active_mask = mask;
+> >     }
+> > }
+> >
+> > // ============ Swap-Remove 粒子销毁 ============
+> > void kill_particle(AoSoASystem& s, size_t block_idx, size_t slot) {
+> >     auto& blk = s.blocks[block_idx];
+> >     blk.active_mask &= ~(1u << slot);
+> >     // 可选：swap 最后一个活跃粒子到此位置（更复杂，省略）
+> > }
+> >
+> > // 非 16 倍数处理：最后一个 block 只有 active_mask 中对应位为 1
+> > // 例如 100 个粒子 → 6 个满 block + 1 个部分 block（4 粒子）
+> > // active_mask = 0x000F（低 4 位有效）
+> >
+> > // ============ 基准测试 ============
+> > template<typename F>
+> > double bench(F&& f, int iters = 20) {
+> >     for (int i = 0; i < 3; ++i) f();
+> >     double best = 1e18;
+> >     for (int i = 0; i < iters; ++i) {
+> >         auto t1 = std::chrono::high_resolution_clock::now();
+> >         f();
+> >         auto t2 = std::chrono::high_resolution_clock::now();
+> >         double ms = std::chrono::duration<double, std::milli>(t2 - t1).count();
+> >         if (ms < best) best = ms;
+> >     }
+> >     return best;
+> > }
+> >
+> > int main() {
+> >     AoSoASystem sys(NUM_BLOCKS);
+> >     init_aosoa(sys);
+> >
+> >     double ms = bench([&]() { update_aosoa(sys); });
+> >     std::cout << "AoSoA update (" << TOTAL << " particles): "
+> >               << ms << " ms (" << (TOTAL / ms / 1000.0) << " M particles/s)\n";
+> >     std::cout << "剩余粒子（部分死亡）: active 计数略\n";
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **"What Every Programmer Should Know About Memory"** (Ulrich Drepper, 2007) — 缓存层次结构的权威经典

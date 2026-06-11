@@ -612,6 +612,306 @@ Savings: 3.62 (15.4% shorter)
 
 **目标**: 理解 Funnel 的几何本质——不仅适用于 2D NavMesh，任何具有端口序列的凸空间都可以用漏斗算法。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 在 `funnel_algorithm_clean` 中插入追踪日志，每次 portal 处理后输出漏斗状态和操作类型。
+>
+> ```cpp
+> // 操作类型枚举
+> enum class FunnelOp { NARROW_LEFT, NARROW_RIGHT, NEW_APEX_FROM_LEFT, NEW_APEX_FROM_RIGHT, NONE };
+> const char* op_name(FunnelOp op) {
+>     switch (op) {
+>         case FunnelOp::NARROW_LEFT:          return "NARROW_LEFT";
+>         case FunnelOp::NARROW_RIGHT:         return "NARROW_RIGHT";
+>         case FunnelOp::NEW_APEX_FROM_LEFT:   return "NEW_APEX_FROM_LEFT ⚡";
+>         case FunnelOp::NEW_APEX_FROM_RIGHT:  return "NEW_APEX_FROM_RIGHT ⚡";
+>         default: return "NONE";
+>     }
+> }
+> 
+> // 修改后的 funnel_algorithm_clean（插入日志）
+> FunnelResult funnel_algorithm_clean_traced(
+>     const Vec2& start, const Vec2& goal,
+>     const std::vector<Portal>& portals) {
+> 
+>     FunnelResult result;
+>     result.path.push_back(start);
+> 
+>     int n = (int)portals.size();
+>     if (n == 0) {
+>         result.path.push_back(goal);
+>         result.total_length = start.dist_to(goal);
+>         return result;
+>     }
+> 
+>     Vec2 apex = start;
+>     Vec2 left  = portals[0].left;
+>     Vec2 right = portals[0].right;
+>     int l_idx = 0, r_idx = 0;
+> 
+>     // 初始漏斗状态
+>     std::cout << "\n=== Funnel Tracing ===\n";
+>     std::cout << std::fixed << std::setprecision(2);
+>     std::cout << "Start apex=(" << apex.x << "," << apex.y << ")\n";
+>     std::cout << "Portal[0]: L=(" << left.x << "," << left.y
+>               << ") R=(" << right.x << "," << right.y << ")\n";
+> 
+>     for (int i = 1; i < n; ++i) {
+>         const Vec2& L = portals[i].left;
+>         const Vec2& R = portals[i].right;
+>         FunnelOp op = FunnelOp::NONE;
+> 
+>         // --- Narrow right side ---
+>         if (tri_area_sign(apex, right, R) <= 0.0) {
+>             if (tri_area_sign(apex, left, R) > 0.0) {
+>                 right = R; r_idx = i;
+>                 op = FunnelOp::NARROW_RIGHT;
+>             } else {
+>                 apex = left;
+>                 result.path.push_back(apex);
+>                 result.apex_indices.push_back(l_idx);
+>                 left = right = apex;
+>                 l_idx = r_idx = i;
+>                 op = FunnelOp::NEW_APEX_FROM_LEFT;
+>                 if (i < n) {
+>                     if (tri_area_sign(apex, apex, portals[i].left) <= 0.0)
+>                         left = portals[i].left, l_idx = i;
+>                     if (tri_area_sign(apex, apex, portals[i].right) <= 0.0)
+>                         right = portals[i].right, r_idx = i;
+>                 }
+>             }
+>         }
+> 
+>         // --- Narrow left side ---
+>         if (tri_area_sign(apex, left, L) >= 0.0) {
+>             if (tri_area_sign(apex, right, L) < 0.0) {
+>                 left = L; l_idx = i;
+>                 op = (op == FunnelOp::NONE) ? FunnelOp::NARROW_LEFT : op;
+>             } else {
+>                 apex = right;
+>                 result.path.push_back(apex);
+>                 result.apex_indices.push_back(r_idx);
+>                 left = right = apex;
+>                 l_idx = r_idx = i;
+>                 op = FunnelOp::NEW_APEX_FROM_RIGHT;
+>                 if (i < n) {
+>                     if (tri_area_sign(apex, apex, portals[i].right) <= 0.0)
+>                         right = portals[i].right, r_idx = i;
+>                     if (tri_area_sign(apex, apex, portals[i].left) <= 0.0)
+>                         left = portals[i].left, l_idx = i;
+>                 }
+>             }
+>         }
+> 
+>         // 日志输出
+>         std::cout << "Portal[" << i << "]: " << op_name(op) << "\n";
+>         std::cout << "  apex=(" << apex.x << "," << apex.y
+>                   << ")  L=(" << left.x << "," << left.y
+>                   << ")  R=(" << right.x << "," << right.y
+>                   << ")\n";
+>         // ASCII 简图
+>         std::cout << "  " << std::string((int)apex.x, ' ') << "A\n";
+>         std::cout << "  " << std::string((int)left.x, ' ') << "L"
+>                   << std::string(std::max(0, (int)right.x - (int)left.x - 1), '-')
+>                   << "R\n";
+>     }
+> 
+>     result.path.push_back(goal);
+>     result.total_length = 0.0;
+>     for (size_t k = 1; k < result.path.size(); ++k)
+>         result.total_length += result.path[k].dist_to(result.path[k-1]);
+>     return result;
+> }
+> ```
+>
+> **预期追踪输出示例**（弯曲走廊场景）：
+> ```
+> Portal[1]: NARROW_LEFT
+>   apex=(0.00,5.00)  L=(5.00,3.00)  R=(2.00,10.00)
+> Portal[2]: NARROW_RIGHT
+>   apex=(0.00,5.00)  L=(5.00,3.00)  R=(8.00,10.00)
+> Portal[3]: NEW_APEX_FROM_LEFT ⚡
+>   apex=(2.00,10.00)  L=(11.00,6.00)  R=(11.00,12.00)
+> ...
+> ```
+> `⚡` 标记表示绳子"弹"到了新的约束点——这是漏斗算法的核心事件，此时路径产生一个拐点。
+>
+> **关键观察**：在 `NEW_APEX` 发生前，漏斗持续收窄（NARROW）；当 portal 端点终于越过了对面的边界线，漏斗"翻转"，迫使绳子在新位置钉住——这就是"拉绳"直觉的数学本质。
+
+> [!tip]- 练习 2 参考答案
+> 退化 case 的处理策略（在 `funnel_algorithm_clean` 中插入检查，共 3 处修改）：
+>
+> ```cpp
+> FunnelResult funnel_algorithm_clean_robust(
+>     const Vec2& start, const Vec2& goal,
+>     const std::vector<Portal>& portals) {
+> 
+>     FunnelResult result;
+>     result.path.push_back(start);
+> 
+>     // 预处理：过滤退化 portal（left == right）
+>     std::vector<Portal> clean_portals;
+>     for (auto& p : portals) {
+>         if (p.left.dist_to(p.right) < 1e-6) {
+>             // 退化边 → 将其视为强制拐点
+>             result.path.push_back(p.left);
+>             result.apex_indices.push_back((int)clean_portals.size());
+>             // 不加入 clean_portals（因为已处理为拐点）
+>             continue;
+>         }
+>         clean_portals.push_back(p);
+>     }
+> 
+>     int n = (int)clean_portals.size();
+>     if (n == 0) {
+>         result.path.push_back(goal);
+>         result.total_length = start.dist_to(goal);
+>         return result;
+>     }
+> 
+>     Vec2 apex = start;
+>     Vec2 left  = clean_portals[0].left;
+>     Vec2 right = clean_portals[0].right;
+>     int l_idx = 0, r_idx = 0;
+> 
+>     for (int i = 1; i < n; ++i) {
+>         const Vec2& L = clean_portals[i].left;
+>         const Vec2& R = clean_portals[i].right;
+> 
+>         // --- Narrow right side ---
+>         double sign_r = tri_area_sign(apex, right, R);
+>         if (sign_r <= 0.0) {
+>             // 共线检测（epsilon 容差）
+>             if (std::abs(sign_r) < 1e-9) {
+>                 // 共线：选更远的端点（扩大漏斗开口）
+>                 if (apex.dist_to(R) > apex.dist_to(right))
+>                     { right = R; r_idx = i; }
+>             } else {
+>                 double cross_LR = tri_area_sign(apex, left, R);
+>                 if (std::abs(cross_LR) < 1e-9) {
+>                     // R 在 left 线上：共线，选更远的
+>                     if (apex.dist_to(R) > apex.dist_to(left))
+>                         { right = R; r_idx = i; }
+>                 } else if (cross_LR > 0.0) {
+>                     right = R; r_idx = i;
+>                 } else {
+>                     // R 越过 left → 产生新 apex
+>                     apex = left;
+>                     result.path.push_back(apex);
+>                     result.apex_indices.push_back(l_idx);
+>                     left = right = apex;
+>                     l_idx = r_idx = i;
+>                     if (i < n) {
+>                         if (tri_area_sign(apex, apex, clean_portals[i].left) <= 0.0)
+>                             left = clean_portals[i].left, l_idx = i;
+>                         if (tri_area_sign(apex, apex, clean_portals[i].right) <= 0.0)
+>                             right = clean_portals[i].right, r_idx = i;
+>                     }
+>                 }
+>             }
+>         }
+> 
+>         // --- Narrow left side ---（同理，省略对称代码）
+>         // ...
+>     }
+> 
+>     result.path.push_back(goal);
+>     result.total_length = 0.0;
+>     for (size_t k = 1; k < result.path.size(); ++k)
+>         result.total_length += result.path[k].dist_to(result.path[k-1]);
+>     return result;
+> }
+> ```
+>
+> **退化 case 处理要点**：
+> 1. **`left == right`（退化边）**：两个多边形只共享一个点。处理为强制拐点——路径必须经过这个点。不能跳过，因为它可能是走廊的"咽喉"。
+> 2. **`cross ≈ 0`（共线）**：新 portal 端点在现有漏斗边界线上。策略：选**更远的端点**（从 apex 看）。这使漏斗保持最大开口，避免过早收窄导致不必要的拐点。使用 epsilon 容差（`1e-9 * max_distance²`）判断"接近零"。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 3D Funnel 的核心是将 2D 叉积判断扩展到 3D，并加入俯仰角约束。
+>
+> ```cpp
+> struct Vec3 {
+>     double x, y, z;
+>     Vec3() : x(0), y(0), z(0) {}
+>     Vec3(double x_, double y_, double z_) : x(x_), y(y_), z(z_) {}
+>     Vec3 operator-(const Vec3& o) const { return {x - o.x, y - o.y, z - o.z}; }
+>     double len() const { return std::sqrt(x*x + y*y + z*z); }
+>     double dist_to(const Vec3& o) const { return (*this - o).len(); }
+> };
+> 
+> struct Portal3D {
+>     Vec3 left, right;
+> };
+> 
+> // 3D 叉积（返回向量）
+> Vec3 cross3(const Vec3& a, const Vec3& b) {
+>     return { a.y * b.z - a.z * b.y,
+>              a.z * b.x - a.x * b.z,
+>              a.x * b.y - a.y * b.x };
+> }
+> 
+> // 将问题投影到"漏斗平面"上做 2D 判断
+> // 漏斗平面 = 由 apex + 当前 left + 当前 right 三个点确定的平面
+> // 投影方法：将端口端点投影到漏斗平面法向量上取符号
+> double signed_distance_to_funnel_plane(const Vec3& apex,
+>     const Vec3& left, const Vec3& right, const Vec3& point) {
+>     Vec3 normal = cross3(left - apex, right - apex);
+>     double nlen = normal.len();
+>     if (nlen < 1e-12) return 0.0;  // 退化（漏斗还没形成）
+>     normal = {normal.x / nlen, normal.y / nlen, normal.z / nlen};
+>     return (point.x - apex.x) * normal.x
+>          + (point.y - apex.y) * normal.y
+>          + (point.z - apex.z) * normal.z;
+> }
+> 
+> // 俯仰角检查：从 apex 到候选拐点的垂直方向变化
+> bool pitch_ok(const Vec3& apex, const Vec3& candidate, double max_pitch_deg = 45.0) {
+>     Vec3 dir = {candidate.x - apex.x, candidate.y - apex.y, candidate.z - apex.z};
+>     double horizontal = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+>     if (horizontal < 1e-6) return true;  // 纯垂直移动，允许
+>     double pitch = std::atan2(std::abs(dir.z), horizontal);
+>     return pitch <= max_pitch_deg * M_PI / 180.0;
+> }
+> 
+> // 3D Funnel 主循环的修改要点
+> // 在 2D 判断的基础上：
+> // 1. 用 signed_distance_to_funnel_plane 替换 2D tri_area_sign
+> // 2. 当产生新 apex 时，调用 pitch_ok 检查
+> // 3. 如果 pitch 超限：在垂直方向插入中间拐点，将陡坡分成两段
+> std::vector<Vec3> insert_pitch_break(const Vec3& apex, const Vec3& candidate,
+>                                        double max_pitch_deg) {
+>     Vec3 dir = {candidate.x - apex.x, candidate.y - apex.y, candidate.z - apex.z};
+>     double horizontal = std::sqrt(dir.x * dir.x + dir.y * dir.y);
+>     double max_dz = horizontal * std::tan(max_pitch_deg * M_PI / 180.0);
+> 
+>     std::vector<Vec3> breaks;
+>     if (std::abs(dir.z) <= max_dz) {
+>         breaks.push_back(candidate);  // OK，单段
+>     } else {
+>         // 插入中间拐点使垂直变化均分
+>         int n_segments = (int)std::ceil(std::abs(dir.z) / max_dz);
+>         for (int i = 1; i < n_segments; ++i) {
+>             double t = (double)i / n_segments;
+>             Vec3 mid = { apex.x + dir.x * t,
+>                         apex.y + dir.y * t,
+>                         apex.z + dir.z * t };
+>             breaks.push_back(mid);
+>         }
+>         breaks.push_back(candidate);
+>     }
+>     return breaks;
+> }
+> ```
+>
+> **关键设计洞察**：3D Funnel 不是 2D 的简单推广。2D 中漏斗在"地面平面"上收窄，3D 中漏斗在"当前三元组确定的平面"上收窄。核心挑战是定义"左侧/右侧"在 3D 中的含义——我们通过投影到漏斗平面来解决。这在数学上等价于将问题局部降为 2D。
+>
+> **预期效果**：在有高度变化的地形走廊（如山地路径）中，3D Funnel 生成的路径不仅水平最短，而且垂直变化平缓可走——45° 约束相当于角色不能爬过陡坡。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **Detour 源码**: `DetourNavMeshQuery::findStraightPath()` — Recast/Detour 中的 Funnel 实现。工业级 C++ 代码，处理大量边界 case。[github.com/recastnavigation/recastnavigation](https://github.com/recastnavigation/recastnavigation)

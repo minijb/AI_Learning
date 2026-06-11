@@ -1,6 +1,6 @@
 # 学习计划索引
 
-> 自动生成于 2026-06-08
+> 自动生成于 2026-06-11
 
 ## 进行中
 
@@ -8,15 +8,18 @@
 |---------|---------|
 | advanced-pathfinding | — |
 | battle-system | — |
+| cmake-deep-dive | — |
 | cpp-async-programming | — |
 | cpp-for-game-engineers | — |
-| cpp-memory-model | 2026-06-08 |
+| cpp-memory-model | — |
 | design-patterns-csharp | — |
+| dotnet-cli-csharp-project | — |
 | ecs-system | — |
 | frame-state-sync | — |
 | game-ai-fsm-bt | — |
 | game-engine-dev | — |
 | game-performance-optimization | — |
+| mermaid-syntax | — |
 | neovim-lua-config | — |
 | oh-my-pi-code-agent-使用指南 | — |
 

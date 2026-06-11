@@ -644,6 +644,539 @@ void polymorphismBenchmark() {
 5. 对比如果用虚函数实现，调用开销的差异（基准测试）
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：虚函数插件系统 → 类型擦除
+> ```cpp
+> #include <memory>
+> #include <new>
+> #include <vector>
+> #include <iostream>
+> #include <functional>
+> #include <cstring>
+> 
+> // ========== 原始虚函数接口（对比用） ==========
+> struct IPlugin {
+>     virtual ~IPlugin() = default;
+>     virtual bool init() = 0;
+>     virtual void update(float dt) = 0;
+>     virtual void shutdown() = 0;
+> };
+> 
+> // ========== 类型擦除 Plugin（带 SBO） ==========
+> class Plugin {
+>     static constexpr size_t SBO_SIZE  = 64;
+>     static constexpr size_t SBO_ALIGN = alignof(std::max_align_t);
+> 
+> public:
+>     // 构造函数模板：接受任何有 init/update/shutdown 的类型
+>     template <typename T>
+>     Plugin(T obj) {
+>         using Decayed = std::decay_t<T>;
+> 
+>         if constexpr (sizeof(Decayed) <= SBO_SIZE &&
+>                       alignof(Decayed) <= SBO_ALIGN &&
+>                       std::is_nothrow_move_constructible_v<Decayed>) {
+>             // SBO：栈内存储
+>             new (buffer_) Decayed(std::move(obj));
+>             isHeap_ = false;
+> 
+>             init_ = [](void* self) -> bool {
+>                 return static_cast<Decayed*>(self)->init();
+>             };
+>             update_ = [](void* self, float dt) {
+>                 static_cast<Decayed*>(self)->update(dt);
+>             };
+>             shutdown_ = [](void* self) {
+>                 static_cast<Decayed*>(self)->shutdown();
+>             };
+>             destroy_ = [](void* self) {
+>                 static_cast<Decayed*>(self)->~Decayed();
+>             };
+>         } else {
+>             // 大对象：堆分配
+>             auto* ptr = new Decayed(std::move(obj));
+>             heapPtr_ = ptr;
+>             isHeap_ = true;
+> 
+>             init_ = [](void* self) -> bool {
+>                 return (*static_cast<Decayed*>(self))->init();
+>             };
+>             update_ = [](void* self, float dt) {
+>                 (*static_cast<Decayed*>(self))->update(dt);
+>             };
+>             shutdown_ = [](void* self) {
+>                 (*static_cast<Decayed*>(self))->shutdown();
+>             };
+>             destroy_ = [](void* self) {
+>                 delete static_cast<Decayed*>(self);
+>             };
+>         }
+>     }
+> 
+>     ~Plugin() {
+>         if (destroy_) destroy_(isHeap_ ? heapPtr_ : buffer_);
+>     }
+> 
+>     // 移动语义
+>     Plugin(Plugin&& other) noexcept {
+>         moveFrom(std::move(other));
+>     }
+>     Plugin& operator=(Plugin&& other) noexcept {
+>         if (this != &other) {
+>             if (destroy_) destroy_(isHeap_ ? heapPtr_ : buffer_);
+>             moveFrom(std::move(other));
+>         }
+>         return *this;
+>     }
+> 
+>     Plugin(const Plugin&) = delete;
+>     Plugin& operator=(const Plugin&) = delete;
+> 
+>     // 统一接口
+>     bool init()           { return init_ ? init_(getPtr()) : true; }
+>     void update(float dt) { if (update_) update_(getPtr(), dt); }
+>     void shutdown()       { if (shutdown_) shutdown_(getPtr()); }
+> 
+>     explicit operator bool() const { return init_ != nullptr; }
+> 
+> private:
+>     void* getPtr() { return isHeap_ ? heapPtr_ : buffer_; }
+> 
+>     void moveFrom(Plugin&& other) {
+>         if (other.isHeap_) {
+>             heapPtr_ = other.heapPtr_;
+>             other.heapPtr_ = nullptr;
+>         } else {
+>             std::memcpy(buffer_, other.buffer_, SBO_SIZE);
+>         }
+>         isHeap_   = other.isHeap_;
+>         init_     = other.init_;
+>         update_   = other.update_;
+>         shutdown_ = other.shutdown_;
+>         destroy_  = other.destroy_;
+> 
+>         other.init_     = nullptr;
+>         other.update_   = nullptr;
+>         other.shutdown_ = nullptr;
+>         other.destroy_  = nullptr;
+>     }
+> 
+>     union {
+>         alignas(SBO_ALIGN) char buffer_[SBO_SIZE];
+>         void* heapPtr_;
+>     };
+>     bool isHeap_ = false;
+> 
+>     using FuncBoolVoid  = bool (*)(void*);
+>     using FuncVoidFloat = void (*)(void*, float);
+>     using FuncVoidVoid  = void (*)(void*);
+> 
+>     FuncBoolVoid  init_     = nullptr;
+>     FuncVoidFloat update_   = nullptr;
+>     FuncVoidVoid  shutdown_ = nullptr;
+>     FuncVoidVoid  destroy_  = nullptr;
+> };
+> 
+> // ========== PluginManager ==========
+> class PluginManager {
+> public:
+>     void registerPlugin(Plugin p) {
+>         plugins_.push_back(std::move(p));
+>     }
+> 
+>     bool initAll() {
+>         for (auto& p : plugins_) {
+>             if (!p.init()) return false;
+>         }
+>         return true;
+>     }
+> 
+>     void updateAll(float dt) {
+>         for (auto& p : plugins_) p.update(dt);
+>     }
+> 
+>     void shutdownAll() {
+>         for (auto& p : plugins_) p.shutdown();
+>         plugins_.clear();
+>     }
+> 
+> private:
+>     std::vector<Plugin> plugins_;
+> };
+> 
+> // ========== 具体插件实现（无需继承 IPlugin！） ==========
+> struct RenderPlugin {
+>     std::string name = "Renderer";
+>     bool init()           { std::cout << name << " init\n"; return true; }
+>     void update(float dt) { std::cout << name << " update " << dt << "\n"; }
+>     void shutdown()       { std::cout << name << " shutdown\n"; }
+> };
+> 
+> struct PhysicsPlugin {
+>     int stepCount = 0;
+>     bool init()           { std::cout << "Physics init\n"; return true; }
+>     void update(float dt) { stepCount++; /* 物理步进 */ }
+>     void shutdown()       { std::cout << "Physics shutdown after " << stepCount << " steps\n"; }
+> };
+> 
+> // Lambda 也可以作为 Plugin！
+> auto makeLoggingPlugin(const std::string& tag) {
+>     struct {
+>         std::string tag;
+>         bool init()           { std::cout << "[" << tag << "] init\n"; return true; }
+>         void update(float)    { std::cout << "[" << tag << "] tick\n"; }
+>         void shutdown()       { std::cout << "[" << tag << "] shutdown\n"; }
+>     } p{tag};
+>     return p;
+> }
+> 
+> void demo() {
+>     PluginManager mgr;
+> 
+>     // 完全不相关的类型，无需继承
+>     mgr.registerPlugin(RenderPlugin{});
+>     mgr.registerPlugin(PhysicsPlugin{});
+>     mgr.registerPlugin(makeLoggingPlugin("Audio"));
+> 
+>     mgr.initAll();
+>     mgr.updateAll(0.016f);
+>     mgr.updateAll(0.016f);
+>     mgr.shutdownAll();
+> 
+>     // 对比内存布局：
+>     std::cout << "\n=== Memory Analysis ===\n";
+>     std::cout << "sizeof(IPlugin*)      = " << sizeof(IPlugin*) << " (pointer to vtable-based)\n";
+>     std::cout << "sizeof(Plugin)        = " << sizeof(Plugin)  << " (type-erased, SBO)\n";
+>     std::cout << "sizeof(RenderPlugin)  = " << sizeof(RenderPlugin)  << " (≤ 64 → SBO inline)\n";
+>     std::cout << "- Plugin wraps RenderPlugin with zero heap allocation\n";
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：快速委托事件系统
+> ```cpp
+> #include <iostream>
+> #include <vector>
+> #include <string>
+> #include <algorithm>
+> 
+> // ========== 快速委托（16 bytes） ==========
+> template <typename Signature>
+> class FastDelegate;
+> 
+> template <typename R, typename... Args>
+> class FastDelegate<R(Args...)> {
+> public:
+>     FastDelegate() : object_(nullptr), stub_(nullptr) {}
+> 
+>     // 从成员函数构造
+>     template <typename T, R (T::*Method)(Args...)>
+>     static FastDelegate create(T* obj) {
+>         FastDelegate d;
+>         d.object_ = obj;
+>         d.stub_ = [](void* obj, Args... args) -> R {
+>             return (static_cast<T*>(obj)->*Method)(std::forward<Args>(args)...);
+>         };
+>         return d;
+>     }
+> 
+>     // 从 const 成员函数构造
+>     template <typename T, R (T::*Method)(Args...) const>
+>     static FastDelegate create(const T* obj) {
+>         FastDelegate d;
+>         d.object_ = const_cast<T*>(obj);
+>         d.stub_ = [](void* obj, Args... args) -> R {
+>             return (static_cast<const T*>(obj)->*Method)(std::forward<Args>(args)...);
+>         };
+>         return d;
+>     }
+> 
+>     // 从自由函数/lambda 构造
+>     template <typename F>
+>     static FastDelegate create(F* fn) {
+>         FastDelegate d;
+>         d.object_ = reinterpret_cast<void*>(fn);
+>         d.stub_ = [](void* obj, Args... args) -> R {
+>             return (*reinterpret_cast<std::decay_t<F>*>(obj))(std::forward<Args>(args)...);
+>         };
+>         return d;
+>     }
+> 
+>     R operator()(Args... args) const {
+>         return stub_(object_, std::forward<Args>(args)...);
+>     }
+> 
+>     explicit operator bool() const { return stub_ != nullptr; }
+>     bool operator==(const FastDelegate& o) const {
+>         return object_ == o.object_ && stub_ == o.stub_;
+>     }
+>     bool operator!=(const FastDelegate& o) const { return !(*this == o); }
+> 
+> private:
+>     void* object_;
+>     R (*stub_)(void*, Args...);
+> };
+> 
+> // ========== 键盘输入事件 ==========
+> struct KeyEvent {
+>     int keyCode;
+>     bool pressed;
+>     std::string toString() const {
+>         return "KeyEvent(key=" + std::to_string(keyCode)
+>              + ", " + (pressed ? "down" : "up") + ")";
+>     }
+> };
+> 
+> // ========== 事件分发器 ==========
+> template <typename EventType>
+> class EventDispatcher {
+> public:
+>     using Delegate = FastDelegate<void(const EventType&)>;
+> 
+>     void subscribe(Delegate d) {
+>         handlers_.push_back(d);
+>     }
+> 
+>     void unsubscribe(Delegate d) {
+>         auto it = std::find(handlers_.begin(), handlers_.end(), d);
+>         if (it != handlers_.end()) {
+>             handlers_.erase(it);
+>         }
+>     }
+> 
+>     void dispatch(const EventType& event) {
+>         for (auto& handler : handlers_) {
+>             if (handler) handler(event);
+>         }
+>     }
+> 
+>     size_t handlerCount() const { return handlers_.size(); }
+> 
+> private:
+>     std::vector<Delegate> handlers_;
+> };
+> 
+> // ========== 使用案例 ==========
+> struct PlayerController {
+>     void onKey(const KeyEvent& e) {
+>         std::cout << "PlayerController: " << e.toString() << "\n";
+>         if (e.keyCode == 87 && e.pressed) std::cout << "  → Move forward\n"; // W
+>     }
+> };
+> 
+> struct UISystem {
+>     void onKey(const KeyEvent& e) {
+>         std::cout << "UISystem: " << e.toString() << "\n";
+>         if (e.keyCode == 27 && e.pressed) std::cout << "  → Open pause menu\n"; // ESC
+>     }
+> };
+> 
+> struct DebugPanel {
+>     void onKey(const KeyEvent& e) {
+>         if (e.keyCode == 192 && e.pressed)  // ~ 键
+>             std::cout << "DebugPanel: toggle console\n";
+>     }
+> };
+> 
+> void demoEventSystem() {
+>     PlayerController player;
+>     UISystem ui;
+>     DebugPanel debug;
+> 
+>     EventDispatcher<KeyEvent> dispatcher;
+> 
+>     // 注册处理器（16 bytes 每个，零堆分配）
+>     dispatcher.subscribe(
+>         FastDelegate<void(const KeyEvent&)>::create<PlayerController, &PlayerController::onKey>(&player));
+>     dispatcher.subscribe(
+>         FastDelegate<void(const KeyEvent&)>::create<UISystem, &UISystem::onKey>(&ui));
+>     dispatcher.subscribe(
+>         FastDelegate<void(const KeyEvent&)>::create<DebugPanel, &DebugPanel::onKey>(&debug));
+> 
+>     std::cout << "Handlers: " << dispatcher.handlerCount() << "\n";
+>     std::cout << "sizeof(FastDelegate) = " << sizeof(FastDelegate<void(const KeyEvent&)>)
+>               << " bytes (zero heap)\n\n";
+> 
+>     // 模拟按键事件
+>     dispatcher.dispatch(KeyEvent{87, true});   // W pressed
+>     dispatcher.dispatch(KeyEvent{27, true});   // ESC pressed
+>     dispatcher.dispatch(KeyEvent{192, true});  // ~ pressed
+> }
+> ```
+
+> [!tip]- 可选挑战参考答案：Variant 命令模式 + 撤销
+> ```cpp
+> #include <variant>
+> #include <vector>
+> #include <iostream>
+> #include <string>
+> 
+> // ========== 命令类型 ==========
+> struct MoveCmd {
+>     int entityId;
+>     float fromX, fromY, fromZ;
+>     float toX, toY, toZ;
+> };
+> 
+> struct ScaleCmd {
+>     int entityId;
+>     float fromScale;
+>     float toScale;
+> };
+> 
+> struct RotateCmd {
+>     int entityId;
+>     float fromAngle;
+>     float toAngle;
+> };
+> 
+> struct CreateCmd {
+>     int entityId;
+>     float x, y, z;
+> };
+> 
+> struct DeleteCmd {
+>     int entityId;
+>     float x, y, z;  // 记录位置以便撤销重建
+> };
+> 
+> // 封闭的命令集合
+> using Command = std::variant<MoveCmd, ScaleCmd, RotateCmd, CreateCmd, DeleteCmd>;
+> 
+> // ========== 命令执行器（模拟场景状态） ==========
+> struct SceneState {
+>     std::string toString() const {
+>         return "Scene{entities: " + std::to_string(entityCount) + "}";
+>     }
+>     int entityCount = 0;
+> };
+> 
+> SceneState g_scene;
+> 
+> void execute(const Command& cmd) {
+>     std::visit([](const auto& c) { executeImpl(c); }, cmd);
+> }
+> 
+> void undo(const Command& cmd) {
+>     std::visit([](const auto& c) { undoImpl(c); }, cmd);
+> }
+> 
+> // 具体实现（每种命令的 execute/undo）
+> void executeImpl(const MoveCmd& c) {
+>     std::cout << "MOVE   entity " << c.entityId << ": ("
+>               << c.fromX << "," << c.fromY << "," << c.fromZ << ") → ("
+>               << c.toX << "," << c.toY << "," << c.toZ << ")\n";
+> }
+> void undoImpl(const MoveCmd& c) {
+>     std::cout << "UNDO MOVE entity " << c.entityId << " back to ("
+>               << c.fromX << "," << c.fromY << "," << c.fromZ << ")\n";
+> }
+> 
+> void executeImpl(const ScaleCmd& c) {
+>     std::cout << "SCALE  entity " << c.entityId << ": "
+>               << c.fromScale << " → " << c.toScale << "\n";
+> }
+> void undoImpl(const ScaleCmd& c) {
+>     std::cout << "UNDO SCALE entity " << c.entityId << " back to " << c.fromScale << "\n";
+> }
+> 
+> void executeImpl(const RotateCmd& c) {
+>     std::cout << "ROTATE entity " << c.entityId << ": "
+>               << c.fromAngle << "° → " << c.toAngle << "°\n";
+> }
+> void undoImpl(const RotateCmd& c) {
+>     std::cout << "UNDO ROTATE entity " << c.entityId << " back to " << c.fromAngle << "°\n";
+> }
+> 
+> void executeImpl(const CreateCmd& c) {
+>     g_scene.entityCount++;
+>     std::cout << "CREATE entity " << c.entityId << " at ("
+>               << c.x << "," << c.y << "," << c.z << ")\n";
+> }
+> void undoImpl(const CreateCmd& c) {
+>     g_scene.entityCount--;
+>     std::cout << "UNDO CREATE: remove entity " << c.entityId << "\n";
+> }
+> 
+> void executeImpl(const DeleteCmd& c) {
+>     g_scene.entityCount--;
+>     std::cout << "DELETE entity " << c.entityId << "\n";
+> }
+> void undoImpl(const DeleteCmd& c) {
+>     g_scene.entityCount++;
+>     std::cout << "UNDO DELETE: restore entity " << c.entityId << " at ("
+>               << c.x << "," << c.y << "," << c.z << ")\n";
+> }
+> 
+> // ========== 命令历史（撤销/重做） ==========
+> class CommandHistory {
+> public:
+>     void execute(Command cmd) {
+>         ::execute(cmd);
+>         undoStack_.push_back(std::move(cmd));
+>         redoStack_.clear();  // 新命令清空重做历史
+>     }
+> 
+>     bool canUndo() const { return !undoStack_.empty(); }
+>     bool canRedo() const { return !redoStack_.empty(); }
+> 
+>     void undo() {
+>         if (!canUndo()) return;
+>         Command cmd = std::move(undoStack_.back());
+>         undoStack_.pop_back();
+>         ::undo(cmd);
+>         redoStack_.push_back(std::move(cmd));
+>     }
+> 
+>     void redo() {
+>         if (!canRedo()) return;
+>         Command cmd = std::move(redoStack_.back());
+>         redoStack_.pop_back();
+>         ::execute(cmd);
+>         undoStack_.push_back(std::move(cmd));
+>     }
+> 
+>     // 批量重放最近 N 个命令
+>     void replayRecent(size_t n) {
+>         size_t start = n >= undoStack_.size() ? 0 : undoStack_.size() - n;
+>         std::cout << "\n=== Replaying " << (undoStack_.size() - start) << " commands ===\n";
+>         for (size_t i = start; i < undoStack_.size(); ++i) {
+>             ::execute(undoStack_[i]);
+>         }
+>     }
+> 
+> private:
+>     std::vector<Command> undoStack_;
+>     std::vector<Command> redoStack_;
+> };
+> 
+> void demoVariantCommands() {
+>     CommandHistory history;
+> 
+>     history.execute(CreateCmd{1, 0, 0, 0});
+>     history.execute(MoveCmd{1, 0,0,0, 10,0,0});
+>     history.execute(ScaleCmd{1, 1.0f, 2.0f});
+>     history.execute(RotateCmd{1, 0.0f, 45.0f});
+>     history.execute(DeleteCmd{1, 10,0,0});
+> 
+>     std::cout << "\n--- Undo ---\n";
+>     history.undo();  // 撤销 Delete
+>     history.undo();  // 撤销 Rotate
+> 
+>     std::cout << "\n--- Redo ---\n";
+>     history.redo();  // 重做 Rotate
+> 
+>     // 性能对比说明
+>     std::cout << "\n=== Performance Note ===\n";
+>     std::cout << "sizeof(Command) = " << sizeof(Command) << " bytes\n";
+>     std::cout << "- variant: no vptr overhead, jump-table dispatch (like switch-case)\n";
+>     std::cout << "- virtual: vptr + vtable lookup, cannot inline\n";
+>     std::cout << "- For closed type sets, variant typically ~2-3x faster\n";
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。类型擦除的 SBO 尺寸选择（64/32/48 bytes）、函数指针 vs 虚函数的设计取舍均可调整。关键理解"将类型信息编码为函数指针"这一核心思想。
 
 ## 4. 扩展阅读
 

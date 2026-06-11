@@ -426,6 +426,175 @@ g++ -std=c++17 -O2 ui_ecs.cpp -o ui_ecs && ./ui_ecs
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **修改 `InputSystem::process`：**
+> ```cpp
+> void process(UIWorld& w, EventQueue& queue) {
+>     auto& es = w.entities(UIC_RectTransform);
+>     auto intersects = w.getAll<Interactable>(UIC_Interactable);
+>
+>     for (auto& evt : queue.all()) {
+>         // 先用 hitTest 找到鼠标下的实体（复用 depth 优先级逻辑）
+>         Entity hovered = 0;
+>         int bestDepth = -1;
+>         for (size_t i = 0; i < es.size(); i++) {
+>             Entity e = es[i];
+>             auto* rt = w.get<RectTransform>(e, UIC_RectTransform);
+>             if (!rt) continue;
+>             if (rt->depth > bestDepth && hitTest(*rt, evt.mx, evt.my)) {
+>                 bestDepth = rt->depth;
+>                 hovered = e;
+>             }
+>         }
+>
+>         if (evt.type == InputEvent::MouseMove) {
+>             // 重置所有实体的状态为 Normal（或 Disabled 保持不变）
+>             for (size_t i = 0; i < intersects.size(); i++) {
+>                 if (intersects[i] && intersects[i]->state != Interactable::Disabled)
+>                     intersects[i]->state = Interactable::Normal;
+>             }
+>             // 设置当前悬停实体为 Hovered
+>             if (hovered) {
+>                 auto* inter = w.get<Interactable>(hovered, UIC_Interactable);
+>                 if (inter && inter->enabled)
+>                     inter->state = Interactable::Hovered;
+>             }
+>         } else if (evt.type == InputEvent::MouseDown) {
+>             if (hovered) {
+>                 auto* inter = w.get<Interactable>(hovered, UIC_Interactable);
+>                 if (inter && inter->enabled) {
+>                     inter->state = Interactable::Pressed;
+>                     auto* handler = w.get<UIClickHandler>(hovered, UIC_ClickHandler);
+>                     if (handler && handler->callback)
+>                         handler->callback(hovered);
+>                 }
+>             }
+>         }
+>     }
+>     queue.clear();
+> }
+> ```
+>
+> **修改 `RenderSystem::render` 中颜色基于状态的映射：**
+> ```cpp
+> // 在渲染循环中，根据 Interactable 状态选择颜色
+> if (i < inters.size() && inters[i]) {
+>     switch (inters[i]->state) {
+>         case Interactable::Normal:  // Blue
+>             printf(" color=(60,120,220)"); break;
+>         case Interactable::Hovered: // LightBlue
+>             printf(" color=(100,180,255)"); break;
+>         case Interactable::Pressed: // DarkBlue
+>             printf(" color=(30,60,140)"); break;
+>         case Interactable::Disabled: // Gray
+>             printf(" color=(150,150,150)"); break;
+>     }
+> }
+> ```
+>
+> **关键设计点：** 每帧 MouseMove 时先全部重置为 Normal，再设当前悬停为 Hovered——这避免了"离开悬停"时状态残留。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // ========== 新增组件 ==========
+> // 在 UIComp 枚举中添加 UIC_LayoutGroup = 8
+>
+> struct LayoutGroup {
+>     enum Type { Horizontal, Vertical } type = Horizontal;
+>     float spacing = 8.0f;
+>     float paddingLeft = 10, paddingTop = 10;
+> };
+>
+> // ========== HorizontalLayoutSystem ==========
+> void HorizontalLayoutSystem(UIWorld& w) {
+>     auto groups = w.getAll<LayoutGroup>(UIC_LayoutGroup);
+>     auto& es = w.entities(UIC_LayoutGroup);
+>
+>     for (size_t gi = 0; gi < es.size(); gi++) {
+>         auto* group = groups[gi];
+>         if (!group || group->type != LayoutGroup::Horizontal) continue;
+>
+>         Entity parent = es[gi];
+>         auto* prt = w.get<RectTransform>(parent, UIC_RectTransform);
+>         if (!prt) continue;
+>
+>         // 收集带 Parent 组件指向此父实体的所有子实体
+>         vector<Entity> children;
+>         auto& allEs = w.entities(UIC_Parent);
+>         for (size_t ci = 0; ci < allEs.size(); ci++) {
+>             // 需要 Parent 组件存储 parentEntity（此处简化检查）
+>             children.push_back(allEs[ci]);
+>         }
+>
+>         // 水平排列子实体
+>         float cursorX = prt->x + group->paddingLeft;
+>         float cursorY = prt->y + group->paddingTop;
+>         for (Entity child : children) {
+>             auto* crt = w.get<RectTransform>(child, UIC_RectTransform);
+>             if (!crt) continue;
+>             crt->x = cursorX + crt->w * crt->pivotX;
+>             crt->y = cursorY;
+>             cursorX += crt->w + group->spacing;
+>         }
+>     }
+> }
+> ```
+>
+> **核心思路：** LayoutGroup 实体作为容器，子实体通过 Parent 组件关联。系统遍历所有容器实体，读取子实体列表，按 spacing/padding 偏移依次放置。Vertical 布局同理——递增 cursorY 而非 cursorX。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // ========== 在 RectTransform 中添加 dirty 标志 ==========
+> struct RectTransform {
+>     float x=0, y=0, w=100, h=40;
+>     float pivotX=0.5f, pivotY=0.5f;
+>     int depth = 0;
+>     bool dirty = true;  // 新建或修改后置为 true
+> };
+>
+> // ========== 修改 LayoutSystem 为增量模式 ==========
+> void LayoutSystem::update(UIWorld& w) {
+>     auto rects = w.getAll<RectTransform>(UIC_RectTransform);
+>     auto elems = w.getAll<UILayoutElement>(UIC_LayoutElement);
+>
+>     for (size_t i = 0; i < rects.size(); i++) {
+>         if (!rects[i]->dirty) continue;  // 跳过干净的实体
+>         if (i >= elems.size() || !elems[i]) continue;
+>
+>         auto& rt = *rects[i];
+>         auto& el = *elems[i];
+>         float oldW = rt.w, oldH = rt.h;
+>         rt.w = max(el.minW, el.preferredW);
+>         rt.h = max(el.minH, el.preferredH);
+>
+>         // 尺寸未变化 → 清除 dirty
+>         if (oldW == rt.w && oldH == rt.h)
+>             rt.dirty = false;
+>     }
+> }
+>
+> // ========== 修改 RenderSystem 为增量模式 ==========
+> void RenderSystem::render(UIWorld& w, int sw, int sh, bool fullRedraw) {
+>     auto rects = w.getAll<RectTransform>(UIC_RectTransform);
+>     // ... 只渲染 dirty 或 fullRedraw 的实体
+>     for (size_t i = 0; i < rects.size(); i++) {
+>         if (!fullRedraw && !rects[i]->dirty) continue;
+>         // ... 渲染逻辑 ...
+>     }
+> }
+> ```
+>
+> **性能对比（典型场景）：**
+> - 1000 个 UI 元素，10 个每帧变化 → 增量更新只处理 1% 的元素
+> - 布局计算从 O(n) 降到 O(变化量)，渲染同理
+> - **代价：** 需要额外的 dirty 传播机制（例如子元素 dirty → 父元素也 dirty，因为子元素尺寸变化影响父布局）
+> - **工程实践：** React/Vue 的虚拟 DOM diff 本质也是脏标记的变体
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Unity UI Toolkit (UIElements)** — Unity 新一代 UI 系统，基于 UXML/USS + `VisualElement`，是 OOP 与 ECS 之间的桥梁

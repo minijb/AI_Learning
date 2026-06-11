@@ -1156,6 +1156,168 @@ FString UBTService_UpdateTargetDistance::GetStaticDescription() const
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **守卫 NPC 行为树设计** — 带 Observer Abort 和迟滞。
+>
+> **完整树结构**：
+> ```
+> Selector (Root)  [Service: UpdatePlayerDistance @0.2s]
+> │
+> ├── Sequence "Combat"  [Decorator: PlayerDist ≤ 8m (LowerPriority+Self, Both)]
+> │   ├── Decorator: AttackCooldown(1.5s)  ← 防止连射
+> │   │   └── Action: AttackPlayer()
+> │   └── [Repeater(forever)]  ← 保持攻击循环
+> │
+> ├── Sequence "Alert"   [Decorator: PlayerDist ≤ 20m (LowerPriority)]
+> │   └── Action: FacePlayer()  ← 警戒：面向玩家但不攻击
+> │
+> └── Sequence "Patrol"
+>     └── Action: PatrolWaypoints()
+>
+> [Service: UpdatePlayerDistance @0.2s]: 计算 AI 到玩家的距离 → BB.Set("PlayerDist")
+> ```
+>
+> **Observer Abort 标注**：
+> - **Combat 分支的 Decorator**：`Both` 模式。① 玩家进入 8m（false→true）→ LowerPriority → 中断 Alert/Patrol，切换战斗。② 玩家离开 8m（true→false）→ Self → 中断战斗，回退到 Alert（如果在 20m 内）或 Patrol。
+> - **Alert 分支的 Decorator**：`LowerPriority` 模式。玩家进入 20m（false→true）→ 抢断 Patrol，进入警戒。玩家离开 20m → 不做任何事（Self 没开启），Alert 内部的 FacePlayer 会在条件重新评估时失败退出。
+>
+> **为什么 Alert 和 Combat 需要 LowerPriority**：Patrol 是最低优先级兜底行为。"玩家出现 → 必须立即中断巡逻"是 LowerPriority 的典型场景——条件从 false→true 时，让高优先级分支获得执行机会。
+>
+> **迟滞分析 — 为什么回归巡逻用 30m 而非 20m**：
+> 如果回归巡逻也用 20m，NPC 在 20m 边界附近会疯狂切换（警戒↔巡逻）。30m 退出阈值创造了 10m 的缓冲区——玩家必须明显离开后才算"丢失"。在实现中，Combat 和 Alert 的 Decorator 内部使用迟滞：
+> ```csharp
+> // Combat Decorator 内部的迟滞条件
+> bool CheckCombatCondition(float playerDist, bool wasInCombat)
+> {
+>     if (wasInCombat)
+>         return playerDist < 12f;  // 已在战斗 → 更大的退出阈值
+>     else
+>         return playerDist < 8f;   // 未战斗 → 标准进入阈值
+> }
+> ```
+>
+> **5 Tick 追踪表**（O=巡逻, A=警戒, C=战斗）：
+> ```
+> Tick | PlayerDist | Combat(8m) | Alert(20m/Hyst30m) | Patrol | AI行为
+> -----|------------|-----------|--------------------|---------|----------
+>   1  |    100m    |  —        |  —                 |  Run   | 巡逻中
+>   2  |     18m    |  —        |  ✓(20m条件触发，    | Abort  | 切换到警戒
+>      |            |           |   LowerPriority)   |        |
+>   3  |      5m    | ✓(8m触发, |  —(被Combat抢断)   |  —     | 切换到战斗
+>      |            | Both中止  |                    |        |
+>      |            | Alert)    |                    |        |
+>   4  |     12m    | ✓(仍≤12m, |  —                 |  —     | 保持战斗
+>      |            | 迟滞放宽) |                    |        |
+>   5  |     35m    | ✗(Self    |  ✗(PlayerDist>30m  |  Run   | 回到巡逻
+>      |            | Abort)    |  退出迟滞)         |        |
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **Parallel 节点实现 — 移动 + 射击**（Unity C#）。
+>
+> **Parallel 节点完整逻辑**：
+> ```csharp
+> public enum ParallelPolicy
+> {
+>     RequireOne,   // 任意一个子节点成功 → Parallel 成功
+>     RequireAll,   // 所有子节点成功 → Parallel 成功
+> }
+>
+> public class Parallel : CompositeNode
+> {
+>     private readonly ParallelPolicy _successPolicy;
+>     private readonly ParallelPolicy _failurePolicy;
+>
+>     public Parallel(List<BTNode> children,
+>         ParallelPolicy successPolicy = ParallelPolicy.RequireAll,
+>         ParallelPolicy failurePolicy = ParallelPolicy.RequireOne)
+>         : base(children)
+>     {
+>         _successPolicy = successPolicy;
+>         _failurePolicy = failurePolicy;
+>     }
+>
+>     public override BTStatus Tick(float dt)
+>     {
+>         int successCount = 0, failureCount = 0, total = children.Count;
+>         foreach (var child in children)
+>         {
+>             // 已完成（Success/Failure）的子节点不再 tick
+>             if (child.LastStatus == BTStatus.Success) { successCount++; continue; }
+>             if (child.LastStatus == BTStatus.Failure) { failureCount++; continue; }
+>
+>             BTStatus status = child.Tick(dt);
+>             if (status == BTStatus.Success) successCount++;
+>             else if (status == BTStatus.Failure) failureCount++;
+>             // Running: 不改变计数
+>         }
+>
+>         // 根据策略判断成功/失败
+>         if (_successPolicy == ParallelPolicy.RequireAll && successCount == total)
+>             return BTStatus.Success;
+>         if (_successPolicy == ParallelPolicy.RequireOne && successCount > 0)
+>             return BTStatus.Success;
+>         if (_failurePolicy == ParallelPolicy.RequireOne && failureCount > 0)
+>             return BTStatus.Failure;
+>         if (_failurePolicy == ParallelPolicy.RequireAll && failureCount == total)
+>             return BTStatus.Failure;
+>
+>         return BTStatus.Running;
+>     }
+>
+>     public override void OnAbort()
+>     {
+>         // Parallel 被 abort → 中止所有仍在 Running 的子节点
+>         foreach (var child in children)
+>             if (child.LastStatus == BTStatus.Running)
+>                 child.OnAbort();
+>     }
+> }
+> ```
+>
+> **移动+射击 AI 行为树**：
+> ```
+> Selector (Root)
+> ├── Sequence "Flee" [Decorator: Health < 30% (LowerPriority)]
+> │   └── Action: Flee()
+> └── Parallel(RequireOne_success, RequireOne_failure) "ChaseAndShoot"
+>     ├── Action: MoveToTarget()    ← 子节点 1
+>     └── Action: ShootAtTarget()   ← 子节点 2
+> ```
+>
+> **边界情况处理**：
+> - **移动到达目标后射击是否停止？** 答：取决于 Parallel 的成功策略。`RequireOne` 时，MoveToTarget 返回 Success → Parallel 也返回 Success → 整棵 Parallel 子树完成 → 父 Selector 重新 tick（下一帧）。如果希望"到达目标后继续射击直到敌人死亡"，应使用 `RequireAll`——MoveToTarget Success 后停 tick，ShootAtTarget 继续 Running。
+> - **子弹打完了怎么办？** ShootAtTarget 返回 Failure → `RequireOne` 失败策略 → Parallel 返回 Failure → 父 Selector fall through（如果只有一个分支，AI 可能卡住）。更好的设计：让 ShootAtTarget 在弹药耗尽时返回 Success（"射击任务完成"）但通过 Blackboard 设置 `NeedsReload = true`，由外层 Selector 的更高优先级分支处理。
+> - **移动失败（路径不可达）→ 应中止射击吗？** 应该。`RequireOne` 失败策略下，MoveToTarget Failure → Parallel Failure → 父 Selector 重新评估。但在 Parallel 内部，需要在 MoveToTarget 返回 Failure 时调用 `OnAbort()` 中止 ShootAtTarget 子节点。如果 Parallel 不传播 abort，ShootAtTarget 会继续 Running 而不受控制——上述 `OnAbort()` 实现覆盖了这个问题。
+> - **弹药耗尽 → 应中止移动吗？** 取决于设计意图。如果"没有弹药就没有战斗意义"→ 应该，用 `RequireAll` 失败策略即可（任一子节点 Failure → Parallel Failure → 整棵子树退出）。如果"没有武器就用拳头"→ ShootAtTarget 内部切换到近战逻辑而不返回 Failure。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Squad 血量监控 Service 设计**。
+>
+> **1. Service 的数据访问模式**：
+> 推荐使用**事件系统 + Blackboard 缓存**混合方案。Service 不直接遍历队员（那需要持有对每个 AI Controller 的引用——紧耦合）。而是：
+> - 每个队员在自己的 Blackboard 中维护 `CurrentHealth`，当健康变化时通过 Squad Manager 或事件总线广播。
+> - Squad Leader 的 Service 订阅所有队员的健康变化事件，维护本地缓存的健康值列表。
+> - 每 1.0s tick 时，检查缓存中 `[health < deadThreshold]` 的队员比例。
+>
+> **2. 60% 阈值分析**：
+> 如果火箭弹瞬间击杀 50% → 70%（一跳跳过多名队员），阈值检查 `deadRatio > 0.6` 在一次 tick 中检测到 70% > 60%，触发撤退——逻辑正确。但需要处理"已撤退后，比例继续上升或下降"的情况。撤退条件一旦触发，`ShouldRegroup` 应保持 true 直到**不再处于战斗状态**或**新的增援到达**，而非随比例波动。
+>
+> **3. Service 在撤退中的角色**：撤退行为启动后，Service 应该**继续监控**——虽然撤退已触发，但仍需知道"所有队员安全了吗？""有没有人在撤退中被击倒？"这些信息可能影响撤退方式（加速撤退 vs 防御后撤）。
+>
+> **4. 性能分析 — 100 AI × 1s 的 Service tick**：
+> 每秒 100 次全队血量遍历。假设每队 5 人，每次遍历 = 5 次 Blackboard 读取。总开销 = 100 × 5 = 500 次字典查找/秒。这是微不足道的（< 0.01ms/帧）。但如果队规模达到 20 人 + 300 个 AI，开销 = 300 × 20 = 6000 次/秒——仍然可接受。
+>
+> **优化策略**：
+> 1. **事件驱动替代轮询**：不用每秒遍历，改为事件触发——只有当收到 `MemberHealthChanged` 事件时才重新计算比例。将 6000 次/秒的轮询降为 N 次事件处理（N = 实际发生的健康变化次数，远小于轮询次数）。
+> 2. **增量更新**：维护 `aliveCount`，健康变化时 ±1，而非每 tick 重新计算。
+> 3. **Service Interval 动态调整**：战斗外（`ShouldRegroup = false`）用 2s 间隔，战斗中（有队员受伤）用 0.5s 间隔。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **Unreal Engine 官方——Behavior Tree Observer Aborts**：UE 文档中关于 `FlowAbortMode` 的详细说明，包括每种模式的行为树图表演示。

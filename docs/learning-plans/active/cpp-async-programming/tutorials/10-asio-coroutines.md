@@ -784,30 +784,26 @@ int main() {
 2. 用 `for` 循环替代递归/手动循环
 3. 用 `co_spawn` 启动
 
-<details>
-<summary>参考答案（点击展开）</summary>
-
-```cpp
-// coro_timer.cpp
-asio::awaitable<void> ticker() {
-    auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer timer(executor);
-
-    for (int i = 0; i < 5; ++i) {
-        timer.expires_after(std::chrono::seconds(1));
-        co_await timer.async_wait(asio::use_awaitable);
-        std::cout << "Tick " << i << "\n";
-    }
-}
-
-int main() {
-    asio::io_context io_ctx;
-    asio::co_spawn(io_ctx, ticker(), asio::detached);
-    io_ctx.run();
-}
-```
-
-</details>
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // coro_timer.cpp
+> asio::awaitable<void> ticker() {
+>     auto executor = co_await asio::this_coro::executor;
+>     asio::steady_timer timer(executor);
+>
+>     for (int i = 0; i < 5; ++i) {
+>         timer.expires_after(std::chrono::seconds(1));
+>         co_await timer.async_wait(asio::use_awaitable);
+>         std::cout << "Tick " << i << "\n";
+>     }
+> }
+>
+> int main() {
+>     asio::io_context io_ctx;
+>     asio::co_spawn(io_ctx, ticker(), asio::detached);
+>     io_ctx.run();
+> }
+> ```
 
 ---
 
@@ -821,66 +817,58 @@ int main() {
 
 **提示**：使用 `steady_timer` + `||` 或 `parallel_group`（Asio 1.80+），或在 `co_await` 时同时等待 timer 和 I/O。
 
-<details>
-<summary>参考答案思路（点击展开）</summary>
-
-```cpp
-// echo_client_timeout.cpp
-asio::awaitable<void> echo_client_with_timeout(
-    const std::string& host, const std::string& port,
-    const std::string& message) {
-
-    auto executor = co_await asio::this_coro::executor;
-
-    // 1. 带超时解析
-    tcp::resolver resolver(executor);
-    asio::steady_timer resolve_timer(executor);
-    resolve_timer.expires_after(3s);
-
-    auto endpoints = co_await resolver.async_resolve(
-        host, port, asio::use_awaitable);
-    resolve_timer.cancel();
-
-    // 2. 带超时连接
-    tcp::socket socket(executor);
-    asio::error_code connect_ec;
-    asio::steady_timer connect_timer(executor);
-    connect_timer.expires_after(3s);
-
-    // 并行运行 connect + timer
-    co_await asio::async_connect(socket, endpoints,
-        asio::redirect_error(asio::use_awaitable, connect_ec));
-
-    if (connect_ec) {
-        std::cerr << "连接失败/超时: " << connect_ec.message() << "\n";
-        co_return;
-    }
-    connect_timer.cancel();
-
-    // 3. 发送 + 读取回显（5 秒超时）
-    co_await asio::async_write(socket,
-        asio::buffer(message), asio::use_awaitable);
-
-    asio::steady_timer read_timer(executor);
-    read_timer.expires_after(5s);
-
-    asio::streambuf response;
-    co_await asio::async_read_until(socket,
-        response, "\n", asio::use_awaitable);
-    read_timer.cancel();
-
-    std::istream is(&response);
-    std::string line;
-    std::getline(is, line);
-    std::cout << "Echo: " << line << "\n";
-}
-```
-
-</details>
-
----
-
-### 练习 3（高级）：并行 DNS 解析器
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // echo_client_timeout.cpp
+> asio::awaitable<void> echo_client_with_timeout(
+>     const std::string& host, const std::string& port,
+>     const std::string& message) {
+>
+>     auto executor = co_await asio::this_coro::executor;
+>
+>     // 1. 带超时解析
+>     tcp::resolver resolver(executor);
+>     asio::steady_timer resolve_timer(executor);
+>     resolve_timer.expires_after(3s);
+>
+>     auto endpoints = co_await resolver.async_resolve(
+>         host, port, asio::use_awaitable);
+>     resolve_timer.cancel();
+>
+>     // 2. 带超时连接
+>     tcp::socket socket(executor);
+>     asio::error_code connect_ec;
+>     asio::steady_timer connect_timer(executor);
+>     connect_timer.expires_after(3s);
+>
+>     // 并行运行 connect + timer
+>     co_await asio::async_connect(socket, endpoints,
+>         asio::redirect_error(asio::use_awaitable, connect_ec));
+>
+>     if (connect_ec) {
+>         std::cerr << "连接失败/超时: " << connect_ec.message() << "\n";
+>         co_return;
+>     }
+>     connect_timer.cancel();
+>
+>     // 3. 发送 + 读取回显（5 秒超时）
+>     co_await asio::async_write(socket,
+>         asio::buffer(message), asio::use_awaitable);
+>
+>     asio::steady_timer read_timer(executor);
+>     read_timer.expires_after(5s);
+>
+>     asio::streambuf response;
+>     co_await asio::async_read_until(socket,
+>         response, "\n", asio::use_awaitable);
+>     read_timer.cancel();
+>
+>     std::istream is(&response);
+>     std::string line;
+>     std::getline(is, line);
+>     std::cout << "Echo: " << line << "\n";
+> }
+> ```
 
 实现一个并行 DNS 解析器：给定一组主机名，并行解析所有主机的 IP 地址，打印结果。
 
@@ -898,100 +886,110 @@ std::vector<std::string> hosts = {
 };
 ```
 
-<details>
-<summary>参考答案（点击展开）</summary>
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> // parallel_dns.cpp
+> #include <boost/asio.hpp>
+> #include <boost/asio/awaitable.hpp>
+> #include <boost/asio/co_spawn.hpp>
+> #include <boost/asio/detached.hpp>
+> #include <boost/asio/experimental/awaitable_operators.hpp>
+> #include <boost/asio/use_awaitable.hpp>
+> #include <iostream>
+> #include <vector>
+> #include <string>
+>
+> namespace asio = boost::asio;
+> using asio::ip::tcp;
+> using namespace std::chrono_literals;
+> using namespace asio::experimental::awaitable_operators;
+>
+> struct DnsResult {
+>     std::string host;
+>     std::string address;
+>     bool success = false;
+> };
+>
+> asio::awaitable<DnsResult> resolve_one(asio::io_context& io,
+>                                         const std::string& host) {
+>     DnsResult result{host, "", false};
+>     try {
+>         tcp::resolver resolver(io);
+>         auto endpoints = co_await resolver.async_resolve(
+>             host, "80", asio::use_awaitable);
+>
+>         if (!endpoints.empty()) {
+>             result.address = endpoints.begin()->endpoint().address().to_string();
+>             result.success = true;
+>         }
+>     } catch (...) {
+>         // 解析失败，result.success = false
+>     }
+>     co_return result;
+> }
+>
+> asio::awaitable<void> batch_resolve(asio::io_context& io,
+>                                      const std::vector<std::string>& hosts) {
+>     auto executor = co_await asio::this_coro::executor;
+>     asio::steady_timer timeout_timer(executor);
+>     timeout_timer.expires_after(10s);
+>
+>     // 并行发起所有 DNS 解析
+>     auto task1 = resolve_one(io, hosts[0]);
+>     auto task2 = resolve_one(io, hosts[1]);
+>     auto task3 = resolve_one(io, hosts[2]);
+>     auto task4 = resolve_one(io, hosts[3]);
+>     auto task5 = resolve_one(io, hosts[4]);
+>
+>     try {
+>         auto [r1, r2, r3, r4, r5] = co_await (
+>             std::move(task1) || std::move(task2) || std::move(task3) ||
+>             std::move(task4) || std::move(task5)
+>         );
+>
+>         std::vector<DnsResult> results = {r1, r2, r3, r4, r5};
+>         std::cout << "=== DNS 解析结果 ===\n";
+>         for (auto& r : results) {
+>             std::cout << "  " << r.host << " -> "
+>                       << (r.success ? r.address : "解析失败")
+>                       << "\n";
+>         }
+>     } catch (const std::exception& e) {
+>         std::cerr << "批量解析异常: " << e.what() << "\n";
+>     }
+>
+>     timeout_timer.cancel();
+> }
+>
+> // 简化的 5 主机版 — 实际生产可用 vector<awaitable> + 通用并行组合
+> int main() {
+>     asio::io_context io_ctx;
+>
+>     std::vector<std::string> hosts = {
+>         "www.google.com", "www.github.com", "www.boost.org",
+>         "www.stackoverflow.com", "www.wikipedia.org"
+>     };
+>
+>     asio::co_spawn(io_ctx, batch_resolve(io_ctx, hosts), asio::detached);
+>     io_ctx.run();
+>
+>     return 0;
+> }
+> ```
 
-```cpp
-// parallel_dns.cpp
-#include <boost/asio.hpp>
-#include <boost/asio/awaitable.hpp>
-#include <boost/asio/co_spawn.hpp>
-#include <boost/asio/detached.hpp>
-#include <boost/asio/experimental/awaitable_operators.hpp>
-#include <boost/asio/use_awaitable.hpp>
-#include <iostream>
-#include <vector>
-#include <string>
+## 3.5 参考答案
 
-namespace asio = boost::asio;
-using asio::ip::tcp;
-using namespace std::chrono_literals;
-using namespace asio::experimental::awaitable_operators;
+> [!tip]- 练习 1 参考答案
+> 参考上方练习 1 的「练习 1 参考答案」callout。
 
-struct DnsResult {
-    std::string host;
-    std::string address;
-    bool success = false;
-};
+> [!tip]- 练习 2 参考答案
+> 参考上方练习 2 的「练习 2 参考答案」callout。
 
-asio::awaitable<DnsResult> resolve_one(asio::io_context& io,
-                                        const std::string& host) {
-    DnsResult result{host, "", false};
-    try {
-        tcp::resolver resolver(io);
-        auto endpoints = co_await resolver.async_resolve(
-            host, "80", asio::use_awaitable);
+> [!tip]- 练习 3 参考答案
+> 参考上方练习 3 的「练习 3 参考答案」callout。
 
-        if (!endpoints.empty()) {
-            result.address = endpoints.begin()->endpoint().address().to_string();
-            result.success = true;
-        }
-    } catch (...) {
-        // 解析失败，result.success = false
-    }
-    co_return result;
-}
-
-asio::awaitable<void> batch_resolve(asio::io_context& io,
-                                     const std::vector<std::string>& hosts) {
-    auto executor = co_await asio::this_coro::executor;
-    asio::steady_timer timeout_timer(executor);
-    timeout_timer.expires_after(10s);
-
-    // 并行发起所有 DNS 解析
-    auto task1 = resolve_one(io, hosts[0]);
-    auto task2 = resolve_one(io, hosts[1]);
-    auto task3 = resolve_one(io, hosts[2]);
-    auto task4 = resolve_one(io, hosts[3]);
-    auto task5 = resolve_one(io, hosts[4]);
-
-    try {
-        auto [r1, r2, r3, r4, r5] = co_await (
-            std::move(task1) || std::move(task2) || std::move(task3) ||
-            std::move(task4) || std::move(task5)
-        );
-
-        std::vector<DnsResult> results = {r1, r2, r3, r4, r5};
-        std::cout << "=== DNS 解析结果 ===\n";
-        for (auto& r : results) {
-            std::cout << "  " << r.host << " -> "
-                      << (r.success ? r.address : "解析失败")
-                      << "\n";
-        }
-    } catch (const std::exception& e) {
-        std::cerr << "批量解析异常: " << e.what() << "\n";
-    }
-
-    timeout_timer.cancel();
-}
-
-// 简化的 5 主机版 — 实际生产可用 vector<awaitable> + 通用并行组合
-int main() {
-    asio::io_context io_ctx;
-
-    std::vector<std::string> hosts = {
-        "www.google.com", "www.github.com", "www.boost.org",
-        "www.stackoverflow.com", "www.wikipedia.org"
-    };
-
-    asio::co_spawn(io_ctx, batch_resolve(io_ctx, hosts), asio::detached);
-    io_ctx.run();
-
-    return 0;
-}
-```
-
-</details>
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ---
 

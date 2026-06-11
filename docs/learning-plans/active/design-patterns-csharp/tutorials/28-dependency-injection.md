@@ -1362,6 +1362,234 @@ g++ -std=c++17 -o di_manual main.cpp && ./di_manual
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：ASP.NET Core Minimal API
+> ```csharp
+> // ============================================
+> // 项目创建：dotnet new web -n BookApi && cd BookApi
+> // 以下代码放在 Program.cs 中
+> // ============================================
+>
+> // --- 领域模型 ---
+> public record Book(int Id, string Title, string Author, int Year);
+>
+> // --- IBookRepository 接口 ---
+> public interface IBookRepository
+> {
+>     IEnumerable<Book> GetAll();
+>     Book? GetById(int id);
+>     void Add(Book book);
+>     bool Delete(int id);
+> }
+>
+> // --- InMemoryBookRepository（线程安全）---
+> public class InMemoryBookRepository : IBookRepository
+> {
+>     private readonly ConcurrentDictionary<int, Book> _books = new();
+>     private int _nextId = 1;
+>
+>     public IEnumerable<Book> GetAll()
+>         => _books.Values.OrderBy(b => b.Id);
+>
+>     public Book? GetById(int id)
+>         => _books.GetValueOrDefault(id);
+>
+>     public void Add(Book book)
+>     {
+>         var newBook = book with { Id = Interlocked.Increment(ref _nextId) - 1 };
+>         if (!_books.TryAdd(newBook.Id, newBook))
+>             throw new InvalidOperationException($"Book with id {newBook.Id} already exists");
+>     }
+>
+>     public bool Delete(int id)
+>         => _books.TryRemove(id, out _);
+> }
+>
+> // ============================================
+> // Program.cs — Minimal API
+> // ============================================
+> // var builder = WebApplication.CreateBuilder(args);
+> // builder.Services.AddSingleton<IBookRepository, InMemoryBookRepository>();
+> // var app = builder.Build();
+> //
+> // // GET /books
+> // app.MapGet("/books", (IBookRepository repo) => Results.Ok(repo.GetAll()));
+> //
+> // // GET /books/{id}
+> // app.MapGet("/books/{id:int}", (int id, IBookRepository repo) =>
+> //     repo.GetById(id) is Book b ? Results.Ok(b) : Results.NotFound());
+> //
+> // // POST /books
+> // app.MapPost("/books", (Book book, IBookRepository repo) =>
+> // {
+> //     repo.Add(book);
+> //     return Results.Created($"/books/{book.Id}", book);
+> // });
+> //
+> // // DELETE /books/{id}
+> // app.MapDelete("/books/{id:int}", (int id, IBookRepository repo) =>
+> //     repo.Delete(id) ? Results.NoContent() : Results.NotFound());
+> //
+> // app.Run();
+> //
+> // 测试：
+> // curl http://localhost:5000/books
+> // curl -X POST http://localhost:5000/books -H "Content-Type: application/json" -d '{"title":"Design Patterns","author":"GoF","year":1994}'
+> ```
+
+> [!tip]- 练习 2 参考答案：泛型仓储注册
+> ```csharp
+> // ============================================
+> // 1. 泛型接口 + 约束
+> // ============================================
+> public interface IHasId { int Id { get; set; } }
+>
+> public interface IRepository<T> where T : IHasId
+> {
+>     IEnumerable<T> GetAll();
+>     T? GetById(int id);
+>     void Add(T entity);
+>     bool Delete(int id);
+> }
+>
+> // 2. 泛型实现
+> public class InMemoryRepository<T> : IRepository<T> where T : IHasId
+> {
+>     private readonly ConcurrentDictionary<int, T> _store = new();
+>
+>     public IEnumerable<T> GetAll() => _store.Values.OrderBy(e => e.Id);
+>     public T? GetById(int id) => _store.GetValueOrDefault(id);
+>
+>     public void Add(T entity)
+>     {
+>         if (!_store.TryAdd(entity.Id, entity))
+>             throw new InvalidOperationException($"Entity with id {entity.Id} already exists");
+>     }
+>
+>     public bool Delete(int id) => _store.TryRemove(id, out _);
+> }
+>
+> // 3. 实体类型
+> public class Book : IHasId
+> {
+>     public int Id { get; set; }
+>     public string Title { get; set; } = "";
+>     public string Author { get; set; } = "";
+>     public int Year { get; set; }
+> }
+>
+> public class Author : IHasId
+> {
+>     public int Id { get; set; }
+>     public string Name { get; set; } = "";
+>     public string Nationality { get; set; } = "";
+> }
+>
+> // 4. 开放泛型注册 — 一行注册，所有封闭类型自动生效
+> // builder.Services.AddSingleton(
+> //     typeof(IRepository<>),
+> //     typeof(InMemoryRepository<>));
+> //
+> // // 验证：IRepository<Book> 和 IRepository<Author> 都自动解析
+> // app.MapGet("/books", (IRepository<Book> repo) => repo.GetAll());
+> // app.MapGet("/authors", (IRepository<Author> repo) => repo.GetAll());
+> ```
+
+> [!tip]- 练习 3 参考答案：装饰器注册
+> ```csharp
+> // ============================================
+> // 1. LoggingRepository<T> 装饰器
+> // ============================================
+> public class LoggingRepository<T> : IRepository<T> where T : IHasId
+> {
+>     private readonly IRepository<T> _inner;
+>     private readonly ILogger<LoggingRepository<T>> _logger;
+>
+>     public LoggingRepository(IRepository<T> inner, ILogger<LoggingRepository<T>> logger)
+>     {
+>         _inner = inner;
+>         _logger = logger;
+>     }
+>
+>     public IEnumerable<T> GetAll()
+>     {
+>         _logger.LogInformation("[{Repo}] GetAll() called", typeof(T).Name);
+>         var result = _inner.GetAll();
+>         _logger.LogInformation("[{Repo}] GetAll() → {Count} items", typeof(T).Name, result.Count());
+>         return result;
+>     }
+>
+>     public T? GetById(int id)
+>     {
+>         _logger.LogInformation("[{Repo}] GetById({Id})", typeof(T).Name, id);
+>         var result = _inner.GetById(id);
+>         _logger.LogInformation("[{Repo}] GetById({Id}) → {Found}", typeof(T).Name, id, result is not null);
+>         return result;
+>     }
+>
+>     public void Add(T entity)
+>     {
+>         _logger.LogInformation("[{Repo}] Add(id={Id})", typeof(T).Name, entity.Id);
+>         _inner.Add(entity);
+>     }
+>
+>     public bool Delete(int id)
+>     {
+>         _logger.LogInformation("[{Repo}] Delete({Id})", typeof(T).Name, id);
+>         var result = _inner.Delete(id);
+>         _logger.LogInformation("[{Repo}] Delete({Id}) → {Result}", typeof(T).Name, id, result);
+>         return result;
+>     }
+> }
+>
+> // ============================================
+> // 2. 使用 Scrutor 注册（推荐）
+> // ============================================
+> // dotnet add package Scrutor
+> // using Scrutor;
+> //
+> // builder.Services.AddSingleton(
+> //     typeof(IRepository<>), typeof(InMemoryRepository<>));
+> // builder.Services.Decorate(
+> //     typeof(IRepository<>), typeof(LoggingRepository<>));
+> //
+> // // 解析 IRepository<Book> →
+> // //   容器发现 Decorate 注册 →
+> // //     new LoggingRepository<Book>(
+> // //       new InMemoryRepository<Book>(),
+> // //       logger)
+>
+> // ============================================
+> // 3. 手动工厂委托（不使用 Scrutor）— 仅做知识点演示
+> // ============================================
+> // MS DI 容器不支持直接注册开放泛型装饰器，
+> // 需要为每个需要的封闭类型手动注册，或用反射批量注册：
+> //
+> // var types = new[] { typeof(Book), typeof(Author) };
+> // foreach (var t in types)
+> // {
+> //     var innerType = typeof(InMemoryRepository<>).MakeGenericType(t);
+> //     var decoratorType = typeof(LoggingRepository<>).MakeGenericType(t);
+> //     var interfaceType = typeof(IRepository<>).MakeGenericType(t);
+> //
+> //     builder.Services.AddSingleton(innerType);
+> //     builder.Services.AddSingleton(interfaceType, sp =>
+> //     {
+> //         var inner = sp.GetRequiredService(innerType);
+> //         var loggerType = typeof(ILogger<>).MakeGenericType(decoratorType);
+> //         var logger = sp.GetRequiredService(loggerType);
+> //         return Activator.CreateInstance(decoratorType, inner, logger)!;
+> //     });
+> // }
+> //
+> // Scrutor 的 Decorate() 封装了上述反射逻辑且支持开放泛型，应优先使用。
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 设计模式关系

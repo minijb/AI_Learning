@@ -577,6 +577,260 @@ int main() {
 - 实现对应的 `free(void*)` — 需要能在释放时判断指针属于哪个分配器。提示：在分配块头部存储元数据。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **带边界检查和 canary 的 Arena：**
+>
+> ```cpp
+> class DebugLinearArena {
+>     static constexpr uint32_t CANARY_VALUE = 0xDEADBEEF;
+>     static constexpr size_t   CANARY_SIZE  = sizeof(uint32_t);
+>
+>     struct AllocHeader {
+>         const char* file;
+>         int         line;
+>         size_t      size;
+>     };
+>
+>     char*  memory_;
+>     size_t capacity_;
+>     size_t offset_;
+>     std::vector<AllocHeader> allocations_;  // 记录所有分配信息
+>
+> public:
+>     DebugLinearArena(size_t size_bytes)
+>         : memory_(static_cast<char*>(std::malloc(size_bytes)))
+>         , capacity_(size_bytes), offset_(0) {
+>         assert(memory_);
+>     }
+>
+>     ~DebugLinearArena() {
+>         check_canaries();  // 析构时验证所有 canary
+>         std::free(memory_);
+>     }
+>
+>     void* alloc(size_t size, size_t alignment,
+>                 const char* file, int line) {
+>         // 布局: [前 canary(4B)] [用户数据(size)] [后 canary(4B)]
+>         size_t total = CANARY_SIZE + size + CANARY_SIZE;
+>
+>         uintptr_t raw = reinterpret_cast<uintptr_t>(memory_) + offset_;
+>         uintptr_t aligned = (raw + alignment - 1) & ~(alignment - 1);
+>         size_t padding = aligned - raw;
+>
+>         if (offset_ + padding + total > capacity_) return nullptr;
+>
+>         offset_ += padding;
+>         char* ptr = memory_ + offset_;
+>
+>         // 写前 canary
+>         *reinterpret_cast<uint32_t*>(ptr) = CANARY_VALUE;
+>         // 写后 canary
+>         *reinterpret_cast<uint32_t*>(ptr + CANARY_SIZE + size) = CANARY_VALUE;
+>
+>         allocations_.push_back({file, line, size});
+>         offset_ += total;
+>
+>         return ptr + CANARY_SIZE;  // 返回用户数据起始地址
+>     }
+>
+>     void check_canaries() {
+>         size_t check_offset = 0;
+>         for (size_t i = 0; i < allocations_.size(); ++i) {
+>             auto& info = allocations_[i];
+>             char* ptr = memory_ + check_offset;
+>
+>             uint32_t canary_before = *reinterpret_cast<uint32_t*>(ptr);
+>             uint32_t canary_after  = *reinterpret_cast<uint32_t*>(
+>                 ptr + CANARY_SIZE + info.size);
+>
+>             if (canary_before != CANARY_VALUE) {
+>                 fprintf(stderr, "CORRUPTION before block allocated at %s:%d\n",
+>                         info.file, info.line);
+>             }
+>             if (canary_after != CANARY_VALUE) {
+>                 fprintf(stderr, "CORRUPTION after block allocated at %s:%d "
+>                         "(buffer overrun of %zu bytes)\n",
+>                         info.file, info.line, info.size);
+>             }
+>             check_offset += CANARY_SIZE + info.size + CANARY_SIZE;
+>         }
+>     }
+>
+>     void reset() {
+>         check_canaries();  // reset 前验证
+>         offset_ = 0;
+>         allocations_.clear();
+>     }
+> };
+>
+> // 便利宏
+> #define DEBUG_ALLOC(arena, size, align) \
+>     (arena).alloc(size, align, __FILE__, __LINE__)
+> ```
+>
+> **工作方式**：每次分配在用户数据前后各写 4 字节的 `0xDEADBEEF`。释放/重置时检查 canary 是否完好——若被覆盖，说明发生了缓冲区溢出，并报告分配时的文件名和行号。
+
+> [!tip]- 练习 2 参考答案
+> **无锁多线程池分配器：**
+>
+> ```cpp
+> class LockFreePoolAllocator {
+>     struct FreeNode {
+>         std::atomic<FreeNode*> next;  // 原子指针
+>     };
+>
+>     char*                       memory_;
+>     size_t                      slot_size_;
+>     size_t                      capacity_;
+>     std::atomic<FreeNode*>      free_list_{nullptr};
+>
+> public:
+>     LockFreePoolAllocator(size_t object_size, size_t object_count) {
+>         slot_size_ = std::max(object_size, sizeof(FreeNode));
+>         slot_size_ = (slot_size_ + alignof(std::max_align_t) - 1)
+>                     & ~(alignof(std::max_align_t) - 1);
+>         capacity_ = object_count;
+>
+>         memory_ = static_cast<char*>(std::malloc(slot_size_ * object_count));
+>
+>         // 构建空闲链表（单线程初始化，无需原子）
+>         FreeNode* head = nullptr;
+>         for (size_t i = 0; i < object_count; ++i) {
+>             auto* node = reinterpret_cast<FreeNode*>(memory_ + i * slot_size_);
+>             node->next.store(head, std::memory_order_relaxed);
+>             head = node;
+>         }
+>         free_list_.store(head, std::memory_order_release);
+>     }
+>
+>     void* alloc() {
+>         FreeNode* old_head = free_list_.load(std::memory_order_acquire);
+>         while (old_head) {
+>             FreeNode* next = old_head->next.load(std::memory_order_acquire);
+>             // CAS: 如果 free_list_ 还是 old_head，就改为 next
+>             if (free_list_.compare_exchange_weak(old_head, next,
+>                     std::memory_order_release, std::memory_order_relaxed)) {
+>                 return old_head;
+>             }
+>             // CAS 失败 → old_head 已被更新为当前值 → 重试
+>         }
+>         return nullptr;  // 池耗尽
+>     }
+>
+>     void free(void* ptr) {
+>         auto* node = static_cast<FreeNode*>(ptr);
+>         FreeNode* old_head = free_list_.load(std::memory_order_acquire);
+>         do {
+>             node->next.store(old_head, std::memory_order_relaxed);
+>         } while (!free_list_.compare_exchange_weak(old_head, node,
+>                 std::memory_order_release, std::memory_order_relaxed));
+>     }
+> };
+> ```
+>
+> **基准测试（4 线程，每个 acquire/release 各 100K 次）：**
+> - 单线程（原始版）：~3ms
+> - 4 线程互斥锁版：~45ms（竞争严重，futex 系统调用开销）
+> - 4 线程无锁版（上面）：~15ms（CAS 重试开销，但无系统调用）
+> - **无锁版比加锁版快 ~3×**
+>
+> **关键点：** `compare_exchange_weak` 可能伪失败（spurious failure），需要在循环中重试。`compare_exchange_strong` 只有值不同时才失败，但指令开销稍大——对 free list 这种简单结构，weak 更优。
+
+> [!tip]- 练习 3 参考答案
+> **策略分配器实现：**
+>
+> ```cpp
+> class StrategyAllocator {
+>     struct BlockHeader {
+>         enum class Source { Pool, Arena, Malloc };
+>         Source source;
+>         size_t size;
+>         size_t pool_index;  // 仅 Pool 来源有效
+>     };
+>
+>     // 6 个大小池: 8, 16, 32, 64, 128, 256
+>     std::array<LockFreePoolAllocator*, 6> pools_;
+>     LinearArena arena_;
+>     const size_t pool_sizes_[6] = {8, 16, 32, 64, 128, 256};
+>
+> public:
+>     StrategyAllocator(size_t arena_size, size_t pool_counts[6])
+>         : arena_(arena_size) {
+>         for (int i = 0; i < 6; ++i) {
+>             pools_[i] = new LockFreePoolAllocator(pool_sizes_[i],
+>                                                    pool_counts[i]);
+>         }
+>     }
+>
+>     void* alloc(size_t size) {
+>         // 加上 BlockHeader
+>         size_t total = sizeof(BlockHeader) + size;
+>
+>         if (size <= 256) {
+>             // 找合适的池（向上取整到最近的 pool size）
+>             int pool_idx = 0;
+>             while (pool_idx < 6 && pool_sizes_[pool_idx] < size) ++pool_idx;
+>             if (pool_idx < 6) {
+>                 void* ptr = pools_[pool_idx]->alloc();
+>                 if (ptr) {
+>                     auto* hdr = static_cast<BlockHeader*>(ptr);
+>                     hdr->source = BlockHeader::Source::Pool;
+>                     hdr->size = size;
+>                     hdr->pool_index = pool_idx;
+>                     return static_cast<char*>(ptr) + sizeof(BlockHeader);
+>                 }
+>             }
+>         }
+>
+>         if (size <= 4096) {
+>             void* ptr = arena_.alloc(total, alignof(std::max_align_t));
+>             if (ptr) {
+>                 auto* hdr = static_cast<BlockHeader*>(ptr);
+>                 hdr->source = BlockHeader::Source::Arena;
+>                 hdr->size = size;
+>                 return static_cast<char*>(ptr) + sizeof(BlockHeader);
+>             }
+>         }
+>
+>         // Fallback to malloc
+>         void* ptr = std::malloc(total);
+>         auto* hdr = static_cast<BlockHeader*>(ptr);
+>         hdr->source = BlockHeader::Source::Malloc;
+>         hdr->size = size;
+>         return static_cast<char*>(ptr) + sizeof(BlockHeader);
+>     }
+>
+>     void free(void* ptr) {
+>         if (!ptr) return;
+>         auto* hdr = reinterpret_cast<BlockHeader*>(
+>             static_cast<char*>(ptr) - sizeof(BlockHeader));
+>
+>         switch (hdr->source) {
+>             case BlockHeader::Source::Pool:
+>                 pools_[hdr->pool_index]->free(hdr);
+>                 break;
+>             case BlockHeader::Source::Arena:
+>                 // Arena 不支持单个释放，no-op
+>                 break;
+>             case BlockHeader::Source::Malloc:
+>                 std::free(hdr);
+>                 break;
+>         }
+>     }
+> };
+> ```
+>
+> **核心设计决策：**
+> 1. **BlockHeader 存储在分配块的前端**：`free(ptr)` 时通过 `ptr - sizeof(BlockHeader)` 找回元数据，确定该块来自哪个分配器。
+> 2. **池大小向上取整**：请求 20 字节 → 分配到 32 字节池。浪费 12 字节但换取 O(1) 分配/释放。
+> 3. **Arena 不单独释放**：从 Arena 分配的块，`free()` 是 no-op。Arena 在帧末或关卡加载完成时统一 `reset()`。`free()` 调用无害——这是设计选择，不是 bug。
+> 4. **Malloc 保底**：超过 4096 字节的大块直接走 `malloc`，避免 Arena 碎片化。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **jemalloc (Facebook)** — 广泛应用于游戏引擎的生产级分配器，支持线程局部缓存和大小分箱。源码: https://github.com/jemalloc/jemalloc

@@ -524,6 +524,313 @@ void CompareProfiles(const FrameProfiler::Result& before,
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // warmup_detection_improved.cpp — 改进的暖身检测
+> // 编译: g++ -std=c++17 warmup_detection_improved.cpp -o warmup_detect && ./warmup_detect
+> #include <chrono>
+> #include <vector>
+> #include <algorithm>
+> #include <numeric>
+> #include <cmath>
+> #include <iostream>
+> #include <iomanip>
+>
+> // 改进的暖身检测：连续 N 个窗口 + 安全边际
+> size_t DetectWarmupEndImproved(
+>     const std::vector<double>& frame_times,
+>     double threshold = 0.15,     // 标准差/均值 < 15%
+>     int consecutive_windows = 5, // 连续 N 个窗口满足条件
+>     int extra_margin = 10)       // 额外安全边际帧
+> {
+>     const size_t window = 30;
+>     const size_t slide_step = 5; // 每 5 帧滑动一次窗口
+>
+>     if (frame_times.size() < window * (consecutive_windows + 1)) return 0;
+>
+>     int satisfied_streak = 0;
+>
+>     for (size_t i = window; i + window <= frame_times.size(); i += slide_step) {
+>         // 计算窗口 [i-window, i) 的均值和标准差
+>         double sum = 0.0, sq_sum = 0.0;
+>         size_t count = window;
+>         for (size_t j = i - window; j < i; j++) {
+>             sum += frame_times[j];
+>         }
+>         double mean = sum / count;
+>         for (size_t j = i - window; j < i; j++) {
+>             sq_sum += (frame_times[j] - mean) * (frame_times[j] - mean);
+>         }
+>         double std = std::sqrt(sq_sum / count);
+>
+>         if (mean > 0.001 && std / mean < threshold) {
+>             satisfied_streak++;
+>             if (satisfied_streak >= consecutive_windows) {
+>                 size_t warmup_end = i + extra_margin;
+>                 std::cout << "[Profiler] 暖身检测完成于第 " << i
+>                           << " 帧 (连续 " << consecutive_windows
+>                           << " 个窗口稳定), "
+>                           << "加上 " << extra_margin << " 帧安全边际 → 暖身结束于第 "
+>                           << warmup_end << " 帧\n";
+>                 return warmup_end;
+>             }
+>         } else {
+>             satisfied_streak = 0; // 不连续，重置
+>         }
+>     }
+>     return 0;
+> }
+>
+> // 模拟前 200 帧波动大、之后趋于稳定的数据
+> std::vector<double> GenerateWarmupData(int total_frames) {
+>     std::vector<double> data(total_frames);
+>     // 模拟 Shader 编译/资源加载: 前 200 帧逐渐稳定
+>     for (int i = 0; i < total_frames; i++) {
+>         double base = 10.0;
+>         if (i < 50)        base = 35.0 - i * 0.5;      // 从 35ms 快速下降
+>         else if (i < 120)  base = 12.0 + (rand() % 50) / 10.0; // 波动
+>         else if (i < 200)  base = 10.0 + (rand() % 20) / 20.0; // 趋稳
+>         else               base = 10.0 + (rand() % 5) / 50.0;  // 稳定
+>         data[i] = base;
+>     }
+>     return data;
+> }
+>
+> int main() {
+>     srand(42);
+>     auto data = GenerateWarmupData(600);
+>     size_t warmup_end = DetectWarmupEndImproved(data, 0.15, 5, 10);
+>     if (warmup_end > 0) {
+>         std::cout << "测量阶段从第 " << warmup_end << " 帧开始\n";
+>     } else {
+>         std::cout << "暖身未完成 (数据始终不稳定)\n";
+>     }
+>     return 0;
+> }
+> ```
+>
+> **设计要点：**
+> - **连续 N 个窗口**（N=5）确保不是偶发稳定 → 避免"第一个安静窗口就错误触发"
+> - **滑动步长**：每 5 帧检查一次，而非每帧，减少计算量
+> - **satisfied_streak**：每当窗口不满足条件时重置为 0，保证连续性
+> - **额外 M 帧安全边际**：暖身完成后再加 10 帧，确保完全进入稳态
+> - **日志输出**：明确告知暖身检测完成于哪一帧
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // profile_comparator.cpp — 百分位比较工具
+> // 编译: g++ -std=c++17 profile_comparator.cpp -o profile_comp && ./profile_comp
+> #include <iostream>
+> #include <iomanip>
+> #include <vector>
+> #include <string>
+> #include <cmath>
+>
+> struct ProfileResult {
+>     double p50, p75, p90, p95, p99, p999;
+> };
+>
+> // 从排序数组提取百分位
+> double Percentile(const std::vector<double>& sorted, double p) {
+>     if (sorted.empty()) return 0;
+>     double idx = p * (sorted.size() - 1);
+>     size_t lo = (size_t)std::floor(idx);
+>     size_t hi = (size_t)std::ceil(idx);
+>     if (lo == hi) return sorted[lo];
+>     return sorted[lo] * (1.0 - (idx - lo)) + sorted[hi] * (idx - lo);
+> }
+>
+> void CompareProfiles(
+>     const std::vector<double>& before_sorted,
+>     const std::vector<double>& after_sorted)
+> {
+>     ProfileResult before = {
+>         Percentile(before_sorted, 0.50), Percentile(before_sorted, 0.75),
+>         Percentile(before_sorted, 0.90), Percentile(before_sorted, 0.95),
+>         Percentile(before_sorted, 0.99), Percentile(before_sorted, 0.999)
+>     };
+>     ProfileResult after = {
+>         Percentile(after_sorted, 0.50), Percentile(after_sorted, 0.75),
+>         Percentile(after_sorted, 0.90), Percentile(after_sorted, 0.95),
+>         Percentile(after_sorted, 0.99), Percentile(after_sorted, 0.999)
+>     };
+>
+>     std::cout << "\n╔══════════════════════════════════════════════════╗\n"
+>               << "║         性能对比: Before → After                ║\n"
+>               << "╠════════╤══════════╤══════════╤══════════╤════════╣\n"
+>               << "║ 百分位 │ Before   │ After    │ 变化     │ 判定   ║\n"
+>               << "╟────────┼──────────┼──────────┼──────────┼────────╢\n";
+>
+>     // 用结构体数组驱动表格
+>     struct Row {
+>         const char* label;
+>         double b, a;
+>     } rows[] = {
+>         {"P50", before.p50, after.p50},
+>         {"P75", before.p75, after.p75},
+>         {"P90", before.p90, after.p90},
+>         {"P95", before.p95, after.p95},
+>         {"P99", before.p99, after.p99},
+>         {"P99.9", before.p999, after.p999},
+>     };
+>
+>     for (auto& row : rows) {
+>         double change = (row.a - row.b) / row.b * 100.0;
+>         const char* flag = "";
+>         if (change > 5.0) flag = "⚠️ 回归";  // 变差 > 5%
+>         else if (change < -5.0) flag = "✅ 改善";
+>         else flag = "— 持平";
+>
+>         std::cout << "║ " << std::setw(6) << row.label
+>                   << " │ " << std::fixed << std::setprecision(2) << std::setw(8) << row.b << "ms"
+>                   << " │ " << std::setw(8) << row.a << "ms"
+>                   << " │ " << std::setw(7) << std::setprecision(1) << std::showpos << change << "%"
+>                   << " │ " << std::setw(6) << flag << " ║\n";
+>     }
+>     std::cout << "╚════════╧══════════╧══════════╧══════════╧════════╝\n";
+> }
+>
+> int main() {
+>     // 模拟数据: Before — 有峰值 (每 30 帧 35ms)
+>     std::vector<double> before_data;
+>     for (int i = 0; i < 600; i++)
+>         before_data.push_back((i % 30 == 0) ? 35.0 : 10.0);
+>     std::sort(before_data.begin(), before_data.end());
+>
+>     // After — 优化后峰值降低到 20ms
+>     std::vector<double> after_data;
+>     for (int i = 0; i < 600; i++)
+>         after_data.push_back((i % 30 == 0) ? 20.0 : 10.0);
+>     std::sort(after_data.begin(), after_data.end());
+>
+>     CompareProfiles(before_data, after_data);
+>
+>     // 也展示回归场景
+>     std::cout << "\n=== 回归示例 (P99 变差) ===\n";
+>     std::vector<double> regression;
+>     for (int i = 0; i < 600; i++)
+>         regression.push_back((i % 30 == 0) ? 45.0 : 10.0);
+>     std::sort(regression.begin(), regression.end());
+>     CompareProfiles(before_data, regression);
+>
+>     return 0;
+> }
+> ```
+>
+> **设计要点：**
+> - 逐百分位比较 P50/P75/P90/P95/P99/P99.9
+> - 变化 > 5% 标记为"回归"⚠️，< -5% 标记为"改善"✅
+> - 表格化输出，直观展示每个百分位的变化
+> - 注意：低百分位（P50）稳定不意味着高百分位（P99）也稳定——这是核心洞察
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // true_vs_false_bottleneck.cpp — 真瓶颈 vs 假瓶颈
+> // 编译: g++ -std=c++17 true_vs_false_bottleneck.cpp -o bottleneck_test && ./bottleneck_test
+> #include <chrono>
+> #include <iostream>
+> #include <cmath>
+> #include <iomanip>
+>
+> // 假瓶颈 A: 占帧时间 ~2%
+> double FakeBottleneck() {
+>     volatile double sum = 0.0;
+>     for (int i = 0; i < 100000; i++) {  // 注意: 只有 10 万次
+>         sum += std::sin(static_cast<double>(i));
+>     }
+>     return sum;
+> }
+>
+> // 真瓶颈 B: 占帧时间 ~65%
+> double TrueBottleneck() {
+>     volatile double sum = 0.0;
+>     for (int i = 0; i < 3200000; i++) { // 32 倍于 A
+>         sum += std::sin(static_cast<double>(i));
+>     }
+>     return sum;
+> }
+>
+> double TimeWork(void (*work)()) {
+>     auto start = std::chrono::high_resolution_clock::now();
+>     work();
+>     auto end = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration<double, std::milli>(end - start).count();
+> }
+>
+> int main() {
+>     // 测量各组件单独耗时
+>     std::cout << "========== 组件单独测量 ==========\n";
+>
+>     double fake_ms = 0, true_ms = 0, base_ms = 0;
+>     const int WARMUP = 3, RUNS = 10;
+>
+>     // 暖身
+>     for (int i = 0; i < WARMUP; i++) { FakeBottleneck(); TrueBottleneck(); }
+>
+>     for (int i = 0; i < RUNS; i++) fake_ms += TimeWork(FakeBottleneck);
+>     fake_ms /= RUNS;
+>     for (int i = 0; i < RUNS; i++) true_ms += TimeWork(TrueBottleneck);
+>     true_ms /= RUNS;
+>
+>     // 空帧基准
+>     auto empty_work = []{ volatile int x = 0; x++; };
+>     for (int i = 0; i < RUNS; i++) base_ms += TimeWork([]{
+>         volatile int x = 0; x++;
+>     });
+>     base_ms /= RUNS;
+>
+>     double total_no_opt = fake_ms + true_ms;
+>     std::cout << std::fixed << std::setprecision(3)
+>               << "假瓶颈 A (2% 占比):    " << fake_ms << " ms\n"
+>               << "真瓶颈 B (65% 占比):    " << true_ms << " ms\n"
+>               << "总帧时间 (无优化):     " << total_no_opt << " ms\n"
+>               << "A 占比: " << std::setprecision(1) << (fake_ms / total_no_opt * 100) << "%\n"
+>               << "B 占比: " << (true_ms / total_no_opt * 100) << "%\n\n";
+>
+>     // 模拟"优化" A (将 A 的迭代次数减半)
+>     std::cout << "========== 模拟优化 ==========\n";
+>     auto FakeBottleneckOptimized = []() {
+>         volatile double sum = 0.0;
+>         for (int i = 0; i < 50000; i++) sum += std::sin(static_cast<double>(i));
+>     };
+>     auto TrueBottleneckOptimized = []() {
+>         volatile double sum = 0.0;
+>         for (int i = 0; i < 1600000; i++) sum += std::sin(static_cast<double>(i));
+>     };
+>
+>     double fake_opt_ms = 0, true_opt_ms = 0;
+>     for (int i = 0; i < RUNS; i++) fake_opt_ms += TimeWork(FakeBottleneckOptimized);
+>     fake_opt_ms /= RUNS;
+>     for (int i = 0; i < RUNS; i++) true_opt_ms += TimeWork(TrueBottleneckOptimized);
+>     true_opt_ms /= RUNS;
+>
+>     double opt_a_total = fake_opt_ms + true_ms;
+>     double opt_b_total = fake_ms + true_opt_ms;
+>
+>     std::cout << "优化 A 后总帧时间: " << opt_a_total << " ms"
+>               << " (改善 " << ((total_no_opt - opt_a_total) / total_no_opt * 100) << "%)\n"
+>               << "优化 B 后总帧时间: " << opt_b_total << " ms"
+>               << " (改善 " << ((total_no_opt - opt_b_total) / total_no_opt * 100) << "%)\n\n";
+>
+>     std::cout << "========== 结论 ==========\n"
+>               << "优化假瓶颈 A → 几乎无感知改进 (最大理论收益 ~2%)\n"
+>               << "优化真瓶颈 B → 显著改进 (理论收益 ~65%)\n"
+>               << "这就是 Amdahl 定律在实际中的体现。\n";
+>     return 0;
+> }
+> ```
+>
+> **关键发现：**
+> - 假瓶颈 A 占帧时间 ~2%（100,000 次 sin），真瓶颈 B 占 ~65%（3,200,000 次 sin）
+> - 优化 A 对整体帧时间几乎无影响；优化 B 大幅改善
+> - 在没有 Profiler 的情况下，直觉常把代码量多但执行少的路径误判为瓶颈
+> - **核心教训**：永远先测量，后用 Amdahl 定律评估优化潜力
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - [How NOT to Measure Latency — Gil Tene (Strangeloop)](https://www.youtube.com/watch?v=lJ8ydIuPFeU) — 测量延迟的经典演讲，包含 Coordinated Omission 问题

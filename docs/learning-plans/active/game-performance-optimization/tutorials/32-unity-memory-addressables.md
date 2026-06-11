@@ -744,6 +744,270 @@ public class ResourcesVsAddressablesTest : MonoBehaviour
 - 引用者追踪可以通过 `System.Diagnostics.StackTrace` 捕获（仅在 Editor 下有效）
 - Release Build 中可以通过手动埋点追踪
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **Memory Profiler 快照对比 — 诊断方法与典型结论**
+> 
+> **操作步骤回顾**：
+> 1. Window → Analysis → Memory Profiler → 点击 Capture（快照 #1：基础场景）
+> 2. 通过 `Addressables.LoadSceneAsync` 加载新场景
+> 3. 等待加载完成 → 再点 Capture（快照 #2：加载后）
+> 4. 切换到 Diff 模式（选择 Snapshot #1 vs #2）
+> 
+> **Top 10 内存增量分析（典型结果）**：
+> 
+> | 排名 | 类型 | 托管堆增量 | GPU 增量 | 判断 |
+> |------|------|-----------|---------|------|
+> | 1 | Texture2D | +0.1 MB | +85 MB | 预期：场景纹理 |
+> | 2 | Mesh | +0.05 MB | +42 MB | 预期：场景网格 |
+> | 3 | Material | +0.3 MB | — | 预期：场景中 ~50 个材质 |
+> | 4 | AnimationClip | +0.02 MB | — | 预期：动画数据 |
+> | 5 | Shader | +0.01 MB | — | 预期：场景 Shader 变体 |
+> | 6 | MonoBehaviour | +2 MB | — | 检查：是否多实例化了场景管理器 |
+> | 7 | string | +0.8 MB | — | ⚠️ 异常：可能有日志/JSON 解析未释放 |
+> | 8 | GameObject | +1.5 MB | — | 预期：新场景中的所有 GameObject |
+> | 9 | AssetBundle | +0.1 MB | — | 预期：Addressables 加载的 Bundle 元数据 |
+> | 10 | RenderTexture | +0.01 MB | +16 MB | 检查：URP 的中间 RT（可优化） |
+> 
+> **分析结论模板**：
+> - **预期的**：Texture2D / Mesh / Material 的 GPU 内存增量属于正常场景加载，总 VRAM 增量 < 200MB，在预算内
+> - **需关注的**：`string` 分配 0.8MB 可能来自场景加载日志或 JSON 配置解析——考虑减少不必要的 Debug.Log 或使用 StringBuilder
+> - **可优化的**：RenderTexture 16MB 来自 URP 中间 RT，如果用了 Opaque Texture，建议关掉（移动端可省 10-20MB）
+> 
+> **典型异常模式**：
+> - 同一个 Prefab 的 Mesh 出现多次 → 未使用 GPU Instancing 或静态批处理
+> - Material 数量远超预期 → `renderer.material`（创建副本）而非 `sharedMaterial`
+> - 托管堆增长远大于预期 → foreach 分配 / LINQ / 字符串拼接
+
+> [!tip]- 练习 2 参考答案
+> **Addressables Group 策略设计 — 开放世界手游**
+> 
+> **一、Remote vs Local 划分**：
+> 
+> | 类别 | 本地（安装包） | 远程（CDN） | 原因 |
+> |------|---------------|------------|------|
+> | 核心 UI | ✓ | — | 游戏必须立即可用 |
+> | 玩家角色（基础） | ✓ | — | 初始化必须 |
+> | 新手村场景 | ✓ | — | 前 5 分钟体验不可等待 |
+> | 非主线关卡（第 3 章+） | — | ✓ | 玩家可能玩不到 |
+> | 皮肤/时装 | — | ✓ | 非必须内容，按需下载 |
+> | 语音/过场动画 | — | ✓ | 体积大（GB 级），按需流式 |
+> | 稀有怪物模型 | — | ✓ | 仅在特定区域出现 |
+> | 节日活动内容 | — | ✓ | 时效性内容，可下线 |
+> 
+> **二、Group 划分维度**：
+> 
+> ```
+> Addressables Groups:
+> ├── Core_UI          — 全局 UI 控件、字体、图集 (本地, ~20MB)
+> ├── Core_Player      — 主角模型、动画、音效 (本地, ~50MB)
+> ├── Zone_Tutorial    — 新手村所有资源 (本地, ~80MB)
+> ├── Zone_Forest_01   — 森林区域 1 (远程, ~40MB)
+> ├── Zone_Desert_01   — 沙漠区域 1 (远程, ~45MB)
+> ├── Zone_BossArena   — Boss 战区域 (远程, ~60MB)
+> ├── Shared_Props     — 跨区域共享道具 (本地, ~15MB)
+> ├── Shared_Enemies_Common — 通用怪物 (本地, ~30MB)
+> ├── Shared_Enemies_Rare   — 稀有怪物 (远程, ~25MB)
+> ├── Skins            — 皮肤系统 (远程, ~100MB)
+> ├── Audio_VoiceOver  — 语音 (远程, ~500MB)
+> └── Event_Seasonal   — 活动内容 (远程, ~80MB)
+> ```
+> 
+> **分组原则**：
+> - **按空间（场景/区域）划分**：同一区域的资源在一起，加载一个区域只需加载对应 Group
+> - **按生命周期分离**：常驻内存的（Core_UI）与临时加载的（Zone_*）分开
+> - **按依赖热度分层**：被多个区域共用的放 Shared_*，仅一个区域用的放 Zone_*
+> 
+> **三、Bundle 大小**：
+> - **理想大小：1~5MB** — 移动端单次下载 ~1s（4G 网络 5Mbps）
+> - **上限：10MB** — 超过后下载等待时间明显，影响体验
+> - **下限：0.5MB** — 过小的 Bundle 增加 HTTP 请求次数（每个请求 ~50ms RTT 开销）
+> - **为什么不是更大（如 50MB）？**：大 Bundle 意味着加载一个资源需要下载整个 Bundle，浪费带宽；且 HTTP 断点续传不如小文件可靠
+> - **为什么不是更小（如 100KB）？**：过多小文件 → HTTP 连接开销 > 下载本身，CDN 缓存碎片化
+> 
+> **四、加载时机与释放策略**：
+> 
+> ```
+> 玩家移动方向 →
+> ┌─────────┬─────────┬─────────┬─────────┐
+> │ Zone N-1│ Zone N  │ Zone N+1│ Zone N+2│
+> │ (释放中) │ (当前)  │ (预加载) │ (未加载) │
+> └─────────┴─────────┴─────────┴─────────┘
+> 
+> 策略：
+> - 玩家进入 Zone N 边界时：预加载 Zone N+1（后台异步）
+> - 玩家进入 Zone N+1 中心时：开始释放 Zone N-1
+> - 始终保留当前 Zone + 相邻 1 个 Zone 在内存中
+> ```
+> 
+> **五、快速传送的内存处理流程**：
+> 
+> ```
+> 玩家从 Zone_A 传送到 Zone_E（跳过 B, C, D）
+> 
+> Step 1: 显示 Loading 画面
+> Step 2: 取消所有正在进行中的 Zone_B/C 预加载（AsyncOperationHandle.Release + 取消 token）
+> Step 3: Addressables.Release(Zone_A_Handle) — 释放当前区域
+> Step 4: Resources.UnloadUnusedAssets()（可选，在 Loading 画面中执行）
+> Step 5: 检查 Zone_E 是否缓存 → 若否，从 CDN 下载
+> Step 6: Addressables.LoadSceneAsync(Zone_E)
+> Step 7: 加载完成 → 关闭 Loading → Zone_E 相邻区域开始预加载
+> 
+> 关键：取消当前下载 + 明确的释放顺序，避免 A 和 E 同时占用内存
+> ```
+
+> [!tip]- 练习 3 参考答案（挑战）
+> **内存泄漏检测器 — 核心实现**
+> 
+> ```csharp
+> using UnityEngine;
+> using System.Collections.Generic;
+> using System.Text;
+> 
+> public class MemoryLeakDetector : MonoBehaviour
+> {
+>     [System.Serializable]
+>     public class TrackedAsset
+>     {
+>         public Object asset;
+>         public string address;
+>         public int refCount;
+>         public float lastAccessTime;
+>         public string allocStack; // Editor only: new StackTrace()
+>     }
+> 
+>     private Dictionary<Object, TrackedAsset> trackedAssets
+>         = new Dictionary<Object, TrackedAsset>();
+>     private List<TrackedAsset> suspectedLeaks = new List<TrackedAsset>();
+> 
+>     [SerializeField] private float checkInterval = 10f;
+>     [SerializeField] private float leakThresholdSeconds = 60f;
+>     [SerializeField] private bool showLeakWarning = true;
+> 
+>     private float nextCheckTime;
+>     private GUIStyle leakStyle;
+> 
+>     // ===== 公开 API =====
+>     public void RegisterAsset(Object asset, string address)
+>     {
+>         if (trackedAssets.TryGetValue(asset, out var t))
+>         {
+>             t.refCount++;
+>             t.lastAccessTime = Time.time;
+>         }
+>         else
+>         {
+>             trackedAssets[asset] = new TrackedAsset
+>             {
+>                 asset = asset,
+>                 address = address,
+>                 refCount = 1,
+>                 lastAccessTime = Time.time,
+> #if UNITY_EDITOR
+>                 allocStack = new System.Diagnostics.StackTrace(1, true).ToString()
+> #endif
+>             };
+>         }
+>     }
+> 
+>     public void UnregisterAsset(Object asset)
+>     {
+>         if (trackedAssets.TryGetValue(asset, out var t))
+>         {
+>             t.refCount--;
+>             t.lastAccessTime = Time.time;
+>             if (t.refCount <= 0)
+>                 trackedAssets.Remove(asset);
+>         }
+>     }
+> 
+>     public void MarkAccessed(Object asset)
+>     {
+>         if (trackedAssets.TryGetValue(asset, out var t))
+>             t.lastAccessTime = Time.time;
+>     }
+> 
+>     // ===== 定期扫描 =====
+>     void Update()
+>     {
+>         if (Time.time < nextCheckTime) return;
+>         nextCheckTime = Time.time + checkInterval;
+>         ScanForLeaks();
+>     }
+> 
+>     void ScanForLeaks()
+>     {
+>         suspectedLeaks.Clear();
+>         float now = Time.time;
+> 
+>         foreach (var kv in trackedAssets)
+>         {
+>             var t = kv.Value;
+>             // 引用计数 > 0 且超过 leakThresholdSeconds 未被访问
+>             if (t.refCount > 0 && (now - t.lastAccessTime) > leakThresholdSeconds)
+>             {
+>                 // 额外检查：对象是否真的还活着
+>                 if (t.asset != null)
+>                 {
+>                     suspectedLeaks.Add(t);
+>                 }
+>                 else
+>                 {
+>                     // 对象已被 Destroy 但未 Unregister → 也是泄漏（追踪记录泄漏）
+>                     Debug.LogWarning($"[LeakDetector] Asset destroyed but not unregistered: {t.address}");
+>                 }
+>             }
+>         }
+> 
+>         if (suspectedLeaks.Count > 0)
+>         {
+>             var sb = new StringBuilder();
+>             sb.AppendLine($"=== 可疑内存泄漏报告 ({suspectedLeaks.Count} items) ===");
+>             foreach (var leak in suspectedLeaks)
+>             {
+>                 float idleSec = now - leak.lastAccessTime;
+>                 sb.AppendLine($"- 地址: {leak.address}");
+>                 sb.AppendLine($"  引用计数: {leak.refCount}, 空闲: {idleSec:F0}s");
+>                 sb.AppendLine($"  类型: {leak.asset.GetType().Name}");
+>                 if (!string.IsNullOrEmpty(leak.allocStack))
+>                     sb.AppendLine($"  分配堆栈:\n{leak.allocStack}");
+>             }
+>             Debug.LogWarning(sb.ToString());
+>         }
+>     }
+> 
+>     void OnGUI()
+>     {
+>         if (!showLeakWarning || suspectedLeaks.Count == 0) return;
+>         if (leakStyle == null)
+>         {
+>             leakStyle = new GUIStyle(GUI.skin.box);
+>             leakStyle.normal.textColor = Color.red;
+>             leakStyle.fontSize = 18;
+>         }
+>         GUI.Box(new Rect(10, 10, 250, 40),
+>             $"⚠ Memory Leak: {suspectedLeaks.Count} suspected",
+>             leakStyle);
+>     }
+> }
+> ```
+> 
+> **使用方式**：
+> 1. 在 `AssetLifecycleManager` 中集成：每次 `LoadAsset` 调用 `RegisterAsset`，每次 `Release` 调用 `UnregisterAsset`
+> 2. 每次资产被实际使用（如渲染、逻辑读取）时调用 `MarkAccessed`
+> 3. 自动每 10 秒扫描，空闲 > 60 秒的标记为可疑
+> 4. Game View 左上角显示红色告警
+> 5. Console 输出完整报告（含 Editor 中的分配堆栈）
+> 
+> **局限性**：
+> - `StackTrace` 仅 Editor 有效，Release 中需手动埋点（在加载点记录文件名和行号的字符串）
+> - 无法检测 GPU 内存泄漏（需 Memory Profiler 辅助）
+> - 引用计数的正确性依赖于每个加载/释放点都正确调用 Register/Unregister——如果忘记调用，检测器本身也是失效的
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

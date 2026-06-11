@@ -188,6 +188,7 @@ void push() {
 ```
 
 **weak vs strong**：
+
 | 特性 | compare_exchange_weak | compare_exchange_strong |
 |------|----------------------|------------------------|
 | 伪失败 | 允许 | 不允许 |
@@ -637,6 +638,364 @@ public:
 6. 提供两种实现：一种使用 `seq_cst`（易于推理），一种优化为 `acq_rel`（高性能），对比两者延迟
 
 ---
+
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> > #include <atomic>
+> > #include <vector>
+> > #include <cstddef>
+> > #include <cassert>
+> > #include <iostream>
+> > #include <thread>
+> >
+> > template<typename T, size_t Capacity>
+> > class SPSCQueue {
+> >     // 强制 Capacity 为 2 的幂 — 允许位掩码取模
+> >     static_assert((Capacity & (Capacity - 1)) == 0,
+> >                   "Capacity must be power of 2");
+> >
+> >     // head 和 tail 用 alignas(64) 分隔到不同缓存行 → 避免伪共享
+> >     // 生产者只写 head，消费者只写 tail — 各自独占缓存行
+> >     alignas(64) std::atomic<size_t> head_{0};
+> >     alignas(64) std::atomic<size_t> tail_{0};
+> >
+> >     T buffer_[Capacity];
+> >
+> > public:
+> >     // ============ 入队（仅生产者调用） ============
+> >     bool enqueue(const T& item) {
+> >         // relaxed: 生产者独享 head，无竞争 — 只需原子性，无需顺序约束
+> >         size_t head = head_.load(std::memory_order_relaxed);
+> >         // acquire: 读取 tail 必须看到消费者对 tail 的所有历史写入
+> >         //         以及这些写入之前的所有消费者操作（数据已读出）
+> >         size_t tail = tail_.load(std::memory_order_acquire);
+> >
+> >         // 队列满？（head - tail 使用无符号回绕算术）
+> >         if (head - tail >= Capacity) return false;
+> >
+> >         // 写入数据（非原子，因为 slot 独占）
+> >         buffer_[head & (Capacity - 1)] = item;
+> >
+> >         // release: 保证数据写入在 head 更新之前对所有线程可见
+> >         // 消费者的 acquire load 看到此 store 时，保证看到完整数据
+> >         head_.store(head + 1, std::memory_order_release);
+> >         return true;
+> >     }
+> >
+> >     // ============ 出队（仅消费者调用） ============
+> >     bool dequeue(T& item) {
+> >         // relaxed: 消费者独享 tail，无竞争
+> >         size_t tail = tail_.load(std::memory_order_relaxed);
+> >         // acquire: 读取 head 必须看到生产者对 head 的所有历史写入
+> >         //         以及这些写入之前的生产者操作（数据已写入完成）
+> >         size_t head = head_.load(std::memory_order_acquire);
+> >
+> >         // 队列空？
+> >         if (tail == head) return false;
+> >
+> >         // 读取数据（非原子，slot 独占）
+> >         item = buffer_[tail & (Capacity - 1)];
+> >
+> >         // release: 保证数据读取在 tail 更新之前完成
+> >         // （对消费者来说，防止编译器重排导致 tail 先更新再读数据）
+> >         tail_.store(tail + 1, std::memory_order_release);
+> >         return true;
+> >     }
+> > };
+> >
+> > // ============ 测试 ============
+> > int main() {
+> >     constexpr size_t N = 1'000'000;
+> >     SPSCQueue<int, 1024> q;  // Capacity = 1024 = 2^10
+> >
+> >     std::atomic<bool> producer_done{false};
+> >     std::atomic<int>  sum_consumed{0};
+> >     std::atomic<int>  sum_produced{0};
+> >
+> >     // 生产者线程
+> >     std::thread producer([&]() {
+> >         int total = 0;
+> >         for (int i = 0; i < (int)N; ++i) {
+> >             while (!q.enqueue(i)) {
+> >                 // 自旋等待（实际引擎用 yield）
+> >                 std::this_thread::yield();
+> >             }
+> >             total += i;
+> >         }
+> >         sum_produced.store(total, std::memory_order_relaxed);
+> >         producer_done.store(true, std::memory_order_release);
+> >     });
+> >
+> >     // 消费者线程
+> >     std::thread consumer([&]() {
+> >         int total = 0;
+> >         int item;
+> >         size_t consumed = 0;
+> >         while (consumed < N) {
+> >             if (q.dequeue(item)) {
+> >                 total += item;
+> >                 ++consumed;
+> >             } else if (producer_done.load(std::memory_order_acquire)) {
+> >                 // 生产者已完成但队列空 → 检查剩余
+> >                 continue;
+> >             }
+> >         }
+> >         sum_consumed.store(total, std::memory_order_relaxed);
+> >     });
+> >
+> >     producer.join();
+> >     consumer.join();
+> >
+> >     // 验证数据完整性
+> >     assert(sum_produced.load() == sum_consumed.load());
+> >     std::cout << "SPSC Queue test passed!\n";
+> >     std::cout << "Sum: " << sum_consumed.load() << " (expected: "
+> >               << ((N-1) * N / 2) << ")\n";
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> > #include <atomic>
+> > #include <functional>
+> > #include <iostream>
+> > #include <thread>
+> > #include <vector>
+> > #include <cassert>
+> >
+> > // ============ Job Counter ============
+> > struct JobCounter {
+> >     std::atomic<int> count{0};
+> >     std::function<void()> on_complete;
+> >     std::atomic<bool> fired{false};  // 确保回调只调用一次
+> >
+> >     // 增加依赖计数
+> >     // relaxed: 仅计数，不建立 happens-before — 在 release_dependency 中统一发布
+> >     void add_dependency() {
+> >         count.fetch_add(1, std::memory_order_relaxed);
+> >     }
+> >
+> >     // 完成一个依赖
+> >     // acq_rel: 既是 acquire（看到之前完成者的所有写入）也是 release（通知后续读取者）
+> >     // 当计数归零时，所有之前工作对 on_complete 可见
+> >     void release_dependency() {
+> >         int prev = count.fetch_sub(1, std::memory_order_acq_rel);
+> >         if (prev == 1) {  // 归零：我们是最后一个完成者
+> >             // 用 CAS 防止多次触发（理论上单次释放不会重复，但加防护）
+> >             bool expected = false;
+> >             if (fired.compare_exchange_strong(expected, true,
+> >                     std::memory_order_acq_rel, std::memory_order_relaxed)) {
+> >                 on_complete();
+> >             }
+> >         }
+> >     }
+> > };
+> >
+> > // ============ 测试 ============
+> > int main() {
+> >     constexpr int NUM_JOBS = 10;
+> >     int shared_data[NUM_JOBS] = {};  // 每个 Job 写入的数据
+> >
+> >     JobCounter counter;
+> >     counter.on_complete = [&]() {
+> >         // 验证：所有 Job 的数据都已完成写入
+> >         for (int i = 0; i < NUM_JOBS; ++i) {
+> >             assert(shared_data[i] == i + 1);
+> >         }
+> >         std::cout << "All " << NUM_JOBS << " jobs completed successfully!\n";
+> >     };
+> >
+> >     // 创建所有依赖
+> >     counter.count.store(NUM_JOBS, std::memory_order_relaxed);
+> >
+> >     // 启动 Job 线程
+> >     std::vector<std::thread> jobs;
+> >     for (int i = 0; i < NUM_JOBS; ++i) {
+> >         jobs.emplace_back([&, i]() {
+> >             // 模拟工作
+> >             shared_data[i] = i + 1;
+> >             // release_dependency 的 acq_rel 保证 shared_data 的写入
+> >             // 对 on_complete 回调可见
+> >             counter.release_dependency();
+> >         });
+> >     }
+> >
+> >     for (auto& j : jobs) j.join();
+> >
+> >     // on_complete 已被调用 → 验证通过
+> >     return 0;
+> > }
+> > ```
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> > #include <atomic>
+> > #include <vector>
+> > #include <cstddef>
+> > #include <iostream>
+> > #include <thread>
+> > #include <chrono>
+> > #include <cassert>
+> >
+> > // ============ MPSC 有界队列（seq_cst 版本 — 易于推理） ============
+> > template<typename T, size_t Capacity>
+> > class MPSCQueue_seqcst {
+> >     static_assert((Capacity & (Capacity - 1)) == 0,
+> >                   "Capacity must be power of 2");
+> >
+> >     // 伪共享防护
+> >     alignas(64) std::atomic<size_t> head_{0};  // 多生产者竞争
+> >     alignas(64) std::atomic<size_t> tail_{0};  // 单消费者独占
+> >
+> >     struct Slot {
+> >         std::atomic<bool> ready{false};  // 数据是否已写入
+> >         T data;
+> >     };
+> >     Slot buffer_[Capacity];
+> >
+> > public:
+> >     // ============ 入队（多生产者安全） ============
+> >     bool enqueue(const T& item) {
+> >         size_t head;
+> >         do {
+> >             head = head_.load(std::memory_order_seq_cst);
+> >             size_t tail = tail_.load(std::memory_order_seq_cst);
+> >             if (head - tail >= Capacity) return false;
+> >             // CAS 循环：多个生产者竞争 head
+> >         } while (!head_.compare_exchange_weak(head, head + 1,
+> >                     std::memory_order_seq_cst, std::memory_order_seq_cst));
+> >
+> >         // 获得独占 slot
+> >         size_t idx = head & (Capacity - 1);
+> >         buffer_[idx].data = item;
+> >         // ready flag: 通知消费者数据就绪
+> >         // seq_cst 保证 data 写入 happens-before ready store
+> >         buffer_[idx].ready.store(true, std::memory_order_seq_cst);
+> >         return true;
+> >     }
+> >
+> >     // ============ 出队（单消费者） ============
+> >     bool dequeue(T& item) {
+> >         size_t tail = tail_.load(std::memory_order_seq_cst);
+> >         size_t idx  = tail & (Capacity - 1);
+> >
+> >         // 等待数据就绪
+> >         if (!buffer_[idx].ready.load(std::memory_order_seq_cst))
+> >             return false;
+> >
+> >         item = buffer_[idx].data;
+> >         buffer_[idx].ready.store(false, std::memory_order_seq_cst);
+> >         tail_.store(tail + 1, std::memory_order_seq_cst);
+> >         return true;
+> >     }
+> > };
+> >
+> > // ============ MPSC 有界队列（acq_rel 优化版） ============
+> > template<typename T, size_t Capacity>
+> > class MPSCQueue_optimized {
+> >     static_assert((Capacity & (Capacity - 1)) == 0,
+> >                   "Capacity must be power of 2");
+> >
+> >     alignas(64) std::atomic<size_t> head_{0};
+> >     alignas(64) std::atomic<size_t> tail_{0};
+> >
+> >     struct Slot {
+> >         std::atomic<bool> ready{false};
+> >         T data;
+> >     };
+> >     Slot buffer_[Capacity];
+> >
+> > public:
+> >     bool enqueue(const T& item) {
+> >         size_t head;
+> >         do {
+> >             head = head_.load(std::memory_order_relaxed);
+> >             size_t tail = tail_.load(std::memory_order_acquire);
+> >             if (head - tail >= Capacity) return false;
+> >             // CAS: acq_rel — acquire 读取 tail，release 发布 head
+> >         } while (!head_.compare_exchange_weak(head, head + 1,
+> >                     std::memory_order_acq_rel, std::memory_order_relaxed));
+> >
+> >         size_t idx = head & (Capacity - 1);
+> >         buffer_[idx].data = item;
+> >         // release: 保证 data 写入 happens-before ready store
+> >         buffer_[idx].ready.store(true, std::memory_order_release);
+> >         return true;
+> >     }
+> >
+> >     bool dequeue(T& item) {
+> >         size_t tail = tail_.load(std::memory_order_relaxed);
+> >         size_t idx  = tail & (Capacity - 1);
+> >
+> >         // acquire: 看到 ready=true 则保证 data 可见
+> >         if (!buffer_[idx].ready.load(std::memory_order_acquire))
+> >             return false;
+> >
+> >         item = buffer_[idx].data;
+> >         buffer_[idx].ready.store(false, std::memory_order_release);
+> >         // release: 通知生产者 slot 已释放
+> >         tail_.store(tail + 1, std::memory_order_release);
+> >         return true;
+> >     }
+> > };
+> >
+> > // ============ 微基准 ============
+> > template<typename Q>
+> > void benchmark(const char* label, int num_producers, int items_per_producer) {
+> >     Q q;
+> >     std::atomic<int> items_consumed{0};
+> >     std::atomic<bool> stop{false};
+> >
+> >     // 消费者
+> >     std::thread consumer([&]() {
+> >         int item;
+> >         int count = 0;
+> >         while (count < num_producers * items_per_producer) {
+> >             if (q.dequeue(item)) ++count;
+> >         }
+> >         items_consumed.store(count, std::memory_order_relaxed);
+> >     });
+> >
+> >     auto start = std::chrono::high_resolution_clock::now();
+> >
+> >     // 多生产者
+> >     std::vector<std::thread> producers;
+> >     for (int p = 0; p < num_producers; ++p) {
+> >         producers.emplace_back([&, p]() {
+> >             for (int i = 0; i < items_per_producer; ++i) {
+> >                 while (!q.enqueue(p * items_per_producer + i))
+> >                     std::this_thread::yield();
+> >             }
+> >         });
+> >     }
+> >
+> >     for (auto& t : producers) t.join();
+> >     consumer.join();
+> >
+> >     auto end = std::chrono::high_resolution_clock::now();
+> >     double ms = std::chrono::duration<double, std::milli>(end - start).count();
+> >     std::cout << label << ": " << ms << " ms ("
+> >               << (num_producers * items_per_producer / ms / 1000.0)
+> >               << " M items/s)\n";
+> > }
+> >
+> > int main() {
+> >     constexpr int PRODUCERS = 4;
+> >     constexpr int ITEMS     = 250'000;
+> >
+> >     benchmark<MPSCQueue_seqcst<int, 1024>>("seq_cst", PRODUCERS, ITEMS);
+> >     benchmark<MPSCQueue_optimized<int, 1024>>("acq_rel", PRODUCERS, ITEMS);
+> >     // 预期：acq_rel 版本延迟更低（x86 上差异不大，ARM 上显著）
+> >     return 0;
+> > }
+> > ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

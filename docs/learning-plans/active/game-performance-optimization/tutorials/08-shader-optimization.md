@@ -415,6 +415,137 @@ int main() {
 
 ---
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **计算过程：**
+>
+> 每个 `#pragma multi_compile` 的选项数相乘：
+>
+> | 宏定义 | 选项数 | 说明 |
+> |--------|--------|------|
+> | `_MAIN_LIGHT_SHADOWS` 系列 | 4 | `_`, `_MAIN_LIGHT_SHADOWS`, `_MAIN_LIGHT_SHADOWS_CASCADE`, `_MAIN_LIGHT_SHADOWS_SCREEN` |
+> | `_ADDITIONAL_LIGHTS` 系列 | 3 | `_`, `_ADDITIONAL_LIGHTS_VERTEX`, `_ADDITIONAL_LIGHTS` |
+> | `_SHADOWS_SOFT` | 2 | `_`, `_SHADOWS_SOFT` |
+> | `LIGHTMAP_ON` | 2 | 未定义, `LIGHTMAP_ON` |
+> | `FOG` 系列 | 4 | `_`, `FOG_LINEAR`, `FOG_EXP`, `FOG_EXP2` |
+>
+> **原始总变体数：** 4 × 3 × 2 × 2 × 4 = **192 个变体**
+>
+> **合并后**（`_MAIN_LIGHT_SHADOWS*` 合并为一个 4 选项枚举，不改变变体数因为本来就是 4 选 1 的多 compile）：
+>
+> 注意：`multi_compile` 的 `_` 是默认选项，所以原来的 `_MAIN_LIGHT_SHADOWS*` 系列已经是 4 个互斥选项。
+> **合并为枚举并不能减少变体数** — 因为 `multi_compile` 本来就是 4 选 1。
+>
+> **但是**，如果将 `_SHADOWS_SOFT` 从 `multi_compile_fragment` 改为与阴影主宏统一处理：
+> - 如果把 `_SHADOWS_SOFT` 合并到 `_MAIN_LIGHT_SHADOWS` 枚举中：选项变为 (无阴影, 硬阴影, 级联阴影, 屏幕空间阴影) × (软阴影: 有/无)
+> - 如果阴影类型 + 软阴影作为一个枚举的 6 个选项：总变体 = 6 × 3 × 2 × 4 = **144 个变体**（减少 25%）
+>
+> **另一优化**：将 `LIGHTMAP_ON` 和 `FOG` 中不常用的组合用 `shader_feature` 替代（只编译实际使用的变体）：
+> - 移除 `LIGHTMAP_ON`（如果项目不用 Lightmap）：**96 个变体**（减少 50%）
+> - 移除 `FOG_EXP2`（如果不用）：**144 个变体**（减少 25%）
+>
+> **结论**：最有效的优化是**移除不用的宏选项**，而非单纯合并。
+
+> [!tip]- 练习 2 参考答案
+> **分析步骤模板：**
+>
+> 1. **统计宏定义**：在 `.shader` 文件中搜索以下模式
+>    ```
+>    #pragma multi_compile _ XXX YYY
+>    #pragma shader_feature _ AAA BBB
+>    #pragma multi_compile_local _ CCC DDD
+>    ```
+>
+> 2. **计算表格**（示例）：
+>    ```
+>    宏定义                             类型           选项数  是否必需
+>    ─────────────────────────────────────────────────────────────────
+>    _NORMALMAP                         multi_compile    2       是
+>    _METALLICSPECGLOSSMAP              multi_compile    2       是
+>    _PARALLAXMAP                       multi_compile    2       否 (很少用)
+>    _DETAIL_MULX2                      multi_compile    2       否
+>    _EMISSION                          multi_compile    2       是
+>    _SPECULARHIGHLIGHTS_OFF            multi_compile    2       否
+>    DIRECTIONAL/POINT/SPOT              multi_compile    4       是
+>    SHADOWS_SHADOWMASK                 multi_compile    2       否
+>    FOG_LINEAR/FOG_EXP/FOG_EXP2        multi_compile    4       是
+>    INSTANCING_ON                      multi_compile    2       是
+>    ─────────────────────────────────────────────────────────────────
+>    理论最大变体数: 2×2×2×2×2×2×4×2×4×2 = 4096
+>    ```
+>
+> 3. **找出 3 个可优化项**：
+>    - `_PARALLAXMAP` 和 `_DETAIL_MULX2`：项目只用这两种之一（视差贴图总伴随细节贴图）→ 合并为一个 `DETAIL_LEVEL` 枚举（3 选项：无/细节/视差）
+>    - `_SPECULARHIGHLIGHTS_OFF`：低画质档位才需要 → 改为 `shader_feature`（不预编译）
+>    - `SHADOWS_SHADOWMASK`：只在特定平台需要 → 拆分为独立 Shader
+>
+> 4. **优化后估算**：
+>    ```
+>    2×2×(合并为3选项)×2×(改为shader_feature 不预编译)×4×(独立shader 移除)×4×2
+>    = 2×2×3×2×1×4×1×4×2 = 768
+>    减少: (4096-768)/4096 = 81%
+>    ```
+
+> [!tip]- 练习 3 参考答案（可选）
+> **精度对比测试 Compute Shader：**
+>
+> ```hlsl
+> // precision_benchmark.compute — fp32 vs fp16 normalize 性能对比
+> // 运行在支持 fp16 的设备上 (Vulkan/DX12 + Shader Model 6.2+)
+>
+> #define ITERATIONS 1000000
+>
+> RWStructuredBuffer<float> g_ResultsFP32;
+> RWStructuredBuffer<float> g_ResultsFP16;
+>
+> // 辅助：随机方向生成
+> float3 RandomDirection(uint seed) {
+>     // Wang hash 生成伪随机
+>     seed = (seed ^ 61) ^ (seed >> 16);
+>     seed *= 9;
+>     seed = seed ^ (seed >> 4);
+>     seed *= 0x27d4eb2d;
+>     seed = seed ^ (seed >> 15);
+>     float r1 = float(seed & 0xFFFF) / 65535.0;
+>     float r2 = float((seed >> 16) & 0xFFFF) / 65535.0;
+>     float theta = r1 * 6.2831853;
+>     float phi = acos(2.0 * r2 - 1.0);
+>     return float3(sin(phi)*cos(theta), sin(phi)*sin(theta), cos(phi));
+> }
+>
+> [numthreads(64, 1, 1)]
+> void CSMain(uint3 dtid : SV_DispatchThreadID) {
+>     uint idx = dtid.x;
+>     float3 dir = RandomDirection(idx);
+>
+>     // === fp32 normalize ===
+>     float3 v32 = dir;
+>     for (int i = 0; i < ITERATIONS; i++) {
+>         v32 = normalize(v32 + RandomDirection(i * 31 + idx));
+>     }
+>     g_ResultsFP32[idx] = dot(v32, float3(1,1,1)); // 防止被优化掉
+>
+>     // === fp16 normalize (min16float) ===
+>     min16float3 v16 = min16float3(dir);
+>     for (int i = 0; i < ITERATIONS; i++) {
+>         v16 = normalize(v16 + min16float3(RandomDirection(i * 37 + idx)));
+>     }
+>     g_ResultsFP16[idx] = (float)dot((float3)v16, float3(1,1,1));
+> }
+> ```
+>
+> **预期结果**（基于 Mali G78 / Adreno 660 / Apple A15）：
+> - fp32 normalize: 约 4-6 周期/次（rsqrt + 乘法）
+> - fp16 normalize: 约 2-3 周期/次（fp16 rsqrt 快 2×）
+> - 总时间：fp16 比 fp32 快约 **1.7-2.0×**
+> - 精度损失：归一化后的方向偏差 < 0.001（对颜色/法线几乎不可见）
+>
+> **桌面端（NVIDIA/AMD）**：fp16 吞吐量与 fp32 相同，主要收益是减少寄存器压力。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ## 4. 扩展阅读
 
 - **NVIDIA GPU 架构白皮书** — https://developer.nvidia.com/gpu-architecture：各代架构的指令吞吐量表

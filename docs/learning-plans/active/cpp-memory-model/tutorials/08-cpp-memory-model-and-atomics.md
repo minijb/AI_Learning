@@ -257,6 +257,226 @@ struct alignas(64) PaddedCounter {
 创建两个线程，一个只写 `counter[0]`，另一个只写 `counter[1]`。分别测试 `counter` 有 padding 和没有 padding 时的性能差异。解释为什么无 padding 时变慢（缓存行竞争）。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **问题根源：** `instance_ = new Singleton()` 包含三步：(1) 分配内存，(2) 调用构造函数，(3) 把指针赋值给 `instance_`。编译器和 CPU 可以重排 (2) 和 (3)，导致 `#1` 处看到非空指针但对象尚未构造完成。
+>
+> **方案 A：用 `std::atomic` + release/acquire 修复 DCLP（C++11 起正确）：**
+> ```cpp
+> #include <atomic>
+> #include <mutex>
+>
+> class Singleton {
+> public:
+>     static Singleton* getInstance() {
+>         // acquire：确保读到 instance 非空时，构造函数的效果也可见
+>         Singleton* tmp = instance_.load(std::memory_order_acquire);
+>         if (tmp == nullptr) {
+>             std::lock_guard<std::mutex> lock(mutex_);
+>             tmp = instance_.load(std::memory_order_relaxed);
+>             if (tmp == nullptr) {
+>                 tmp = new Singleton();
+>                 // release：确保构造完成后再写入 instance_
+>                 instance_.store(tmp, std::memory_order_release);
+>             }
+>         }
+>         return tmp;
+>     }
+>
+> private:
+>     Singleton() = default;
+>     static std::atomic<Singleton*> instance_;
+>     static std::mutex mutex_;
+> };
+>
+> std::atomic<Singleton*> Singleton::instance_{nullptr};
+> std::mutex Singleton::mutex_;
+> ```
+>
+> **方案 B（推荐）：用 C++11 magic static（最简最安全）：**
+> ```cpp
+> class Singleton {
+> public:
+>     static Singleton& getInstance() {
+>         // C++11 起：局部静态变量的初始化是线程安全的
+>         // 编译器自动插入了 DCLP 所需的 acquire/release 屏障
+>         static Singleton instance;
+>         return instance;
+>     }
+> private:
+>     Singleton() = default;
+> };
+> ```
+>
+> **方案 C（标准库方案）：`std::call_once` + `std::once_flag`：**
+> ```cpp
+> #include <mutex>
+> class Singleton {
+> public:
+>     static Singleton& getInstance() {
+>         std::call_once(flag_, [] { instance_.reset(new Singleton); });
+>         return *instance_;
+>     }
+> private:
+>     Singleton() = default;
+>     static std::once_flag flag_;
+>     static std::unique_ptr<Singleton> instance_;
+> };
+> ```
+>
+> **为什么方案 B 最优：** `static` 局部变量自 C++11 起由编译器保证线程安全初始化——它内部使用与 DCLP 相同的 acquire/release 语义，但**(1)** 零出错可能（编译器替你写了正确的内存序），**(2)** 无显式锁/原子操作维护负担，**(3)** 析构顺序由标准定义（与构造逆序）。游戏引擎中如非有特殊理由（如需要提前释放、跨 DLL 边界），一律用 magic static。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <atomic>
+> #include <iostream>
+> #include <thread>
+> #include <vector>
+>
+> class LockFreeStack {
+>     struct Node {
+>         int  data;
+>         Node* next;
+>         Node(int d, Node* n = nullptr) : data(d), next(n) {}
+>     };
+>
+>     std::atomic<Node*> head_{nullptr};
+>
+> public:
+>     ~LockFreeStack() {
+>         // 简单清理（单线程下安全；多线程下需更复杂的退休机制）
+>         Node* n = head_.load(std::memory_order_relaxed);
+>         while (n) {
+>             Node* next = n->next;
+>             delete n;
+>             n = next;
+>         }
+>     }
+>
+>     void push(int value) {
+>         Node* new_node = new Node(value);
+>         // 将 new_node 的 next 设为当前 head
+>         new_node->next = head_.load(std::memory_order_relaxed);
+>
+>         // CAS 循环：尝试把 head 从 old_head 改为 new_node
+>         // compare_exchange_weak 可能伪失败（spurious failure），需要循环
+>         while (!head_.compare_exchange_weak(
+>                     new_node->next,   // expected: 期望的 head 值
+>                     new_node,         // desired:  要写入的新值
+>                     std::memory_order_release,
+>                     std::memory_order_relaxed)) {
+>             // CAS 失败时，new_node->next 被更新为当前 head
+>             // 循环继续尝试
+>         }
+>     }
+>
+>     bool pop(int& value) {
+>         Node* old_head = head_.load(std::memory_order_acquire);
+>
+>         while (old_head != nullptr) {
+>             // 尝试 CAS：把 head 从 old_head 改为 old_head->next
+>             if (head_.compare_exchange_weak(
+>                         old_head,          // expected
+>                         old_head->next,    // desired
+>                         std::memory_order_acquire,
+>                         std::memory_order_relaxed)) {
+>                 value = old_head->data;
+>                 // ⚠️ ABA 问题窗口：这里 delete old_head 不安全
+>                 // （另一线程可能在 old_head 被删除后重新分配了相同地址的节点）
+>                 // delete old_head;  // 取消注释会暴露 ABA 问题
+>                 return true;
+>             }
+>             // CAS 失败 → old_head 被更新为当前 head，继续循环
+>         }
+>         return false;  // 栈空
+>     }
+> };
+> ```
+>
+> **ABA 问题详解：**
+>
+> 时间线：线程 A 读 `head = X`，线程 B 弹出 X 并 delete X，线程 B 又 push 新节点恰好分配到 X 的地址，线程 A 的 CAS 成功——但它比较的是地址值，不知道 X 已经被删除+重用过。结果：线程 A 的 `old_head->next` 指向一个已释放或已被重用的节点。
+>
+> **为什么 `std::atomic::compare_exchange` 不解决 ABA：** CAS 只比较**值**（地址）——它不知道指针指向的对象的生命周期。在 C++ 的无 GC 环境中，地址可以被 `delete` + `new` 重用，使得 CAS 看到"相同"的地址但对象已经不同。
+>
+> **解决方案（超出本练习范围但标注方向）：**
+> 1. **Tagged pointer（标记指针）：** 在指针高位存储一个版本号，每次修改递增。CAS 同时比较地址+版本号——地址可能重用但版本号不会回退（x86-64 上可用 48 位地址 + 16 位计数器）
+> 2. **Hazard pointer：** 读取线程在解引用前"发布"它正在使用的指针，删除线程检查是否有线程持有该指针后再真正释放
+> 3. **Epoch-based reclamation (RCU)：** 延迟删除——确认没有线程还在临界区后批量回收
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> #include <atomic>
+> #include <chrono>
+> #include <iostream>
+> #include <thread>
+>
+> // 无 padding：两个 counter 在同一缓存行（64 字节）
+> struct NoPadding {
+>     std::atomic<int> a{0};
+>     std::atomic<int> b{0};
+> };
+>
+> // 有 padding：每个 counter 独占一个缓存行
+> struct alignas(64) PaddedCounter {
+>     alignas(64) std::atomic<int> a{0};
+>     alignas(64) std::atomic<int> b{0};
+> };
+>
+> template<typename Counters>
+> void run_benchmark(const char* label) {
+>     Counters c;
+>     const int ITERS = 10'000'000;
+>
+>     auto start = std::chrono::high_resolution_clock::now();
+>
+>     std::thread t1([&] {
+>         for (int i = 0; i < ITERS; ++i) {
+>             c.a.store(i, std::memory_order_relaxed);
+>         }
+>     });
+>     std::thread t2([&] {
+>         for (int i = 0; i < ITERS; ++i) {
+>             c.b.store(i, std::memory_order_relaxed);
+>         }
+>     });
+>     t1.join(); t2.join();
+>
+>     auto end = std::chrono::high_resolution_clock::now();
+>     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+>     std::cout << label << ": " << ms << " ms\n";
+> }
+>
+> int main() {
+>     std::cout << "sizeof(NoPadding)     = " << sizeof(NoPadding) << "\n";
+>     std::cout << "sizeof(PaddedCounter) = " << sizeof(PaddedCounter) << "\n";
+>     std::cout << "L1 cache line        = 64 bytes (typical)\n\n";
+>
+>     run_benchmark<NoPadding>("NoPadding    ");
+>     run_benchmark<PaddedCounter>("PaddedCounter");
+>     return 0;
+> }
+> ```
+>
+> **编译运行：**
+> ```bash
+> g++ -std=c++17 -O2 -pthread -o false_sharing false_sharing.cpp && ./false_sharing
+> ```
+>
+> **预期结果：** `PaddedCounter` 版本显著快于 `NoPadding`（通常 2-5x）。
+>
+> **原理解释：**
+> - 现代 CPU 的缓存一致性协议（如 MESI）以**缓存行**（通常 64 字节）为单位管理缓存一致性
+> - `NoPadding` 中 `a` 和 `b` 在同一缓存行内。线程 1 写 `a` 时，该缓存行在核心 1 的 L1 中变为 Modified；线程 2 写 `b` 时，缓存行必须先失效、从核心 1 传输到核心 2 → 每次写触发缓存行在核心间 ping-pong
+> - 即使两个线程操作的是**不同的变量**，因为它们共享缓存行，硬件也当成"同一块数据在竞争" → 称为**伪共享（False Sharing）**
+> - `PaddedCounter` 通过 `alignas(64)` 将 `a` 和 `b` 分隔到不同缓存行，两个线程各自持有各自行的 Exclusive/Modified 状态，无需传输缓存行 → 性能显著提升
+>
+> **工程实践：** 游戏引擎中的多线程 ECS、任务调度器、无锁队列的生产-消费索引频繁遇到伪共享。防御手段：`alignas(64)` 或 `alignas(std::hardware_destructive_interference_size)` (C++17) 进行缓存行隔离。但不要盲目 padding 所有原子变量——只在性能分析确认伪共享是瓶颈时才用。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 
 ## 4. 扩展阅读
 

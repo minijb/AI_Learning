@@ -648,6 +648,415 @@ struct ClearCmd : IRenderCommand { float color[4]; void execute() override { /* 
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <variant>
+> #include <vector>
+> #include <iostream>
+> #include <chrono>
+> #include <memory>
+>
+> // 命令类型定义
+> struct DrawCmd     { unsigned mesh; unsigned material; };
+> struct ClearCmd    { float color[4]; };
+> struct DispatchCmd { unsigned x, y, z; };
+>
+> using RenderCmd = std::variant<DrawCmd, ClearCmd, DispatchCmd>;
+>
+> // ===== variant 版本的命令队列 =====
+> class VariantCommandQueue {
+>     std::vector<RenderCmd> commands_;
+> public:
+>     void push(RenderCmd cmd) {
+>         commands_.push_back(std::move(cmd));
+>     }
+>
+>     void execute_all() {
+>         for (const auto& cmd : commands_) {
+>             std::visit([](const auto& c) {
+>                 using T = std::decay_t<decltype(c)>;
+>                 if constexpr (std::is_same_v<T, DrawCmd>) {
+>                     // 实际项目：glDrawElements / vkCmdDrawIndexed
+>                     volatile auto m = c.mesh;       // 防优化消除
+>                     volatile auto mat = c.material;
+>                     (void)m; (void)mat;
+>                 } else if constexpr (std::is_same_v<T, ClearCmd>) {
+>                     volatile float r = c.color[0];  // 防优化消除
+>                     (void)r;
+>                 } else if constexpr (std::is_same_v<T, DispatchCmd>) {
+>                     volatile auto dx = c.x;
+>                     (void)dx;
+>                 }
+>             }, cmd);
+>         }
+>         commands_.clear();
+>     }
+>
+>     size_t size() const { return commands_.size(); }
+> };
+>
+> // ===== 多态版本（对比基准） =====
+> struct IRenderCommand {
+>     virtual void execute() = 0;
+>     virtual ~IRenderCommand() = default;
+> };
+>
+> struct PolyDrawCmd : IRenderCommand {
+>     unsigned mesh, material;
+>     void execute() override {
+>         volatile auto m = mesh;
+>         volatile auto mat = material;
+>         (void)m; (void)mat;
+>     }
+> };
+>
+> struct PolyClearCmd : IRenderCommand {
+>     float color[4];
+>     void execute() override {
+>         volatile float r = color[0];
+>         (void)r;
+>     }
+> };
+>
+> struct PolyDispatchCmd : IRenderCommand {
+>     unsigned x, y, z;
+>     void execute() override {
+>         volatile auto dx = x;
+>         (void)dx;
+>     }
+> };
+>
+> class PolymorphicCommandQueue {
+>     std::vector<std::unique_ptr<IRenderCommand>> commands_;
+> public:
+>     void push(std::unique_ptr<IRenderCommand> cmd) {
+>         commands_.push_back(std::move(cmd));
+>     }
+>     void execute_all() {
+>         for (auto& cmd : commands_) {
+>             cmd->execute();
+>         }
+>         commands_.clear();
+>     }
+> };
+>
+> // ===== Benchmark =====
+> double bench_variant(int num_commands) {
+>     VariantCommandQueue q;
+>     // 构造
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     for (int i = 0; i < num_commands; ++i) {
+>         switch (i % 3) {
+>             case 0: q.push(DrawCmd{0u, 1u}); break;
+>             case 1: q.push(ClearCmd{{0.1f, 0.2f, 0.3f, 1.0f}}); break;
+>             case 2: q.push(DispatchCmd{16u, 16u, 1u}); break;
+>         }
+>     }
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     // 执行
+>     q.execute_all();
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration<double, std::milli>(t2 - t0).count();
+> }
+>
+> double bench_polymorphic(int num_commands) {
+>     PolymorphicCommandQueue q;
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     for (int i = 0; i < num_commands; ++i) {
+>         switch (i % 3) {
+>             case 0: q.push(std::make_unique<PolyDrawCmd>(0u, 1u)); break;
+>             case 1: q.push(std::make_unique<PolyClearCmd>()); break;
+>             case 2: q.push(std::make_unique<PolyDispatchCmd>(16u, 16u, 1u)); break;
+>         }
+>     }
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>     q.execute_all();
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     return std::chrono::duration<double, std::milli>(t2 - t0).count();
+> }
+>
+> int main() {
+>     constexpr int N = 100'000;
+>
+>     // 预热
+>     bench_variant(1000);
+>     bench_polymorphic(1000);
+>
+>     double t_var = bench_variant(N);
+>     double t_poly = bench_polymorphic(N);
+>
+>     std::cout << "=== variant vs Polymorphic (100K commands) ===\n";
+>     std::cout << "variant:      " << t_var << " ms\n";
+>     std::cout << "polymorphic:  " << t_poly << " ms\n";
+>     std::cout << "Speedup:      " << t_poly / t_var << "x\n";
+>
+>     // 内存分析
+>     std::cout << "\nMemory layout:\n";
+>     std::cout << "variant:  " << sizeof(RenderCmd) << " bytes/command"
+>               << " (contiguous)\n";
+>     std::cout << "virtual:  " << sizeof(std::unique_ptr<IRenderCommand>) + sizeof(PolyDrawCmd)
+>               << " bytes/command (fragmented heap)\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **为什么 variant 更快**：
+> - **连续内存**：`std::vector<variant>` 的所有元素在连续内存中，遍历时缓存命中率极高
+> - **无虚函数调用**：`std::visit` + `if constexpr` 编译为直接调用，无 vtable 间接跳转
+> - **无堆碎片**：多态版本 `unique_ptr` 导致每个对象分散在堆上，迭代时指针追逐（pointer chasing）引发大量 cache miss
+> - 预期：variant 版本快 2-5x（取决于命令大小和缓存层级）
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <string_view>
+> #include <string>
+> #include <optional>
+> #include <vector>
+> #include <unordered_map>
+> #include <fstream>
+> #include <sstream>
+> #include <iostream>
+> #include <chrono>
+>
+> // ===== 零拷贝配置解析器 =====
+> class ConfigParser {
+>     std::string data_;  // 持有原始文件内容
+>     // 存储键值对的 view——不拷贝字符串内容
+>     std::vector<std::pair<std::string_view, std::string_view>> entries_;
+>
+>     // 去除首尾空白
+>     static std::string_view trim(std::string_view sv) {
+>         while (!sv.empty() && (sv.front() == ' ' || sv.front() == '\t' || sv.front() == '\r'))
+>             sv.remove_prefix(1);
+>         while (!sv.empty() && (sv.back() == ' ' || sv.back() == '\t' || sv.back() == '\r'))
+>             sv.remove_suffix(1);
+>         return sv;
+>     }
+>
+> public:
+>     explicit ConfigParser(const std::string& file_content)
+>         : data_(file_content)
+>     {
+>         std::string_view remaining = data_;
+>
+>         while (!remaining.empty()) {
+>             // 找行尾
+>             auto line_end = remaining.find('\n');
+>             auto line = (line_end == std::string_view::npos)
+>                         ? remaining
+>                         : remaining.substr(0, line_end);
+>
+>             // 跳过空行和注释
+>             if (!line.empty() && line[0] != '#' && line[0] != ';') {
+>                 auto eq = line.find('=');
+>                 if (eq != std::string_view::npos) {
+>                     auto key   = trim(line.substr(0, eq));
+>                     auto value = trim(line.substr(eq + 1));
+>                     if (!key.empty()) {
+>                         entries_.emplace_back(key, value);
+>                     }
+>                 }
+>             }
+>
+>             if (line_end == std::string_view::npos) break;
+>             remaining.remove_prefix(line_end + 1);
+>         }
+>     }
+>
+>     // 查询——返回第一个匹配 key 的 value（string_view，零拷贝）
+>     std::optional<std::string_view> get(std::string_view key) const {
+>         for (const auto& [k, v] : entries_) {
+>             if (k == key) return v;
+>         }
+>         return std::nullopt;
+>     }
+>
+>     size_t entry_count() const { return entries_.size(); }
+>
+>     // 内存占用（不包括 data_ 本身——那是调用方拥有的）
+>     size_t overhead_bytes() const {
+>         return entries_.capacity() * sizeof(decltype(entries_)::value_type);
+>     }
+> };
+>
+> // ===== 对比：unordered_map<string,string> 版本 =====
+> class ConfigParserCopying {
+>     std::unordered_map<std::string, std::string> map_;
+> public:
+>     explicit ConfigParserCopying(const std::string& file_content) {
+>         std::string_view remaining = file_content;
+>         while (!remaining.empty()) {
+>             auto line_end = remaining.find('\n');
+>             auto line = (line_end == std::string_view::npos)
+>                         ? remaining
+>                         : remaining.substr(0, line_end);
+>             if (!line.empty() && line[0] != '#' && line[0] != ';') {
+>                 auto eq = line.find('=');
+>                 if (eq != std::string_view::npos) {
+>                     auto key   = ConfigParser::trim(line.substr(0, eq));
+>                     auto value = ConfigParser::trim(line.substr(eq + 1));
+>                     if (!key.empty()) {
+>                         map_.emplace(std::string(key), std::string(value));
+>                     }
+>                 }
+>             }
+>             if (line_end == std::string_view::npos) break;
+>             remaining.remove_prefix(line_end + 1);
+>         }
+>     }
+>
+>     std::optional<std::string> get(const std::string& key) const {
+>         auto it = map_.find(key);
+>         if (it != map_.end()) return it->second;
+>         return std::nullopt;
+>     }
+> };
+>
+> // ===== 测试 =====
+> int main() {
+>     // 生成 100 万行的测试配置
+>     std::ostringstream oss;
+>     for (int i = 0; i < 1'000'000; ++i) {
+>         oss << "key_" << i << "=value_" << (i * 7 % 9999) << "\n";
+>     }
+>     std::string big_config = oss.str();
+>
+>     std::cout << "Config file size: " << big_config.size() / (1024*1024) << " MB\n\n";
+>
+>     // 零拷贝版本
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     ConfigParser parser(big_config);
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>
+>     // 拷贝版本
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     ConfigParserCopying parser_copy(big_config);
+>     auto t3 = std::chrono::high_resolution_clock::now();
+>
+>     double ms_zero = std::chrono::duration<double, std::milli>(t1 - t0).count();
+>     double ms_copy = std::chrono::duration<double, std::milli>(t3 - t2).count();
+>
+>     std::cout << "=== Memory Comparison ===\n";
+>     std::cout << "Zero-copy overhead: " << parser.overhead_bytes() / 1024 << " KB\n";
+>     std::cout << "Parse time (zero-copy): " << ms_zero << " ms\n";
+>     std::cout << "Parse time (copying):   " << ms_copy << " ms\n";
+>
+>     // 验证查询
+>     auto result = parser.get("key_42");
+>     if (result) {
+>         std::cout << "key_42 = " << *result << '\n';
+>     }
+>
+>     return 0;
+> }
+> ```
+>
+> **内存对比**：
+> - 零拷贝版：线性扫描 `vector<pair<string_view, string_view>>` → 每个条目 32 字节（两个指针+长度；典型实现），100 万条 ≈ 32MB
+> - 拷贝版：`unordered_map<string, string>` → 每个条目需存储完整字符串（key+value 平均 ~20 字节）+ hash table bucket 开销 → 100 万条约 80-120MB
+> - 零拷贝版不产生任何 string 分配；但查询是 O(N)，适合配置加载一次后多次查询的场景（或改用排序+二分查找）
+
+> [!tip]- 练习 3 参考答案（挑战）
+> ```cpp
+> #include <variant>
+> #include <vector>
+> #include <functional>
+> #include <type_traits>
+> #include <iostream>
+> #include <chrono>
+>
+> // ===== 事件类型 =====
+> struct KeyEvent    { int key; bool pressed; };
+> struct MouseEvent  { int x, y; int button; };
+> struct WindowEvent { int width, height; };
+> struct CustomEvent { int id; std::string data; };
+>
+> using Event = std::variant<KeyEvent, MouseEvent, WindowEvent, CustomEvent>;
+>
+> // ===== EventDispatcher =====
+> class EventDispatcher {
+> public:
+>     // 注册回调：按事件类型存储
+>     template<typename EventType, typename Callback>
+>     void on(Callback&& cb) {
+>         // 类型擦除：将具体回调包装为 std::function<void(const Event&)>
+>         // 在 dispatch 时 visit 会自动调用匹配类型的回调
+>         callbacks_.push_back(
+>             [cb = std::forward<Callback>(cb)](const Event& e) {
+>                 if (auto* ptr = std::get_if<EventType>(&e)) {
+>                     cb(*ptr);
+>                 }
+>             }
+>         );
+>     }
+>
+>     // 分发事件
+>     void dispatch(const Event& event) {
+>         for (auto& cb : callbacks_) {
+>             cb(event);
+>         }
+>     }
+>
+>     size_t listener_count() const { return callbacks_.size(); }
+>
+> private:
+>     std::vector<std::function<void(const Event&)>> callbacks_;
+> };
+>
+> // ===== 性能测试 =====
+> int main() {
+>     EventDispatcher dispatcher;
+>
+>     // 注册 10 个 KeyEvent 监听者
+>     for (int i = 0; i < 10; ++i) {
+>         dispatcher.on<KeyEvent>([i](const KeyEvent& e) {
+>             volatile int k = e.key;     // 防优化
+>             volatile bool p = e.pressed;
+>             (void)k; (void)p;
+>         });
+>     }
+>
+>     // 注册 5 个 MouseEvent 监听者
+>     for (int i = 0; i < 5; ++i) {
+>         dispatcher.on<MouseEvent>([i](const MouseEvent& e) {
+>             volatile int x = e.x;
+>             (void)x;
+>         });
+>     }
+>
+>     KeyEvent ke{42, true};
+>     Event event = ke;
+>
+>     constexpr int N = 1'000'000;
+>
+>     auto t0 = std::chrono::high_resolution_clock::now();
+>     for (int i = 0; i < N; ++i) {
+>         dispatcher.dispatch(event);
+>     }
+>     auto t1 = std::chrono::high_resolution_clock::now();
+>
+>     double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
+>     std::cout << "=== Event System Performance ===\n";
+>     std::cout << N << " KeyEvent dispatches x " << dispatcher.listener_count()
+>               << " listeners: " << ms << " ms\n";
+>     std::cout << "Per dispatch: " << (ms * 1000 / N) << " us\n";
+>
+>     return 0;
+> }
+> ```
+>
+> **设计要点**：
+> - 回调存储使用类型擦除：`std::function<void(const Event&)>`，内部用 `std::get_if` 做类型匹配
+> - 另一种方案：用 `std::unordered_map<std::type_index, std::vector<…>>` 按类型分组，避免每次 dispatch 遍历所有监听者
+> - 对于 100 万个 KeyEvent 分发给 10 个监听者，预期耗时 20-50ms（取决于 std::function 开销和优化级别）
+> - 游戏引擎实践中通常用 ID 或枚举做事件路由，而非 `type_index`——更快但丧失类型安全
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读]** *A Tour of C++ (3rd ed.)* — Bjarne Stroustrup，第 11 章（std::optional, variant, any, string_view）

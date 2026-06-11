@@ -1776,6 +1776,224 @@ end
 - 状态序列化必须按**固定字段顺序**进行——不可用反射
 - 反序列化时比对反序列化后的 hash 与记录中的 hash
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 定点数 AABB 碰撞检测——基于教程 2.1 节的 `FP64` 实现：
+>
+> ```csharp
+> // AABB 结构体，所有字段使用 FP64 定点数
+> public struct AABB {
+>     public FP64 MinX, MinY, MaxX, MaxY;
+>
+>     public AABB(FP64 minX, FP64 minY, FP64 maxX, FP64 maxY) {
+>         MinX = minX; MinY = minY;
+>         MaxX = maxX; MaxY = maxY;
+>     }
+> }
+>
+> // 判断两个 AABB 是否重叠
+> // 关键：FP64 的 < 运算符直接用整数比较，完全确定
+> public static bool AABBOverlap(AABB a, AABB b) {
+>     // 分离轴定理：任一轴上分离 → 不重叠
+>     if (a.MaxX < b.MinX) return false;
+>     if (a.MinX > b.MaxX) return false;
+>     if (a.MaxY < b.MinY) return false;
+>     if (a.MinY > b.MaxY) return false;
+>     return true;
+> }
+>
+> // 使用确定性随机数（Xorshift128+）生成 100 个随机 AABB
+> // 用相同的种子运行，确保跨平台结果一致
+> public static List<AABB> GenerateRandomAABBs(ulong seed, int count) {
+>     var rng = new XorShift128Plus(seed);
+>     var aabbs = new List<AABB>(count);
+>     for (int i = 0; i < count; i++) {
+>         FP64 x = FP64.FromRaw((long)(rng.Next() & 0x7FFFFFFF));
+>         FP64 y = FP64.FromRaw((long)(rng.Next() & 0x7FFFFFFF));
+>         FP64 w = FP64.FromRaw((long)((rng.Next() & 0xFF) + 1));
+>         FP64 h = FP64.FromRaw((long)((rng.Next() & 0xFF) + 1));
+>         aabbs.Add(new AABB(x, y, x + w, y + h));
+>     }
+>     return aabbs;
+> }
+>
+> // 收集所有碰撞对
+> public static List<(int, int)> FindAllCollisions(List<AABB> aabbs) {
+>     var collisions = new List<(int, int)>();
+>     for (int i = 0; i < aabbs.Count; i++)
+>         for (int j = i + 1; j < aabbs.Count; j++)
+>             if (AABBOverlap(aabbs[i], aabbs[j]))
+>                 collisions.Add((i, j));
+>     return collisions;
+> }
+> ```
+>
+> **C++ 版本**（同样使用教程中的定点数库）：
+>
+> ```cpp
+> struct AABB {
+>     fixed_t min_x, min_y, max_x, max_y;
+> };
+>
+> bool aabb_overlap(const AABB& a, const AABB& b) {
+>     if (a.max_x < b.min_x || a.min_x > b.max_x) return false;
+>     if (a.max_y < b.min_y || a.min_y > b.max_y) return false;
+>     return true;
+> }
+> ```
+>
+> **确定性验证关键**：
+> - 定点数比较就是整数比较——`FP64` 的 `<` 运算符是 `_raw < other._raw`（纯整数），不同编译器优化级别不会改变整数比较的结果
+> - 使用确定性 PRNG（如 Xorshift128+，教程 1.5 节），相同种子 → 相同随机序列
+> - 验证时用 `std::sort` 对碰撞对排序后再对比：`(i,j)` 按 i 升序，i 相同时 j 升序
+> - 用 `-O0` 和 `-O2` 编译运行，比对排序后的碰撞对列表是否逐对一致
+
+> [!tip]- 练习 2 参考答案
+> 定点数追逐 AI 的完整实现：
+>
+> ```csharp
+> public class ChaseAI {
+>     public FP64 PosX, PosY;          // 当前位置 (定点数)
+>     public FP64 Speed;               // 每帧移动距离 (定点数)
+>     public FP64 TargetX, TargetY;    // 目标位置
+>     public FP64 CurrentAngle;        // 当前朝向 (弧度, 0~2π)
+>     public FP64 MaxTurnRate;         // 最大旋转速率 (弧度/帧)
+>     public FP64 AttackRange;         // 攻击范围
+>
+>     public bool InAttackRange => FP64.Sqrt(
+>         (TargetX - PosX) * (TargetX - PosX) +
+>         (TargetY - PosY) * (TargetY - PosY)
+>     ) <= AttackRange;
+>
+>     public void Update() {
+>         if (InAttackRange) return; // 进入攻击状态，停止移动
+>
+>         // 1. 计算到目标的方向角度
+>         FP64 dx = TargetX - PosX;
+>         FP64 dy = TargetY - PosY;
+>         FP64 desiredAngle = FP64.Atan2(dy, dx);
+>
+>         // 2. 计算角度差，归一化到 [-π, π]
+>         FP64 angleDiff = desiredAngle - CurrentAngle;
+>         FP64 twoPi = FP64.Pi * FP64.FromInt(2);
+>         while (angleDiff > FP64.Pi)  angleDiff -= twoPi;
+>         while (angleDiff < -FP64.Pi) angleDiff += twoPi;
+>
+>         // 3. 限制每帧旋转量
+>         if (angleDiff > MaxTurnRate)
+>             angleDiff = MaxTurnRate;
+>         else if (angleDiff < -MaxTurnRate)
+>             angleDiff = -MaxTurnRate;
+>
+>         CurrentAngle += angleDiff;
+>
+>         // 4. 朝当前方向移动
+>         FP64 moveX = FP64.Cos(CurrentAngle) * Speed;
+>         FP64 moveY = FP64.Sin(CurrentAngle) * Speed;
+>         PosX += moveX;
+>         PosY += moveY;
+>     }
+> }
+> ```
+>
+> **实现要点**：
+> - **角度归一化**：`atan2` 返回 `[-π, π]`，旋转后的新角度可能超出此范围，需要归一化。上面的 `while` 循环比 `fmod` 更确定——所有平台行为一致
+> - **转向速率限制**：`min(max_turn_rate, abs(angle_diff)) * sign(angle_diff)` 等价于上面的 `if/else` 钳制
+> - **定点数 sqrt**：使用教程 1.3 节的牛顿迭代法（固定 6 次迭代，确定且收敛）
+> - **定点数 atan2**：使用教程中的 CORDIC 实现（`cordic_sincos` 的逆运算）或查表法
+> - **定点数 sin/cos**：同样使用 CORDIC 或查表法——绝不能调用系统 `Math.Sin()`
+> - **轨迹验证**：在控制台每帧打印 `(PosX, PosY)`，应看到 AI 平滑转弯追逐目标，不会瞬移朝向
+
+> [!tip]- 练习 3 参考答案
+> 跨平台 Desync 检测框架的核心实现思路：
+>
+> **1. FNV-1a 帧 Hash**
+>
+> ```cpp
+> // 教程中已给出完整实现，此处补充状态哈希的累积方式
+> uint32_t ComputeFrameHash(const GameState& state) {
+>     uint32_t hash = 0x811c9dc5;  // FNV-1a 初始值
+>
+>     // 按固定字段顺序喂入哈希——顺序必须跨平台一致！
+>     // 使用定点数的 raw 值（整数），不依赖浮点位表示
+>     for (const auto& unit : state.units) {
+>         hash = fnv1a_32(&unit.id, sizeof(unit.id), hash);
+>         hash = fnv1a_32(&unit.pos_x.raw, sizeof(int32_t), hash);
+>         hash = fnv1a_32(&unit.pos_y.raw, sizeof(int32_t), hash);
+>         hash = fnv1a_32(&unit.hp.raw, sizeof(int32_t), hash);
+>     }
+>     // 使用 std::map 或先收集 ID 排序，确保遍历顺序确定
+>     return hash;
+> }
+> ```
+>
+> **2. 指令记录与保存**
+>
+> ```cpp
+> struct CommandRecord {
+>     uint32_t frame_id;
+>     uint8_t  player_id;
+>     uint8_t  opcode;
+>     uint8_t  params[6];  // 固定长度简化
+> };
+>
+> // 保存为二进制文件（而非 JSON），避免浮点格式化差异
+> void SaveCommandLog(const std::vector<CommandRecord>& log, const char* path) {
+>     FILE* f = fopen(path, "wb");
+>     uint32_t count = log.size();
+>     fwrite(&count, sizeof(count), 1, f);
+>     fwrite(log.data(), sizeof(CommandRecord), count, f);
+>     fclose(f);
+> }
+> ```
+>
+> **3. 状态快照序列化**
+>
+> ```cpp
+> // 序列化时按固定字段顺序、固定大小端写入
+> void SerializeState(const GameState& state, std::vector<uint8_t>& out) {
+>     uint32_t unit_count = state.units.size();
+>     out.insert(out.end(), (uint8_t*)&unit_count,
+>                (uint8_t*)&unit_count + 4);
+>     for (const auto& unit : state.units) {
+>         WriteU32LE(out, unit.id);
+>         WriteI32LE(out, unit.pos_x.raw);
+>         WriteI32LE(out, unit.pos_y.raw);
+>         WriteI32LE(out, unit.hp.raw);
+>     }
+> }
+> ```
+>
+> **4. 回放与差异定位**
+>
+> ```cpp
+> void ReplayAndVerify(const CommandLog& log, const StateSnapshot& baseline) {
+>     GameState state = baseline.Restore();
+>     for (auto& cmd : log) {
+>         state.ExecuteCommand(cmd);
+>         uint32_t hash = ComputeFrameHash(state);
+>         if (hash != cmd.expected_hash) {
+>             printf("DESYNC at frame %u!\n", cmd.frame_id);
+>             printf("Expected hash: 0x%08X, Got: 0x%08X\n",
+>                    cmd.expected_hash, hash);
+>             // 打印该帧所有单位状态，逐字段对比
+>             state.DumpAllUnits();
+>             break;
+>         }
+>     }
+> }
+> ```
+>
+> **关键设计决策**：
+> - **Hash 而非 CRC**：FNV-1a 比 CRC32 更简单且跨平台一致（CRC32 的查表实现可能因初始化不同有差异）
+> - **二进制而非 JSON**：序列化时浮点数 → 字符串 → 解析可能因 `printf` 实现差异引入误差；直接写定点数的 raw int 值
+> - **快照频率**：每 300 帧一次是性能和调试粒度的折中——回放时最多重算 300 帧即可定位 desync
+> - **字段顺序**：必须用显式的字段序列化顺序（不能依赖反射/序列化库的字段排序，它们可能因编译器而变）
+> - **遍历顺序**：使用 `std::map<int, Unit>` 或遍历前按 ID 排序到 `std::vector`（教程 1.4 节）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

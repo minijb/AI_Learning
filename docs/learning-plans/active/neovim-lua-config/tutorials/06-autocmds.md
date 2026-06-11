@@ -248,6 +248,87 @@ vim.opt_local.cindent = true  -- C 风格自动缩进
 ```
 然后用 `:messages` 查看打印的日志。再运行 `:autocmd BufEnter` 查看所有注册的自动命令。理解 `clear = true` 的重要性后，用 `:lua vim.api.nvim_del_augroup_by_name("GeneralSettings")` 清除示例中的组。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```lua
+> -- 练习 1: C/C++ 文件类型自动命令
+> -- 放在 autocmds 模块中，或直接放在 init.lua
+>
+> local augroup = vim.api.nvim_create_augroup
+> local autocmd = vim.api.nvim_create_autocmd
+>
+> local cpp_group = augroup("CppSettings", { clear = true })
+>
+> autocmd("FileType", {
+>     group = cpp_group,
+>     pattern = { "c", "cpp", "h", "hpp" },
+>     callback = function()
+>         -- 使用 opt_local 确保只影响当前缓冲区
+>         vim.opt_local.tabstop = 4
+>         vim.opt_local.shiftwidth = 4
+>         vim.opt_local.expandtab = false  -- C 代码中通常保留 Tab
+>         vim.opt_local.cindent = true     -- C 风格自动缩进
+>     end,
+> })
+> ```
+>
+> **关键点：**
+> - `augroup` 搭配 `clear = true` 确保重载配置时不会重复累积自动命令。
+> - 使用 `vim.opt_local` 而非 `vim.opt`，避免影响其他缓冲区。
+> - `pattern` 是 table 时匹配多个文件扩展名。Neovim 的 `FileType` 事件使用文件类型名（不含 `.`），即 `"c"` 而非 `"*.c"`。
+
+> [!tip]- 练习 2 参考答案
+> ```lua
+> -- 练习 2: 复制后高亮复制区域（TextYankPost 事件）
+> local yank_group = vim.api.nvim_create_augroup("YankHighlight", { clear = true })
+>
+> vim.api.nvim_create_autocmd("TextYankPost", {
+>     group = yank_group,
+>     callback = function()
+>         -- vim.highlight.on_yank 是高亮 yank 区域的便捷函数
+>         -- higroup: 使用哪个高亮组（IncSearch 是内置的反色高亮）
+>         -- timeout: 高亮持续时间（毫秒），150ms 足够亮一下
+>         -- on_macro: 宏执行时是否也触发（false 避免宏播放时干扰）
+>         vim.highlight.on_yank({
+>             higroup = "IncSearch",
+>             timeout = 150,
+>             on_macro = false,
+>         })
+>     end,
+> })
+> ```
+>
+> **核心 API：** `vim.highlight.on_yank()` 是 Neovim 0.10+ 提供的一站式方案，内部使用 `vim.highlight.range()` 在 yank 区域创建临时高亮。无需手动保存/恢复光标，也无需手动清除——`timeout` 到期后自动消失。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 在 Neovim 中逐步操作：
+>
+> ```vim
+> " 步骤 1: 创建一个简单的调试自动命令
+> :lua vim.api.nvim_create_autocmd("BufEnter", { callback = function() print("进入: " .. vim.fn.expand("%")) end })
+>
+> " 步骤 2: 切换几次缓冲区，然后查看输出
+> :messages
+>
+> " 步骤 3: 查看所有 BufEnter 自动命令（会看到刚才创建的匿名 autocmd）
+> :autocmd BufEnter
+>
+> " 步骤 4: 如果之前按照示例创建了 GeneralSettings，清除它
+> :lua vim.api.nvim_del_augroup_by_name("GeneralSettings")
+>
+> " 步骤 5: 验证清除——该组下的自动命令不再触发
+> :autocmd BufEnter
+> ```
+>
+> **核心理解：**
+> - 没有 `clear = true` 且没有 `group` 的自动命令是**匿名的**，重载配置时会**重复创建**——每次 `:source %` 或重启都会新增一份，导致回调被执行多次。
+> - `:autocmd <Event>` 可以查看所有注册的自动命令，是调试的利器。
+> - `vim.api.nvim_del_augroup_by_name()` 可以按组名清除，`clear = true` 本质上就是在创建组时先调用它。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

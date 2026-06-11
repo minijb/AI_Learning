@@ -710,6 +710,223 @@ public static class ThemeFactoryProvider
 额外挑战：让新增主题时只需加一行字典注册，不改 `CreateFromConfig` 方法（符合 OCP）。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 添加 High Contrast 主题——完全通过新增代码实现，不改动已有类：
+>
+> ```csharp
+> // ═══════════════════════════════════════════════
+> // High Contrast 具体产品 — 每类控件带 [HC] 前缀
+> // ═══════════════════════════════════════════════
+> public class HighContrastButton : IButton
+> {
+>     public void Render()
+>         => Console.WriteLine("  [HC] [ Button ] — #FFFF00 bg, #000000 text");
+> }
+>
+> public class HighContrastTextBox : ITextBox
+> {
+>     public void Render()
+>         => Console.WriteLine("  [HC] [ TextBox ] — #000000 bg, #FFFF00 border, #FFFFFF text");
+> }
+>
+> public class HighContrastCheckBox : ICheckBox
+> {
+>     public void Render()
+>         => Console.WriteLine("  [HC] [ CheckBox ] — ☑ with #FFFF00 mark, #FFFFFF label");
+> }
+>
+> // ═══════════════════════════════════════════════
+> // High Contrast 具体工厂 — 保证全套 HC 风格产品
+> // ═══════════════════════════════════════════════
+> public class HighContrastThemeFactory : IThemeFactory
+> {
+>     public IButton CreateButton() => new HighContrastButton();
+>     public ITextBox CreateTextBox() => new HighContrastTextBox();
+>     public ICheckBox CreateCheckBox() => new HighContrastCheckBox();
+> }
+>
+> // ═══════════════════════════════════════════════
+> // 验证 — LoginForm 一行不改
+> // ═══════════════════════════════════════════════
+> Console.WriteLine("--- High Contrast Theme ---");
+> new LoginForm(new HighContrastThemeFactory()).Render();
+> // 输出:
+> // === Login Form ===
+> //   [HC] [ TextBox ] — #000000 bg, #FFFF00 border, #FFFFFF text
+> //   [HC] [ TextBox ] — #000000 bg, #FFFF00 border, #FFFFFF text
+> //   [HC] [ CheckBox ] — ☑ with #FFFF00 mark, #FFFFFF label
+> //   [HC] [ Button ] — #FFFF00 bg, #000000 text
+> // ===================
+> ```
+>
+> **OCP 验证：** `LoginForm` 的构造函数接受 `IThemeFactory`，渲染逻辑完全不变。新增主题只需实现 `IThemeFactory` + 3 个具体产品（4 个新类），已有的 `LightThemeFactory`、`DarkThemeFactory` 及其产品类全部无需修改。
+
+> [!tip]- 练习 2 参考答案
+> **泛型抽象工厂的实现：**
+>
+> ```csharp
+> // ═══ 泛型数据库工厂 ═══
+> public interface IGenericFactory<TConnection, TCommand, TAdapter>
+>     where TConnection : IDbConnection
+>     where TCommand : IDbCommand
+>     where TAdapter : IDataAdapter
+> {
+>     TConnection CreateConnection(string connStr);
+>     TCommand CreateCommand(string sql, TConnection connection);
+>     TAdapter CreateDataAdapter(TCommand command);
+> }
+>
+> // ═══ SQL Server 族 — 编译器保证返回类型配套 ═══
+> public class SqlGenericFactory : IGenericFactory<SqlConnection, SqlCommand, SqlDataAdapter>
+> {
+>     public SqlConnection CreateConnection(string connStr) => new SqlConnection(connStr);
+>     public SqlCommand CreateCommand(string sql, SqlConnection conn) => new SqlCommand(sql, conn);
+>     public SqlDataAdapter CreateDataAdapter(SqlCommand cmd) => new SqlDataAdapter(cmd);
+> }
+>
+> // ═══ PostgreSQL 族 ═══
+> public class PostgreSqlGenericFactory
+>     : IGenericFactory<NpgsqlConnection, NpgsqlCommand, NpgsqlDataAdapter>
+> {
+>     public NpgsqlConnection CreateConnection(string connStr) => new NpgsqlConnection(connStr);
+>     public NpgsqlCommand CreateCommand(string sql, NpgsqlConnection conn)
+>         => new NpgsqlCommand(sql, conn);
+>     public NpgsqlDataAdapter CreateDataAdapter(NpgsqlCommand cmd)
+>         => new NpgsqlDataAdapter(cmd);
+> }
+>
+> // ═══ 使用泛型工厂的客户端 — 获得编译期类型安全 ═══
+> public class GenericUserRepository<TConnection, TCommand, TAdapter>
+>     where TConnection : IDbConnection
+>     where TCommand : IDbCommand
+>     where TAdapter : IDataAdapter
+> {
+>     private readonly IGenericFactory<TConnection, TCommand, TAdapter> _factory;
+>     private readonly string _connStr;
+>
+>     public GenericUserRepository(
+>         IGenericFactory<TConnection, TCommand, TAdapter> factory,
+>         string connStr)
+>     {
+>         _factory = factory;
+>         _connStr = connStr;
+>     }
+>
+>     public DataSet GetActiveUsers()
+>     {
+>         var conn = _factory.CreateConnection(_connStr);  // 返回 TConnection，非 IDbConnection
+>         conn.Open();
+>
+>         // 编译器保证 TCommand 和 TConnection 配套！
+>         // 不会出现 SqlCommand 传 NpgsqlConnection 的情况
+>         var cmd = _factory.CreateCommand("SELECT * FROM Users", conn);
+>         var adapter = _factory.CreateDataAdapter(cmd);
+>
+>         var result = adapter.Fill("SELECT * FROM Users WHERE Active = 1");
+>         conn.Close();
+>         return result;
+>     }
+> }
+>
+> // 使用
+> var repo = new GenericUserRepository<SqlConnection, SqlCommand, SqlDataAdapter>(
+>     new SqlGenericFactory(), "Server=.;Database=App;");
+> repo.GetActiveUsers();
+> ```
+>
+> **思考分析：**
+>
+> **泛型版本的优势：**
+> - **编译期类型安全**：`CreateCommand` 返回 `TCommand`，参数也要求 `TConnection`——编译器阻止了"拿 SqlConnection 传给 NpgsqlCommand"这种运行时才能发现的错误
+> - **消除运行时类型转换**：调用方获得具体类型而非接口，可以访问产品特有的方法/属性（如果暴露的话），无需 `is`/`as`/强制转换
+> - **更清晰的 API 契约**：泛型约束 `where TConnection : IDbConnection` 明确声明"这个工厂只创建实现这些接口的一组类型"
+>
+> **泛型版本的劣势：**
+> - **客户端也变成泛型**：`GenericUserRepository<TConnection, TCommand, TAdapter>` 的类型参数传播到所有使用方，增加模板代码
+> - **DI 注册复杂**：容器注册 `IGenericFactory<SqlConnection, SqlCommand, SqlDataAdapter>` 不如 `IDatabaseFactory` 直接
+> - **早期绑定限制灵活性**：运行时根据配置切换数据库需要反射或条件注册；接口版本只需 `IDatabaseFactory factory = GetFromConfig()` 更简单
+>
+> **适用场景判断：**
+> - **用泛型**：当调用方确实需要具体类型（如访问 `SqlCommand` 特有的 `Parameters` 集合），且工厂族在编译期就能确定
+> - **用接口**：当需要运行时动态切换工厂（配置驱动），且调用方只依赖抽象接口的方法
+> - **经验法则**：大多数业务代码用接口版本即可；泛型版本适合编写**基础设施/框架层**代码，为上层提供类型安全的工厂抽象
+
+> [!tip]- 练习 3 参考答案（可选）
+> 配置驱动工厂选择——支持动态切换主题，且新增主题只需注册，不改 `CreateFromConfig`：
+>
+> ```csharp
+> using Microsoft.Extensions.Configuration;
+>
+> public static class ThemeFactoryProvider
+> {
+>     // ═══ 字典注册：新增主题只需加一行 ═══
+>     private static readonly Dictionary<string, Func<IThemeFactory>> _factories = new()
+>     {
+>         ["Light"]         = () => new LightThemeFactory(),
+>         ["Dark"]          = () => new DarkThemeFactory(),
+>         ["HighContrast"]  = () => new HighContrastThemeFactory(),
+>     };
+>
+>     /// <summary>
+>     /// 外部可注册自定义主题（OCP：不改 CreateFromConfig）
+>     /// </summary>
+>     public static void Register(string name, Func<IThemeFactory> factory)
+>     {
+>         _factories[name] = factory;
+>     }
+>
+>     /// <summary>
+>     /// 从 appsettings.json 读取 UI:Theme 配置项，返回对应工厂
+>     /// </summary>
+>     public static IThemeFactory CreateFromConfig()
+>     {
+>         var config = new ConfigurationBuilder()
+>             .SetBasePath(Directory.GetCurrentDirectory())
+>             .AddJsonFile("appsettings.json", optional: false)
+>             .Build();
+>
+>         var theme = config["UI:Theme"];
+>         if (string.IsNullOrWhiteSpace(theme))
+>             throw new InvalidOperationException(
+>                 "UI:Theme is missing in appsettings.json. Expected one of: " +
+>                 string.Join(", ", _factories.Keys));
+>
+>         if (!_factories.TryGetValue(theme, out var factory))
+>             throw new InvalidOperationException(
+>                 $"Unknown theme: '{theme}'. Available themes: " +
+>                 string.Join(", ", _factories.Keys));
+>
+>         return factory();
+>     }
+> }
+>
+> // ═══ 使用 ═══
+> // appsettings.json:
+> // {
+> //   "UI": {
+> //     "Theme": "Dark"
+> //   }
+> // }
+>
+> IThemeFactory themeFactory = ThemeFactoryProvider.CreateFromConfig();
+> new LoginForm(themeFactory).Render();
+>
+> // ═══ 扩展：新增 "Blue" 主题，不改 CreateFromConfig ═══
+> // 1. 实现 BlueThemeFactory : IThemeFactory
+> // 2. 注册一行：
+> ThemeFactoryProvider.Register("Blue", () => new BlueThemeFactory());
+> // 3. 修改 appsettings.json: "Theme": "Blue"
+> ```
+>
+> **OCP + 错误处理：**
+> - 字典注册机制让新增主题无需修改 `CreateFromConfig` 的逻辑——真正对扩展开放
+> - 配置缺失时抛出的异常包含所有可用主题名，帮助排查配置错误
+> - 未知主题名不会静默降级（可能导致 UI 不一致），而是立即抛异常
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 
 ## 4. 扩展阅读
 

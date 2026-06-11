@@ -166,6 +166,93 @@ require('tokyonight').setup {
 }
 ```
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 更换 colorscheme 的完整步骤（以 catppuccin 为例）：
+>
+> 1. 将 UI section 中的 tokyonight 相关三行替换为：
+>
+> ```lua
+> vim.pack.add { gh 'catppuccin/nvim' }
+> require('catppuccin').setup { flavour = 'mocha' }  -- 或 'latte', 'frappe', 'macchiato'
+> vim.cmd.colorscheme 'catppuccin-mocha'
+> ```
+>
+> 2. 重启 Neovim，验证核心元素是否协调：
+>    - **LSP 诊断**：故意写错代码，确认 Error/Warning/Hint 颜色依然清晰可辨
+>    - **Treesitter 高亮**：打开一个 Lua 文件，确认函数名、参数、关键字各有区别色
+>    - **Telescope 窗口**：按 `<leader>ff`，确认 Telescope UI 自动适配了新的配色
+>    - **Statusline**：确认 mini.statusline 的颜色跟随了新 colorscheme
+> 3. 其他热门选择的等效代码：
+>
+> ```lua
+> -- rose-pine（暖色暗）
+> vim.pack.add { gh 'rose-pine/neovim' }
+> vim.cmd.colorscheme 'rose-pine'
+>
+> -- kanagawa（复古暖）
+> vim.pack.add { gh 'rebelot/kanagawa.nvim' }
+> vim.cmd.colorscheme 'kanagawa'
+> ```
+>
+> **关键原则**：高质量的 colorscheme（tokyonight、catppuccin、rose-pine 等）都会正确设置 treesitter 和 LSP 高亮组。如果你的 LSP 诊断颜色在更换 colorscheme 后"消失"了，说明 colorscheme 没有覆盖诊断高亮组——考虑换回主流方案。
+
+> [!tip]- 练习 2 参考答案
+> 自定义 statusline 组件显示当前时间：
+>
+> ```lua
+> -- 在 mini.statusline 部分，替换 section_location：
+> local statusline = require 'mini.statusline'
+> statusline.setup { use_icons = vim.g.have_nerd_font }
+>
+> ---@diagnostic disable-next-line: duplicate-set-field
+> statusline.section_location = function()
+>   return os.date '%H:%M'  -- 24 小时制时间，如 "14:35"
+> end
+> ```
+>
+> mini.statusline 的 `section_location` 返回值是直接渲染在状态栏右侧的字符串。原来的 `'%2l:%-2v'` 是 Vim 的 statusline 格式化语法（LINE:COLUMN）。`os.date` 是 Lua 标准库函数，接受 strftime 格式串。
+>
+> 更丰富的自定义示例——同时显示行号和当前 Git 分支：
+>
+> ```lua
+> statusline.section_location = function()
+>   local line_col = '%2l:%-2v'
+>   local time = os.date '%H:%M'
+>   return line_col .. '  ' .. time
+> end
+> ```
+>
+> **关键点**：`section_location` 在每次状态栏刷新时调用（频繁！），所以不要在函数内做昂贵的操作（如 Git 命令、文件 I/O）。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 配置透明背景的完整设置：
+>
+> ```lua
+> require('tokyonight').setup {
+>   transparent = true,      -- 主编辑器背景透明
+>   styles = {
+>     sidebars = "transparent",  -- 侧边栏（如 neo-tree）背景透明
+>     floats = "transparent",    -- 浮动窗口（Telescope、诊断浮动窗）背景透明
+>   },
+> }
+> ```
+>
+> **前置要求**：
+> - 你的**终端模拟器**必须支持透明背景。在 Windows Terminal 中：Settings → Profiles → Appearance → "Enable acrylic" 或设置背景透明度
+> - 如果你的终端背景是不透明的纯色，Neovim 的"透明"实际上是显示终端背景色——视觉效果和设 `transparent = false` 没有区别
+>
+> **视觉效果**：
+> - `transparent = true`：编辑器区域可以透过看到终端背景（可能是一张壁纸或其他窗口）
+> - `sidebars = "transparent"`：neo-tree 等侧边栏也透明
+> - `floats = "transparent"`：Telescope 的一个副作用——预览窗口变透明后文字可能难以阅读，尤其是预览内容背景也是深色时
+>
+> **注意**：`transparent` 和某些终端多路复用器（如 tmux）配合时可能显示异常。如果遇到颜色问题，先关闭透明度排查。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

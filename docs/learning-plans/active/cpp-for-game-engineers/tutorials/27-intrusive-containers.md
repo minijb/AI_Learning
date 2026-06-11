@@ -620,6 +620,476 @@ void benchmarkIntrusiveVsStd() {
 提示：参考 `containerOf` 宏从哈希 hook 反推对象指针。
 
 ---
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：侵入式双向链表实体激活/休眠系统
+> ```cpp
+> #include <cstddef>
+> #include <cstdint>
+> #include <iostream>
+> #include <vector>
+> #include <cassert>
+> 
+> // ========== 侵入式双向链表节点 ==========
+> struct IntrusiveDListNode {
+>     IntrusiveDListNode* prev = this;
+>     IntrusiveDListNode* next = this;
+> 
+>     bool isLinked() const { return prev != this; }
+> 
+>     void unlink() {
+>         prev->next = next;
+>         next->prev = prev;
+>         prev = next = this;
+>     }
+> };
+> 
+> // ========== containerOf 辅助 ==========
+> template <typename T, typename Member>
+> T* containerOf(Member T::*member, Member* ptr) {
+>     return reinterpret_cast<T*>(
+>         reinterpret_cast<char*>(ptr) -
+>         reinterpret_cast<uintptr_t>(&(static_cast<T*>(nullptr)->*member))
+>     );
+> }
+> 
+> #define INTRUSIVE_CONTAINER_OF(ptr, T, member) containerOf(&T::member, ptr)
+> 
+> // ========== 侵入式双向链表 ==========
+> template <typename T, IntrusiveDListNode T::*HookPtr>
+> class IntrusiveList {
+> public:
+>     IntrusiveList() = default;
+>     IntrusiveList(const IntrusiveList&) = delete;
+>     IntrusiveList& operator=(const IntrusiveList&) = delete;
+> 
+>     bool empty() const { return sentinel_.next == &sentinel_; }
+>     size_t size() const { return size_; }
+> 
+>     void push_back(T& obj) {
+>         IntrusiveDListNode& node = obj.*HookPtr;
+>         assert(!node.isLinked() && "Entity must not be in any list!");
+>         insertAfter(sentinel_.prev, &node);
+>     }
+> 
+>     void push_front(T& obj) {
+>         IntrusiveDListNode& node = obj.*HookPtr;
+>         assert(!node.isLinked());
+>         insertAfter(&sentinel_, &node);
+>     }
+> 
+>     T& front() {
+>         assert(!empty());
+>         return *INTRUSIVE_CONTAINER_OF(sentinel_.next, T, HookPtr);
+>     }
+> 
+>     T& back() {
+>         assert(!empty());
+>         return *INTRUSIVE_CONTAINER_OF(sentinel_.prev, T, HookPtr);
+>     }
+> 
+>     void pop_front() {
+>         assert(!empty());
+>         sentinel_.next->unlink();
+>         --size_;
+>     }
+> 
+>     void pop_back() {
+>         assert(!empty());
+>         sentinel_.prev->unlink();
+>         --size_;
+>     }
+> 
+>     void erase(T& obj) {
+>         IntrusiveDListNode& node = obj.*HookPtr;
+>         assert(node.isLinked());
+>         node.unlink();
+>         --size_;
+>     }
+> 
+>     void clear() {
+>         while (!empty()) {
+>             sentinel_.next->unlink();
+>             --size_;
+>         }
+>     }
+> 
+>     // 迭代器
+>     class iterator {
+>     public:
+>         explicit iterator(IntrusiveDListNode* node) : current_(node) {}
+>         T& operator*() const { return *INTRUSIVE_CONTAINER_OF(current_, T, HookPtr); }
+>         T* operator->() const { return INTRUSIVE_CONTAINER_OF(current_, T, HookPtr); }
+>         iterator& operator++() { current_ = current_->next; return *this; }
+>         iterator operator++(int) { iterator t = *this; ++*this; return t; }
+>         iterator& operator--() { current_ = current_->prev; return *this; }
+>         iterator operator--(int) { iterator t = *this; --*this; return t; }
+>         bool operator==(const iterator& o) const { return current_ == o.current_; }
+>         bool operator!=(const iterator& o) const { return current_ != o.current_; }
+>     private:
+>         IntrusiveDListNode* current_;
+>     };
+> 
+>     iterator begin() { return iterator(sentinel_.next); }
+>     iterator end()   { return iterator(&sentinel_); }
+> 
+> private:
+>     void insertAfter(IntrusiveDListNode* pos, IntrusiveDListNode* node) {
+>         node->next = pos->next;
+>         node->prev = pos;
+>         pos->next->prev = node;
+>         pos->next = node;
+>         ++size_;
+>     }
+> 
+>     IntrusiveDListNode sentinel_;
+>     size_t size_ = 0;
+> };
+> 
+> // ========== Entity 定义（双 hook） ==========
+> class Entity {
+> public:
+>     uint32_t id;
+>     float x, y, z;
+> 
+>     // 两个侵入式 hook：分别用于激活和休眠列表
+>     IntrusiveDListNode activeLink;
+>     IntrusiveDListNode sleepLink;
+> 
+>     Entity(uint32_t i = 0, float px = 0, float py = 0, float pz = 0)
+>         : id(i), x(px), y(py), z(pz) {}
+> 
+>     void update(float dt) {
+>         // 模拟实体更新
+>         x += 1.0f * dt;
+>     }
+> };
+> 
+> // ========== EntityManager ==========
+> class EntityManager {
+> public:
+>     using ActiveList = IntrusiveList<Entity, &Entity::activeLink>;
+>     using SleepList  = IntrusiveList<Entity, &Entity::sleepLink>;
+> 
+>     explicit EntityManager(size_t maxEntities) {
+>         entities_.reserve(maxEntities);
+>     }
+> 
+>     Entity& createEntity() {
+>         entities_.emplace_back(nextId_++);
+>         // 新实体默认休眠
+>         Entity& e = entities_.back();
+>         sleepList_.push_back(e);
+>         return e;
+>     }
+> 
+>     // O(1) 激活：从休眠列表移除，加入激活列表
+>     void wakeUp(size_t entityIndex) {
+>         assert(entityIndex < entities_.size());
+>         Entity& e = entities_[entityIndex];
+>         if (!e.activeLink.isLinked()) {
+>             sleepList_.erase(e);        // O(1) — 双向链表
+>             activeList_.push_back(e);   // O(1)
+>         }
+>     }
+> 
+>     // O(1) 休眠：从激活列表移除，加入休眠列表
+>     void putToSleep(size_t entityIndex) {
+>         assert(entityIndex < entities_.size());
+>         Entity& e = entities_[entityIndex];
+>         if (e.activeLink.isLinked()) {
+>             activeList_.erase(e);       // O(1)
+>             sleepList_.push_back(e);    // O(1)
+>         }
+>     }
+> 
+>     // 每帧更新所有激活实体
+>     void updateActive(float dt) {
+>         for (auto& e : activeList_) {
+>             e.update(dt);
+>         }
+>     }
+> 
+>     size_t activeCount()  const { return activeList_.size(); }
+>     size_t sleepCount()   const { return sleepList_.size(); }
+>     size_t totalCount()   const { return entities_.size(); }
+> 
+>     Entity& entity(size_t idx) { return entities_[idx]; }
+> 
+> private:
+>     std::vector<Entity> entities_;   // 所有实体预分配于此
+>     ActiveList activeList_;
+>     SleepList  sleepList_;
+>     uint32_t nextId_ = 1;
+> };
+> 
+> // ========== 演示 ==========
+> void demo() {
+>     EntityManager mgr(10000);  // 预分配 10000 个实体，零动态分配
+> 
+>     // 创建 10 个实体（全部默认在休眠列表）
+>     for (int i = 0; i < 10; ++i) {
+>         mgr.createEntity();
+>     }
+>     std::cout << "Active: " << mgr.activeCount()
+>               << ", Sleep: " << mgr.sleepCount() << "\n";
+>     // 输出: Active: 0, Sleep: 10
+> 
+>     // 激活前 5 个实体
+>     for (size_t i = 0; i < 5; ++i) {
+>         mgr.wakeUp(i);
+>     }
+>     std::cout << "After wakeUp: Active: " << mgr.activeCount()
+>               << ", Sleep: " << mgr.sleepCount() << "\n";
+>     // 输出: Active: 5, Sleep: 5
+> 
+>     // 每帧更新
+>     mgr.updateActive(0.016f);  // 60fps delta
+> 
+>     // 休眠实体 0
+>     mgr.putToSleep(0);
+>     std::cout << "After sleep: Active: " << mgr.activeCount()
+>               << ", Sleep: " << mgr.sleepCount() << "\n";
+>     // 输出: Active: 4, Sleep: 6
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：侵入式 vs std::list 性能对比
+> ```cpp
+> #include <chrono>
+> #include <list>
+> #include <vector>
+> #include <iostream>
+> #include <random>
+> 
+> // ========== 全局分配计数器 ==========
+> static size_t g_allocCount = 0;
+> static size_t g_freeCount  = 0;
+> 
+> void* operator new(size_t size) {
+>     ++g_allocCount;
+>     return std::malloc(size);
+> }
+> 
+> void operator delete(void* ptr) noexcept {
+>     ++g_freeCount;
+>     std::free(ptr);
+> }
+> 
+> void operator delete(void* ptr, size_t) noexcept {
+>     ++g_freeCount;
+>     std::free(ptr);
+> }
+> 
+> // ========== std::list 的实体 ==========
+> struct StdEntity {
+>     uint32_t id;
+>     float x, y, z;
+>     StdEntity(uint32_t i) : id(i), x(0), y(0), z(0) {}
+> };
+> 
+> // ========== 侵入式实体 ==========
+> struct IntrusiveEntity {
+>     uint32_t id;
+>     float x, y, z;
+>     IntrusiveDListNode link;
+>     IntrusiveEntity(uint32_t i) : id(i), x(0), y(0), z(0) {}
+> };
+> 
+> void benchmark() {
+>     constexpr size_t N = 100000;
+>     constexpr size_t ITER = 1000;
+> 
+>     // === std::list 测试 ===
+>     g_allocCount = g_freeCount = 0;
+>     auto t1 = std::chrono::high_resolution_clock::now();
+> 
+>     std::list<StdEntity> slist;
+>     for (size_t iter = 0; iter < ITER; ++iter) {
+>         for (size_t i = 0; i < N; ++i) {
+>             slist.emplace_back(static_cast<uint32_t>(i));
+>         }
+>         slist.clear();
+>     }
+> 
+>     auto t2 = std::chrono::high_resolution_clock::now();
+>     size_t stdAlloc = g_allocCount;
+>     size_t stdFree  = g_freeCount;
+> 
+>     // === 侵入式链表测试 ===
+>     g_allocCount = g_freeCount = 0;
+> 
+>     // 预分配所有对象
+>     std::vector<IntrusiveEntity> entities;
+>     entities.reserve(N);
+>     for (size_t i = 0; i < N; ++i) {
+>         entities.emplace_back(static_cast<uint32_t>(i));
+>     }
+> 
+>     IntrusiveList<IntrusiveEntity, &IntrusiveEntity::link> ilist;
+>     auto t3 = std::chrono::high_resolution_clock::now();
+> 
+>     for (size_t iter = 0; iter < ITER; ++iter) {
+>         for (auto& e : entities) {
+>             ilist.push_back(e);
+>         }
+>         ilist.clear();
+>     }
+> 
+>     auto t4 = std::chrono::high_resolution_clock::now();
+>     size_t intrAlloc = g_allocCount;
+>     size_t intrFree  = g_freeCount;
+> 
+>     // === 输出结果 ===
+>     auto stdMs  = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count();
+>     auto intrMs = std::chrono::duration_cast<std::chrono::milliseconds>(t4 - t3).count();
+> 
+>     std::cout << "=== Performance Report ===\n";
+>     std::cout << "std::list:       " << stdMs  << " ms, "
+>               << stdAlloc << " allocs, " << stdFree << " frees\n";
+>     std::cout << "Intrusive list:  " << intrMs << " ms, "
+>               << intrAlloc << " allocs, " << intrFree << " frees\n";
+>     std::cout << "Speedup:         " << static_cast<double>(stdMs) / intrMs << "x\n";
+> 
+>     // === 分析 ===
+>     std::cout << "\n=== Analysis ===\n";
+>     std::cout << "- std::list push_back: heap alloc per node → "
+>               << (ITER * N) << " allocs/frees\n";
+>     std::cout << "- Intrusive push_back: zero allocs → "
+>               << intrAlloc << " allocs (only vector pre-allocation)\n";
+>     std::cout << "- Memory locality: intrusive objects are contiguous in vector\n";
+>     std::cout << "  vs std::list nodes scattered in heap → better cache hit rate\n";
+> }
+> ```
+
+> [!tip]- 可选挑战参考答案：侵入式 LRU 缓存
+> ```cpp
+> #include <vector>
+> #include <functional>
+> #include <iostream>
+> #include <cassert>
+> 
+> // 使用已定义的 IntrusiveDListNode 和 IntrusiveList
+> 
+> // LRU 缓存节点：同时携带链表 hook 和哈希 hook
+> template <typename K, typename V>
+> struct LRUNode {
+>     K key;
+>     V value;
+>     IntrusiveDListNode listLink;  // 用于访问顺序（最近在头部）
+>     LRUNode* hashNext = nullptr;  // 哈希桶链表
+> 
+>     LRUNode(const K& k, const V& v) : key(k), value(v) {}
+> };
+> 
+> template <typename K, typename V>
+> class IntrusiveLRUCache {
+> public:
+>     // 使用内嵌 hook：&LRUNode<K,V>::listLink
+>     using List = IntrusiveList<LRUNode<K,V>, &LRUNode<K,V>::listLink>;
+> 
+>     explicit IntrusiveLRUCache(size_t capacity, size_t bucketCount = 64)
+>         : capacity_(capacity), buckets_(bucketCount, nullptr) {}
+> 
+>     V* get(const K& key) {
+>         LRUNode<K,V>* node = findInHash(key);
+>         if (!node) return nullptr;
+> 
+>         // 移动到链表头部（最近使用）
+>         list_.erase(*node);          // O(1)
+>         list_.push_front(*node);    // O(1)
+>         return &node->value;
+>     }
+> 
+>     void put(const K& key, const V& value) {
+>         LRUNode<K,V>* existing = findInHash(key);
+>         if (existing) {
+>             // 更新并移到头部
+>             existing->value = value;
+>             list_.erase(*existing);
+>             list_.push_front(*existing);
+>             return;
+>         }
+> 
+>         // 淘汰最久未使用
+>         if (list_.size() >= capacity_) {
+>             LRUNode<K,V>& lru = list_.back();  // 链表尾部
+>             removeFromHash(lru.key);
+>             list_.pop_back();                  // O(1)
+>             delete &lru;
+>         }
+> 
+>         // 插入新节点
+>         auto* node = new LRUNode<K,V>(key, value);
+>         list_.push_front(*node);
+>         insertToHash(node);
+>     }
+> 
+>     size_t size() const { return list_.size(); }
+> 
+>     ~IntrusiveLRUCache() {
+>         while (!list_.empty()) {
+>             LRUNode<K,V>& node = list_.front();
+>             list_.pop_front();
+>             delete &node;
+>         }
+>     }
+> 
+> private:
+>     void insertToHash(LRUNode<K,V>* node) {
+>         size_t idx = hasher_(node->key) % buckets_.size();
+>         node->hashNext = buckets_[idx];
+>         buckets_[idx] = node;
+>     }
+> 
+>     void removeFromHash(const K& key) {
+>         size_t idx = hasher_(key) % buckets_.size();
+>         LRUNode<K,V>** prev = &buckets_[idx];
+>         for (auto* cur = *prev; cur; prev = &cur->hashNext, cur = cur->hashNext) {
+>             if (cur->key == key) {
+>                 *prev = cur->hashNext;
+>                 cur->hashNext = nullptr;
+>                 return;
+>             }
+>         }
+>     }
+> 
+>     LRUNode<K,V>* findInHash(const K& key) {
+>         size_t idx = hasher_(key) % buckets_.size();
+>         for (auto* cur = buckets_[idx]; cur; cur = cur->hashNext) {
+>             if (cur->key == key) return cur;
+>         }
+>         return nullptr;
+>     }
+> 
+>     size_t capacity_;
+>     List list_;
+>     std::vector<LRUNode<K,V>*> buckets_;
+>     std::hash<K> hasher_;
+> };
+> 
+> void demoLRU() {
+>     IntrusiveLRUCache<int, std::string> cache(3);
+> 
+>     cache.put(1, "one");
+>     cache.put(2, "two");
+>     cache.put(3, "three");
+>     std::cout << "Size after 3 puts: " << cache.size() << "\n";  // 3
+> 
+>     // 访问 key=1 使其成为最近使用
+>     if (auto* v = cache.get(1)) std::cout << "get(1): " << *v << "\n";
+> 
+>     // 插入 key=4，淘汰最久未使用（key=2）
+>     cache.put(4, "four");
+>     std::cout << "After put(4), size: " << cache.size() << "\n";  // 3
+>     std::cout << "get(2): " << (cache.get(2) ? "found" : "null (evicted)") << "\n";
+>     std::cout << "get(1): " << (cache.get(1) ? "found" : "null") << "\n";
+>     std::cout << "get(4): " << (cache.get(4) ? "found" : "null") << "\n";
+> }
+> ```
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。侵入式容器的关键在于理解 hook 在对象内部的布局、containerOf 的指针运算、以及 O(1) 双向链表操作的原理。
 
 ## 4. 扩展阅读
 

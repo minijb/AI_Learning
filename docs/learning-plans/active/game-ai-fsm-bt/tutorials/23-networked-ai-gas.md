@@ -2153,6 +2153,279 @@ T=3.001s  ASC 的 Tag 变更事件触发
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **50 敌人合作游戏网络架构**
+>
+> **1. 服务器上运行的内容**：
+>
+> | 系统 | 运行位置 | 原因 |
+> |------|---------|------|
+> | Behavior Tree | 服务器 Only | BT 做出权威决策（目标选择、攻击时机）——客户端信任服务器。若客户端运行 BT → 作弊（客户端篡改 BT 强制 AI 忽略玩家） |
+> | Perception | 服务器 Only | 感知数据（视线射线检测）必须权威——客户端不应决定"AI 是否能看到玩家"。作弊者可通过修改客户端感知半径实现隐身 |
+> | GAS (ASC + AttributeSet + GE) | 服务器 Authoritative, 客户端接收副本 | GE 应用只在服务器端产生权威属性变化。客户端 ASC 处于 `OnlyRelevantToOwner` 的预测模式——用于 UI 显示 |
+> | Pathfinding | 服务器 Only | 导航网格查询 + 路径规划在服务器执行。客户端只接收最终位置——作弊者无法修改 AI 移动路径 |
+>
+> **2. 属性复制策略**：
+>
+> | 属性 | 复制频率 | 可靠性 | 说明 |
+> |------|---------|--------|------|
+> | Position (Vector) | 15Hz (LOD 0), 5Hz (LOD 1), 1Hz (LOD 2) | Unreliable（最新值覆盖旧值） | 位置最重要——高频更新但丢失一两个包无影响（下一帧覆盖） |
+> | Health (Float) | 每次变化 | Reliable | 关键战斗数据——不可丢包。使用 `DOREPLIFETIME_CONDITION(UAIAttributeSet, Health, COND_None)` |
+> | Animation State (Enum) | 状态变化时 | Reliable | 频率极低（状态切换不频繁）→ 开销可忽略 |
+> | AI 内部状态 (BB values, BT node path) | 不复制 | N/A | BB 值是服务器 BT 的内部计算中间值——客户端不需要。需要显示的状态通过专用渠道发送（如 Alert 状态用 RPC） |
+> | GameplayTags (State.Stunned/Dead) | 标签变化时 | Reliable | 通过 GAS 的 Minimal 模式自动同步——GE 复制包含标签变化 |
+>
+> **3. 瓶颈分析与缓解**：
+>
+> | 瓶颈 | 定量缓解方案 |
+> |------|-------------|
+> | 带宽 — 50 敌人 × 15Hz × 24 byte/pos = 18KB/s（单玩家） | 距离 LOD 降频 + `ReplicationGraph` 的 `ActorListFrequencyBuckets`。>50m 用 5Hz，>100m 用 1Hz。启用 `bOnlyRelevantToOwner=false` + 空间相关性裁剪 |
+> | CPU — 50 BT tick × LOD 0 @ 0.015ms = 0.75ms（可接受）| 频率 LOD + 事件驱动 Abort。未激活状态的 BT 通过 Observer Abort 等待事件唤醒而不每帧遍历 |
+> | GC/Burst — 50 GAS GE 应用开销（AttributeSet 的 Pre/Post 回调）| 使用 `EGameplayEffectReplicationMode::Minimal`（仅复制 GE + Tag，不单独复制 Attribute）。Batch 多个 GE 到同一个 `FActiveGameplayEffectsContainer` 更新周期 |
+>
+> **4. LOD 策略表**：
+>
+> | LOD | 距离 | BT Tick | 网络更新 | 复制内容 | 感知频率 |
+> |-----|------|---------|---------|---------|---------|
+> | 0 | 0-30m | 每帧 | 15Hz Pos + Health + Anim | 全量 | 每帧 |
+> | 1 | 30-80m | 每 3 帧 | 5Hz Pos + Health | Position + Health + State Tag | 每 5 帧 |
+> | 2 | 80-150m | 每 10 帧 | 1Hz Pos | Position Only | 每 10 帧 |
+> | 3 | >150m | 停止（保持最后行为） | 不复制 | 无（休眠） | 停止 |
+>
+> **5. 高射速武器命中 20 敌人场景**：
+>
+> GAS 处理流程：每个命中 → 服务器 `UAbilitySystemComponent::ApplyGameplayEffectToTarget` → 创建 `FActiveGameplayEffect` → `AttributeSet::PreAttributeChange` (Clamp) → 修改 `Health` → `PostGameplayEffectExecute` (死亡检测)。
+>
+> 20 个 GE 应用在单帧内完成——核心开销在 `PostGameplayEffectExecute`（每个 ~0.01ms），总计 < 0.3ms，可接受。**真正的瓶颈是网络复制**：20 个 Health 变化 + 可能的 5 个 Death 标签 → 35 个属性变化。缓解方案：
+> - 使用 `FActiveGameplayEffect` 的 batch 复制——一个 replication update 打包所有 GE 变化
+> - 死亡 GE 设置 `bReplicateWhileActive = false`（死亡是永久状态，无需持续复制）
+> - `ReplicationGraph` 的 `NetCullDistanceSquared` 自动裁剪：对远处玩家，收到的 AI 数量少 → Health 复制量自然降低
+
+> [!tip]- 练习 2 参考答案
+> **GAS 驱动 BT 完整实现**
+>
+> **1. AttributeSet**：
+> ```cpp
+> // AIAttributeSet.h
+> UCLASS()
+> class UAIAttributeSet : public UAttributeSet {
+>     GENERATED_BODY()
+> public:
+>     UPROPERTY(ReplicatedUsing=OnRep_Health)
+>     FGameplayAttributeData Health;
+>     ATTRIBUTE_ACCESSORS(UAIAttributeSet, Health)
+>
+>     UPROPERTY(ReplicatedUsing=OnRep_MaxHealth)
+>     FGameplayAttributeData MaxHealth;
+>
+>     UPROPERTY(ReplicatedUsing=OnRep_Stamina)
+>     FGameplayAttributeData Stamina;
+>
+>     UPROPERTY(ReplicatedUsing=OnRep_MaxStamina)
+>     FGameplayAttributeData MaxStamina;
+>
+>     UPROPERTY(ReplicatedUsing=OnRep_Ammo)
+>     FGameplayAttributeData Ammo;
+>
+>     virtual void PreAttributeChange(const FGameplayAttribute& Attr, float& NewVal) override {
+>         Super::PreAttributeChange(Attr, NewVal);
+>         if (Attr == GetHealthAttribute()) NewVal = FMath::Clamp(NewVal, 0, MaxHealth.GetCurrentValue());
+>         if (Attr == GetStaminaAttribute()) NewVal = FMath::Clamp(NewVal, 0, MaxStamina.GetCurrentValue());
+>     }
+>
+>     virtual void PostGameplayEffectExecute(const FGameplayEffectModCallbackData& Data) override {
+>         if (Data.EvaluatedData.Attribute == GetHealthAttribute() && GetHealth() <= 0) {
+>             // 触发死亡——应用 Dead Tag
+>             Data.Target.GetAbilitySystemComponent()->AddLooseGameplayTag(
+>                 FGameplayTag::RequestGameplayTag("State.Dead"));
+>         }
+>     }
+>
+>     UFUNCTION() void OnRep_Health(const FGameplayAttributeData& Old) {
+>         GAMEPLAYATTRIBUTE_REPNOTIFY(UAIAttributeSet, Health, Old);
+>     }
+>     // ... OnRep_Stamina, OnRep_Ammo 同理
+> };
+> ```
+>
+> **2. 四个 GameplayAbility**：
+> ```cpp
+> // GA_AI_MeleeAttack — 近距离攻击，消耗 Stamina，有冷却
+> // AbilityTags: "Ability.AI.MeleeAttack"
+> // CooldownTag: "Ability.Cooldown.MeleeAttack" (Duration=1.0s)
+> // Cost: Stamina -= 10 (通过 GE_Cost_Stamina)
+> // Effect: GE_Damage_Melee (Damage=25) 应用到 Target
+>
+> // GA_AI_RangedAttack — 远程攻击，消耗 Ammo + Stamina
+> // AbilityTags: "Ability.AI.RangedAttack"
+> // ActivationBlockedTags: "State.Stunned", "State.Dead"
+> // Cost: Stamina -= 5, Ammo -= 1
+> // Cooldown: 1.5s
+> // Requires: HasAmmo Tag Check (条件: Ammo > 0 → ASC 添加 "State.HasAmmo" Tag)
+>
+> // GA_AI_Dash — 快速位移
+> // Cost: Stamina -= 20; Cooldown: 3s
+> // Effect: GE_Dash (Set MoveSpeed * 3 for 0.3s via GameplayEffect with Duration)
+>
+> // GA_AI_Heal — 回复 Health
+> // Cost: Stamina -= 30; Cooldown: 15s
+> // Effect: GE_Heal (Health +40 over 3s via ModifierMagnitude over Duration)
+> // ActivationRequiredTags: "State.LowHealth" (仅 HP < 30% 时可激活)
+> ```
+>
+> **3. BTService_UpdateGASValues**：
+> ```cpp
+> void UBTService_UpdateGASValues::TickNode(UBehaviorTreeComponent& OwnerComp,
+>     uint8* NodeMemory, float DeltaSeconds) {
+>     AAIController* AICon = OwnerComp.GetAIOwner();
+>     UAbilitySystemComponent* ASC = UAbilitySystemGlobals::GetAbilitySystemComponentFromActor(
+>         AICon->GetPawn());
+>     if (!ASC) return;
+>
+>     UBlackboardComponent* BB = OwnerComp.GetBlackboardComponent();
+>     BB->SetValueAsFloat("Health", ASC->GetNumericAttribute(UAIAttributeSet::GetHealthAttribute()));
+>     BB->SetValueAsFloat("HealthPercent",
+>         ASC->GetNumericAttribute(UAIAttributeSet::GetHealthAttribute()) /
+>         ASC->GetNumericAttribute(UAIAttributeSet::GetMaxHealthAttribute()));
+>     BB->SetValueAsFloat("Stamina", ASC->GetNumericAttribute(UAIAttributeSet::GetStaminaAttribute()));
+>     BB->SetValueAsBool("HasAmmo",
+>         ASC->GetNumericAttribute(UAIAttributeSet::GetAmmoAttribute()) > 0);
+>     BB->SetValueAsBool("IsStunned",
+>         ASC->HasMatchingGameplayTag(FGameplayTag::RequestGameplayTag("State.Stunned")));
+> }
+> ```
+>
+> **4. BT 结构**：
+> ```
+> [Selector] Root
+>  │
+>  ├── [Sequence] DeadCheck (优先级 1)
+>  │    [Decorator] HasGameplayTag: State.Dead (FlowAbortMode: Both)
+>  │    [Task] Wait (infinite, 播放死亡布娃娃后 BT 停止)
+>  │
+>  ├── [Sequence] StunCheck (优先级 2)
+>  │    [Decorator] HasGameplayTag: State.Stunned (FlowAbortMode: Both)
+>  │    [Task] Wait (duration = StunDuration from GE, 期间所有其他行为被 Abort)
+>  │
+>  ├── [Sequence] Heal (优先级 3)
+>  │    [Decorator] Blackboard: HealthPercent < 0.3 (FlowAbortMode: LowerPriority)
+>  │    [Decorator] Cooldown: HealCooldown (15s, FlowAbortMode: None)
+>  │    [Task] BTTask_ActivateAbility(GA_AI_Heal)
+>  │
+>  ├── [Sequence] Retreat (优先级 4)
+>  │    [Decorator] Blackboard: HealthPercent < 0.5 (FlowAbortMode: Both)
+>  │    [Task] BTTask_ActivateAbility(GA_AI_Dash)  ← Dash away
+>  │    [Task] MoveTo (CoverPosition from EQS)
+>  │
+>  ├── [Sequence] RangedAttack (优先级 5)
+>  │    [Decorator] Blackboard: HasAmmo == true (FlowAbortMode: LowerPriority)
+>  │    [Decorator] Blackboard: DistToTarget > 500 (FlowAbortMode: Both)
+>  │    [Task] BTTask_ActivateAbility(GA_AI_RangedAttack)
+>  │
+>  └── [Sequence] MeleeAttack (优先级 6 — 默认)
+>       [Decorator] Blackboard: DistToTarget < 300 (FlowAbortMode: Both)
+>       [Task] BTTask_ActivateAbility(GA_AI_MeleeAttack)
+> ```
+>
+> **5. FlowAbortMode 选择理由**：
+>
+> | Decorator | FlowAbortMode | 理由 |
+> |-----------|--------------|------|
+> | State.Dead | Both | 死亡是最高优先级——无论当前在做什么（Lower Priority 子节点 or 自身 Running 的 Action），死亡标签出现时立即中断一切。Both = Self + LowerPriority |
+> | State.Stunned | Both | 眩晕同样是全局中断——被眩晕时不能攻击、不能移动、不能治疗。Both 确保任何当前行为被中断 |
+> | HealthPercent < 0.3 (Heal) | LowerPriority Only | 如果已经在治疗中（Self Running），不需要 Abort 自己——继续完成当前治疗。但如果正在攻击/追击（Lower Priority），需要 Abort 切换到治疗 |
+> | HasAmmo (RangedAttack) | LowerPriority Only | 弹药用尽时：如果正在远程攻击（Self）→ 不 Abort（当前攻击应该完成）。如果正在做更低优先级的事 → 阻止进入该分支。注意：实际应用中应使用 `None` 或 `LowerPriority`——弹药在攻击过程中可能归零，但 Abort 当前攻击会让动画不完整 |
+> | DistToTarget (MeleeAttack) | Both | 距离变化需要同时影响 Self 和 LowerPriority。目标跑出近战范围时立即 Abort 近战攻击（Self）并切换到追击（通过 Selector 的下一个优先分支） |
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Level 1 客户端 AI 预测（Telegraph VFX 层）**
+>
+> ```cpp
+> // UTelegraphVFXComponent.h
+> UCLASS(ClassGroup=(AI), meta=(BlueprintSpawnableComponent))
+> class UTelegraphVFXComponent : public UActorComponent {
+>     GENERATED_BODY()
+> public:
+>     void ShowTelegraph(float Intensity);  // Intensity 0-1, 0=barely visible, 1=full danger
+>     void HideTelegraph();
+>     bool IsShowing() const { return bIsShowing; }
+>
+> private:
+>     UPROPERTY() UParticleSystemComponent* VFXComponent;
+>     UPROPERTY(EditDefaultsOnly) UParticleSystem* TelegraphVFX;
+>     UPROPERTY(EditDefaultsOnly) float MinIntensity = 0.3f;
+>     UPROPERTY(EditDefaultsOnly) float MaxIntensity = 1.0f;
+>     bool bIsShowing = false;
+> };
+>
+> // UTelegraphVFXComponent.cpp
+> void UTelegraphVFXComponent::ShowTelegraph(float Intensity) {
+>     if (!VFXComponent) {
+>         VFXComponent = UGameplayStatics::SpawnEmitterAttached(TelegraphVFX,
+>             GetOwner()->GetRootComponent());
+>     }
+>     float ClampedIntensity = FMath::Clamp(Intensity, MinIntensity, MaxIntensity);
+>     // 通过 Material Parameter 控制透明度/颜色强度
+>     VFXComponent->SetFloatParameter("Intensity", ClampedIntensity);
+>     VFXComponent->SetVisibility(true);
+>     bIsShowing = true;
+> }
+>
+> void UTelegraphVFXComponent::HideTelegraph() {
+>     if (VFXComponent) VFXComponent->SetVisibility(false);
+>     bIsShowing = false;
+> }
+> ```
+>
+> **客户端 Tick 集成**：
+> ```cpp
+> // AEnemyCharacter.cpp
+> void AEnemyCharacter::Tick(float DeltaTime) {
+>     Super::Tick(DeltaTime);
+>
+>     if (!IsLocallyControlled() && GetLocalRole() == ROLE_AutonomousProxy) {
+>         // 客户端预测逻辑 —— 每 6 帧执行一次（0.1s @ 60fps）
+>         PredictionFrameCounter++;
+>         if (PredictionFrameCounter % 6 != 0) return;
+>
+>         UpdateTelegraphPrediction();
+>     }
+> }
+>
+> void AEnemyCharacter::UpdateTelegraphPrediction() {
+>     APlayerCharacter* LocalPlayer = GetLocalPlayerCharacter();
+>     if (!LocalPlayer) { TelegraphVFX->HideTelegraph(); return; }
+>
+>     float DistToPlayer = FVector::Dist(GetActorLocation(), LocalPlayer->GetActorLocation());
+>     bool bFacingPlayer = IsFacingTarget(LocalPlayer);
+>     bool bIsAttacking = GetMesh()->GetAnimInstance()->IsAnyMontagePlaying(); // 当前是否在攻击动画
+>
+>     // 预测条件：在攻击范围内 + 面朝玩家 + 当前未在播放攻击动画
+>     if (DistToPlayer < AttackRange && bFacingPlayer && !bIsAttacking) {
+>         float DangerIntensity = 1.0f - (DistToPlayer / AttackRange); // 越近越危险
+>         TelegraphVFX->ShowTelegraph(DangerIntensity);
+>     } else {
+>         TelegraphVFX->HideTelegraph();
+>     }
+> }
+>
+> // 服务器校正 —— 当攻击动画通过网络复制到达时
+> void AEnemyCharacter::OnRep_AttackMontage() {
+>     // 无论预测是否正确，立即隐藏 telegraph VFX
+>     // 预测正确 → 玩家看到 VFX → 触发闪避 → 攻击动画出现 → VFX 消失（自然）
+>     // 预测错误 → 玩家看到 VFX → 攻击未发生 → VFX 在 0.1s 后自然消失（已足够快）
+>     TelegraphVFX->HideTelegraph();
+> }
+> ```
+>
+> **为什么 Level 1 预测性能开销可忽略**：
+> - 每 0.1s 执行一次（60fps 下每 6 帧）→ 每秒仅 10 次预测检查
+> - 每次检查：一次距离计算 + 一次朝向判断（Dot Product）+ 一次 AnimInstance 查询 = < 5μs
+> - 10 次 × 5μs = 50μs/s ≈ 帧预算的 0.0003%
+> - VFX 自身的渲染开销由 GPU 承担，不影响 CPU AI 预算
+> - 无网络开销——VFX 是纯客户端效果，预测结果不同步到服务器
 ## 4. 扩展阅读
 
 ### 官方文档

@@ -464,6 +464,442 @@ g++ -std=c++20 -O2 scope_guard.cpp -o scope_guard && ./scope_guard
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案：ScopedFile RAII 封装
+> ```cpp
+> // scoped_file.cpp — RAII 文件句柄封装
+> // 编译: g++ -std=c++20 -O2 scoped_file.cpp -o scoped_file && ./scoped_file
+>
+> #include <iostream>
+> #include <optional>
+> #include <string>
+> #include <cstdio>      // fopen, fclose, fread, fwrite, fseek, ftell
+> #include <cstring>
+> #include <vector>
+> #include <utility>
+>
+> class ScopedFile {
+> public:
+>     // 工厂函数：返回 optional，文件不存在时返回 nullopt
+>     static std::optional<ScopedFile> create(const char* path, const char* mode) {
+>         FILE* f = std::fopen(path, mode);
+>         if (!f) return std::nullopt;
+>         return ScopedFile(f);
+>     }
+>
+>     ~ScopedFile() noexcept {
+>         if (file_) {
+>             std::fclose(file_);
+>             std::cout << "  [ScopedFile] Closed file\n";
+>         }
+>     }
+>
+>     // 移动（noexcept — 必须）
+>     ScopedFile(ScopedFile&& other) noexcept : file_(other.file_) {
+>         other.file_ = nullptr;
+>     }
+>
+>     ScopedFile& operator=(ScopedFile&& other) noexcept {
+>         if (this != &other) {
+>             if (file_) std::fclose(file_);
+>             file_ = other.file_;
+>             other.file_ = nullptr;
+>         }
+>         return *this;
+>     }
+>
+>     // 禁止拷贝
+>     ScopedFile(const ScopedFile&) = delete;
+>     ScopedFile& operator=(const ScopedFile&) = delete;
+>
+>     // 读操作
+>     size_t read(void* buffer, size_t size, size_t count) {
+>         return std::fread(buffer, size, count, file_);
+>     }
+>
+>     std::string readAll() {
+>         size_t s = size();
+>         std::string content(s, '\0');
+>         std::fseek(file_, 0, SEEK_SET);
+>         std::fread(content.data(), 1, s, file_);
+>         return content;
+>     }
+>
+>     // 写操作
+>     size_t write(const void* buffer, size_t size, size_t count) {
+>         return std::fwrite(buffer, size, count, file_);
+>     }
+>
+>     size_t write(const std::string& text) {
+>         return std::fwrite(text.data(), 1, text.size(), file_);
+>     }
+>
+>     // 查询
+>     size_t size() {
+>         long pos = std::ftell(file_);
+>         std::fseek(file_, 0, SEEK_END);
+>         long sz = std::ftell(file_);
+>         std::fseek(file_, pos, SEEK_SET);
+>         return static_cast<size_t>(sz);
+>     }
+>
+>     bool valid() const noexcept { return file_ != nullptr; }
+>
+> private:
+>     explicit ScopedFile(FILE* f) noexcept : file_(f) {}
+>     FILE* file_ = nullptr;
+> };
+>
+> int main() {
+>     std::cout << "=== ScopedFile RAII Demo ===\n\n";
+>
+>     // 1. 创建文件并写入
+>     auto file = ScopedFile::create("test_output.txt", "w");
+>     if (!file) {
+>         std::cerr << "Failed to create file!\n";
+>         return 1;
+>     }
+>     file->write("Hello, RAII!\n");
+>     file->write("This is a test file.\n");
+>     std::cout << "Written to file, size=" << file->size() << '\n';
+>
+>     // 2. 移动到 vector 中（验证移动语义）
+>     std::vector<ScopedFile> fileList;
+>     fileList.push_back(std::move(*file));
+>     std::cout << "After move: file.valid()=" << file->valid()
+>               << ", fileList[0].valid()=" << fileList[0].valid() << '\n';
+>
+>     // 3. 打开刚写入的文件读取
+>     auto readFile = ScopedFile::create("test_output.txt", "r");
+>     if (readFile) {
+>         std::cout << "Reading back:\n" << readFile->readAll();
+>     }
+>
+>     // fileList 和 readFile 析构 → 自动 fclose
+>     std::cout << "\n--- End of main: destructors run ---\n";
+>     std::remove("test_output.txt"); // 清理
+>     return 0;
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案：Profiler 范围插桩系统
+> ```cpp
+> // profiler_system.cpp — 引擎性能插桩系统
+> // 编译: g++ -std=c++20 -O2 -pthread profiler_system.cpp -o profiler_system && ./profiler_system
+>
+> #include <iostream>
+> #include <chrono>
+> #include <vector>
+> #include <string>
+> #include <unordered_map>
+> #include <mutex>
+> #include <thread>
+> #include <algorithm>
+> #include <iomanip>
+> #include <cassert>
+>
+> using Clock = std::chrono::steady_clock;
+> using TimePoint = Clock::time_point;
+>
+> // ===== 单个 Zone 的数据 =====
+> struct ZoneData {
+>     const char* name;
+>     int depth;
+>     int64_t duration_us;
+> };
+>
+> // ===== 全局 Profiler 单例 =====
+> class Profiler {
+> public:
+>     static Profiler& instance() {
+>         static Profiler p;
+>         return p;
+>     }
+>
+>     void pushZone(const char* name, TimePoint start, TimePoint end) {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         auto us = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+>         zones_.push_back({name, threadDepth_(),  us});
+>     }
+>
+>     void reset() {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         zones_.clear();
+>     }
+>
+>     void report() {
+>         std::lock_guard<std::mutex> lock(mutex_);
+>         std::cout << "\n=== Profiler Report ===\n";
+>         std::unordered_map<std::string, int64_t> totals;
+>         std::unordered_map<std::string, int> counts;
+>         for (const auto& z : zones_) {
+>             totals[z.name] += z.duration_us;
+>             counts[z.name]++;
+>         }
+>         std::cout << std::left << std::setw(30) << "Zone"
+>                   << std::right << std::setw(10) << "Calls"
+>                   << std::setw(12) << "Total(us)"
+>                   << std::setw(12) << "Avg(us)\n";
+>         std::cout << std::string(64, '-') << '\n';
+>         for (const auto& [name, total] : totals) {
+>             std::cout << std::left << std::setw(30) << name
+>                       << std::right << std::setw(10) << counts[name]
+>                       << std::setw(12) << total
+>                       << std::setw(12) << (total / counts[name]) << '\n';
+>         }
+>     }
+>
+>     // 每线程调用栈深度
+>     int& threadDepth_() {
+>         thread_local int depth = 0;
+>         return depth;
+>     }
+>
+> private:
+>     Profiler() = default;
+>     std::mutex mutex_;
+>     std::vector<ZoneData> zones_;
+> };
+>
+> // ===== ProfilerZone: RAII 性能插桩 =====
+> class ProfilerZone {
+> public:
+>     explicit ProfilerZone(const char* name) noexcept
+>         : name_(name), start_(Clock::now()) {
+>         ++Profiler::instance().threadDepth_();
+>     }
+>
+>     ~ProfilerZone() noexcept {
+>         auto end = Clock::now();
+>         Profiler::instance().pushZone(name_, start_, end);
+>         --Profiler::instance().threadDepth_();
+>     }
+>
+>     ProfilerZone(const ProfilerZone&) = delete;
+>     ProfilerZone& operator=(const ProfilerZone&) = delete;
+>
+> private:
+>     const char* name_;
+>     TimePoint start_;
+> };
+>
+> // 便捷宏（可选，Debug 构建启用插桩，Release 禁用）
+> #ifdef ENABLE_PROFILER
+>   #define PROFILE_ZONE(name) ProfilerZone _profile_zone_##__LINE__(name)
+> #else
+>   #define PROFILE_ZONE(name) ((void)0)
+> #endif
+>
+> // ===== 使用演示 =====
+> void processEntity(int id) {
+>     ProfilerZone zone("processEntity");
+>     volatile int sum = 0;
+>     for (int i = 0; i < 100000 * id; ++i) sum += i;
+> }
+>
+> void updatePhysics() {
+>     ProfilerZone zone("updatePhysics");
+>     for (int i = 0; i < 5; ++i) {
+>         processEntity(i + 1);  // 嵌套 zone
+>     }
+> }
+>
+> void renderFrame() {
+>     ProfilerZone zone("renderFrame");
+>     updatePhysics();
+>     volatile int sum = 0;
+>     for (int i = 0; i < 500000; ++i) sum += i;
+> }
+>
+> // ===== 基准测试：插桩开销 =====
+> void benchmarkProfilerOverhead() {
+>     std::cout << "\n=== Profiler Overhead Benchmark ===\n";
+>     constexpr int kRuns = 100000;
+>
+>     // 无插桩
+>     auto t1 = Clock::now();
+>     for (int i = 0; i < kRuns; ++i) {
+>         volatile int x = i * 2;
+>         (void)x;
+>     }
+>     auto noProfilerUs = std::chrono::duration_cast<std::chrono::microseconds>(
+>         Clock::now() - t1).count();
+>
+>     // 有插桩
+>     auto t2 = Clock::now();
+>     for (int i = 0; i < kRuns; ++i) {
+>         ProfilerZone zone("bench");
+>         volatile int x = i * 2;
+>         (void)x;
+>     }
+>     auto withProfilerUs = std::chrono::duration_cast<std::chrono::microseconds>(
+>         Clock::now() - t2).count();
+>
+>     double overheadNs = (withProfilerUs - noProfilerUs) * 1000.0 / kRuns;
+>     std::cout << "  Without profiler: " << noProfilerUs << " us / " << kRuns << " calls\n";
+>     std::cout << "  With profiler:    " << withProfilerUs << " us / " << kRuns << " calls\n";
+>     std::cout << "  Overhead per call: " << overheadNs << " ns\n";
+>     if (overheadNs < 100.0) {
+>         std::cout << "  ✅ Overhead < 100 ns — acceptable for engine use\n";
+>     } else {
+>         std::cout << "  ⚠️ Overhead >= 100 ns — consider batching or sampling\n";
+>     }
+> }
+>
+> int main() {
+>     std::cout << "=== Profiler System Demo ===\n";
+>
+>     // 模拟三个渲染帧
+>     for (int frame = 0; frame < 3; ++frame) {
+>         std::cout << "\n--- Frame " << frame << " ---\n";
+>         Profiler::instance().reset();
+>         renderFrame();
+>         Profiler::instance().report();
+>     }
+>
+>     benchmarkProfilerOverhead();
+>     return 0;
+> }
+> ```
+
+> [!info]- 练习 3 思考题参考答案：GPU 资源管理器
+> ````cpp
+> // gpu_resource_manager.cpp — RAII GPU 资源管理框架
+> // 编译: g++ -std=c++20 -O2 gpu_resource_manager.cpp -o gpu_resource_manager && ./gpu_resource_manager
+>
+> #include <iostream>
+> #include <vector>
+> #include <string>
+> #include <memory>
+> #include <cassert>
+> #include <set>
+> #include <typeindex>
+>
+> // 模拟 GPU API
+> namespace GPU {
+>     inline unsigned genTexture() { static unsigned id = 1000; return id++; }
+>     inline unsigned genBuffer()  { static unsigned id = 2000; return id++; }
+>     inline unsigned genShader()  { static unsigned id = 3000; return id++; }
+>     inline void delTexture(unsigned id) { std::cout << "  GPU: delTexture(" << id << ")\n"; }
+>     inline void delBuffer(unsigned id)  { std::cout << "  GPU: delBuffer(" << id << ")\n"; }
+>     inline void delShader(unsigned id)  { std::cout << "  GPU: delShader(" << id << ")\n"; }
+> }
+>
+> // ===== 基类：所有 GPU 资源 =====
+> class GPUResource {
+> public:
+>     GPUResource(unsigned id, const char* type)
+>         : id_(id), type_(type) {
+>         GPUResourceManager::instance().registerResource(this);
+>         std::cout << "  [RES] Created " << type_ << " #" << id_ << '\n';
+>     }
+>
+>     virtual ~GPUResource() {
+>         GPUResourceManager::instance().unregisterResource(this);
+>         std::cout << "  [RES] Destroyed " << type_ << " #" << id_ << '\n';
+>     }
+>
+>     GPUResource(const GPUResource&) = delete;
+>     GPUResource& operator=(const GPUResource&) = delete;
+>
+>     unsigned id() const { return id_; }
+>     const char* type() const { return type_; }
+>
+> protected:
+>     unsigned id_;
+>     const char* type_;
+> };
+>
+> // ===== 资源管理器单例 =====
+> class GPUResourceManager {
+> public:
+>     static GPUResourceManager& instance() {
+>         // 关键设计：static local → 在所有全局 GPUResource 之后析构
+>         static GPUResourceManager mgr;
+>         return mgr;
+>     }
+>
+>     void registerResource(GPUResource* r) {
+>         resources_.insert(r);
+>     }
+>
+>     void unregisterResource(GPUResource* r) {
+>         resources_.erase(r);
+>     }
+>
+>     ~GPUResourceManager() {
+>         if (!resources_.empty()) {
+>             std::cerr << "\n⚠️  LEAK DETECTED: " << resources_.size()
+>                       << " GPU resource(s) not released!\n";
+>             for (const auto* r : resources_) {
+>                 std::cerr << "  - " << r->type() << " #" << r->id() << '\n';
+>             }
+>             // assert(false && "GPU resources leaked!");
+>         } else {
+>             std::cout << "\n✅ All GPU resources released cleanly.\n";
+>         }
+>     }
+>
+> private:
+>     GPUResourceManager() = default;
+>     std::set<GPUResource*> resources_;
+> };
+>
+> // ===== 具体 GPU 资源类型 =====
+> class GPUTexture : public GPUResource {
+> public:
+>     explicit GPUTexture() : GPUResource(GPU::genTexture(), "Texture") {}
+>     ~GPUTexture() override { GPU::delTexture(id_); }
+>     GPUTexture(GPUTexture&&) noexcept = default;   // OK: 基类 id 被拷贝，但析构仍正确
+>     GPUTexture& operator=(GPUTexture&&) noexcept = default;
+> };
+>
+> class GPUBuffer : public GPUResource {
+> public:
+>     explicit GPUBuffer() : GPUResource(GPU::genBuffer(), "Buffer") {}
+>     ~GPUBuffer() override { GPU::delBuffer(id_); }
+>     GPUBuffer(GPUBuffer&&) noexcept = default;
+>     GPUBuffer& operator=(GPUBuffer&&) noexcept = default;
+> };
+>
+> class GPUShader : public GPUResource {
+> public:
+>     explicit GPUShader() : GPUResource(GPU::genShader(), "Shader") {}
+>     ~GPUShader() override { GPU::delShader(id_); }
+>     GPUShader(GPUShader&&) noexcept = default;
+>     GPUShader& operator=(GPUShader&&) noexcept = default;
+> };
+>
+> // ===== 说明析构顺序 =====
+> // GPUResourceManager 使用 static local (Meyer's Singleton)，保证在
+> // 所有全局/static GPUResource 之后析构（C++ 标准保证 static local
+> // 按构造的逆序析构，且在所有非局部 static 之后）。
+> // 但如果 GPUResource 是栈上变量（自动存储期），则一定在 main 返回前析构，
+> // 远早于 GPUResourceManager → 顺序正确。
+>
+> int main() {
+>     std::cout << "=== GPU Resource Manager Demo ===\n\n";
+>
+>     {
+>         std::cout << "--- Creating resources ---\n";
+>         GPUTexture tex;
+>         GPUBuffer buf;
+>         GPUShader shader;
+>
+>         std::cout << "\n--- Leaving scope: resources auto-destruct ---\n";
+>     }  // 所有资源在这里析构
+>
+>     // 运行到此处，GPUResourceManager::~GPUResourceManager() 检查通过
+>     std::cout << "\n=== End of main ===\n";
+>     return 0;
+>     // 此后 GPUResourceManager 析构 → 检查泄漏
+> }
+> ````
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了编译和测试，或分析得出了合理结论，就是正确的。
+
 ## 4. 扩展阅读
 
 - **[必读] C++ Reference — RAII:** https://en.cppreference.com/w/cpp/language/raii — RAII 的标准定义

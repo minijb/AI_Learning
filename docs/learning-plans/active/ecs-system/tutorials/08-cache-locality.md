@@ -355,6 +355,187 @@ g++ -std=c++17 -O2 example.cpp -o example && ./example
 2. 分析为什么 SoA 版本的未命中更少
 3. 尝试手动预取（`__builtin_prefetch`）改善 AoS 版本
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **测试 1.1：热/冷分离——向 EntityAoS 添加 DebugInfo 字段**
+>
+> ```cpp
+> // 100 字节的冷数据（很少访问）
+> struct DebugInfo {
+>     char name[64];
+>     char tag[32];
+>     int  debugFlags;
+> };
+> static_assert(sizeof(DebugInfo) == 100, "padding check");
+>
+> // AoS 膨胀版（热数据 + 冷数据混在一起）
+> struct EntityAoSFat {
+>     Position pos;       // 12B
+>     Velocity vel;       // 12B
+>     Health   hp;        // 8B
+>     DebugInfo debug;    // 100B  ← 冷数据拖慢遍历
+> };
+> // sizeof(EntityAoSFat) = 132 字节 → 每个缓存行只装 0.48 个实体
+>
+> // 测试代码
+> std::vector<EntityAoSFat> aos_fat(N);
+> // ... 初始化 ...
+>
+> double aos_fat_time = measure_ns([&]() {
+>     for (size_t i = 0; i < N; i++) {
+>         aos_fat[i].pos.x += aos_fat[i].vel.dx * DT;
+>         aos_fat[i].pos.y += aos_fat[i].vel.dy * DT;
+>     }
+> }, ITERATIONS);
+> print_result("AoS+冷数据 (132B/entity)", aos_fat_time, N);
+> ```
+>
+> **预期结果**：AoS+冷数据 比原始 AoS（32B）慢 **3-4 倍**。虽然 MovementSystem 只用 8 字节（Position.x + Velocity.dx），但 CPU 必须把整个 132 字节拖入缓存。
+>
+> **热/冷分离解决方案**：
+> ```cpp
+> struct EntityHot { Position pos; Velocity vel; Health hp; };  // 32B 热数据
+> std::vector<EntityHot> hot(N);
+> std::vector<DebugInfo> cold(N);  // 100B 冷数据独立存储
+> ```
+> 遍历热数据时完全不碰冷数据——缓存利用率回到最优。
+>
+> **测试 1.2：混合访问——同时更新所有字段**
+>
+> ```cpp
+> // AoS 全字段访问
+> double aos_all_time = measure_ns([&]() {
+>     for (size_t i = 0; i < N; i++) {
+>         aos[i].pos.x += aos[i].vel.dx * DT;
+>         aos[i].pos.y += aos[i].vel.dy * DT;
+>         aos[i].hp.current -= 1;  // 额外访问 Health
+>     }
+> }, ITERATIONS);
+>
+> // SoA 全字段访问
+> double soa_all_time = measure_ns([&]() {
+>     for (size_t i = 0; i < N; i++) {
+>         soa.positions[i].x += soa.velocities[i].dx * DT;
+>         soa.positions[i].y += soa.velocities[i].dy * DT;
+>         soa.healths[i].current -= 1;
+>     }
+> }, ITERATIONS);
+> ```
+>
+> **预期结果**：当访问全部字段时，AoS 和 SoA 的差距缩小——AoS 中的 32 字节几乎全被使用（浪费率 ~0）。如果 System 需要实体的"所有数据"（如序列化、网络同步），AoS 可能更优——一个缓存行包含完整实体。**关键教训**：选择 AoS 还是 SoA 取决于访问模式，不是一成不变。
+
+> [!tip]- 练习 2 参考答案
+> **多线程伪共享测试程序**：
+>
+> ```cpp
+> #include <thread>
+> #include <atomic>
+> #include <chrono>
+>
+> const int NUM_THREADS = 4;
+> const int INCREMENTS = 10'000'000;
+>
+> // ===== 版本 1：紧邻计数器（同一缓存行）=====
+> void test_false_sharing() {
+>     int counters[NUM_THREADS] = {0};  // 所有计数器在同一/相邻缓存行
+>     std::thread threads[NUM_THREADS];
+>
+>     auto start = Clock::now();
+>     for (int t = 0; t < NUM_THREADS; t++) {
+>         threads[t] = std::thread([&counters, t]() {
+>             for (int i = 0; i < INCREMENTS; i++)
+>                 counters[t]++;  // ← 每次写入使整个缓存行失效
+>         });
+>     }
+>     for (auto& th : threads) th.join();
+>     auto elapsed = std::chrono::duration_cast<ns>(Clock::now() - start).count();
+>
+>     std::cout << "伪共享版: " << elapsed / 1e6 << " ms\n";
+>     // 验证正确性
+>     for (int t = 0; t < NUM_THREADS; t++)
+>         std::cout << "  counter[" << t << "] = " << counters[t] << "\n";
+> }
+>
+> // ===== 版本 2：填充计数器（独立缓存行）=====
+> void test_no_false_sharing() {
+>     struct alignas(64) PaddedCounter {
+>         int value = 0;
+>         char padding[60];  // 确保每个实例独占 64B
+>     };
+>     PaddedCounter counters[NUM_THREADS];
+>     std::thread threads[NUM_THREADS];
+>
+>     auto start = Clock::now();
+>     for (int t = 0; t < NUM_THREADS; t++) {
+>         threads[t] = std::thread([&counters, t]() {
+>             for (int i = 0; i < INCREMENTS; i++)
+>                 counters[t].value++;
+>         });
+>     }
+>     for (auto& th : threads) th.join();
+>     auto elapsed = std::chrono::duration_cast<ns>(Clock::now() - start).count();
+>
+>     std::cout << "无伪共享版: " << elapsed / 1e6 << " ms\n";
+>     for (int t = 0; t < NUM_THREADS; t++)
+>         std::cout << "  counter[" << t << "] = " << counters[t].value << "\n";
+> }
+> ```
+>
+> **编译与运行**：
+> ```bash
+> g++ -std=c++17 -O2 -pthread false_sharing.cpp -o false_sharing && ./false_sharing
+> ```
+>
+> **预期结果**（4 核 CPU 上典型数值）：
+> - 伪共享版：~800-1500 ms（缓存行在 4 个核心间来回弹跳）
+> - 无伪共享版：~80-150 ms（每个核心独享缓存行，完全并行）
+> - 加速比：**5-15x**
+>
+> **为什么这么慢**：每线程每自增触发 MESI 协议的 Invalidate → 其他核心的缓存行失效 → 下次写入重新从 L3/内存加载 → 4 个线程在同一个缓存行上串行竞争。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Cachegrind 分析指南**：
+>
+> ```bash
+> # 编译（建议 -O0 以便符号对应）
+> g++ -std=c++17 -O0 -g example.cpp -o example_dbg
+>
+> # 运行 Cachegrind
+> valgrind --tool=cachegrind --branch-sim=yes ./example_dbg
+>
+> # 查看结果
+> cg_annotate cachegrind.out.XXXXX example.cpp
+> ```
+>
+> **关键指标解读**：
+> - `D1mr`（L1 数据读未命中）和 `D1mw`（L1 数据写未命中）：值越小越好
+> - `LLmr`（Last-Level 读未命中）：最贵的未命中，应尽可能接近 0
+>
+> **典型输出对比**：
+> ```
+> AoS MovementSystem 循环:
+>   D1mr:  ~12,500  (10万实体 / 8个实体每缓存行 ≈ 12,500次)
+>   LLmr:  ~12,500  (数据 > L1 32KB，全部落到 L3)
+>
+> SoA MovementSystem 循环:
+>   D1mr:  ~1,250   (16个float/缓存行 → 10万/16 ≈ 6,250次读 + 6,250次写)
+>   LLmr:  ~0       (40KB x 数据 + 40KB dx 数据 = 80KB < L3 8MB，全部命中 L3)
+> ```
+>
+> **手动预取改善 AoS 版本**：
+> ```cpp
+> for (size_t i = 0; i < N; i++) {
+>     // 预取下一个实体（提前两个位置，弥补内存延迟 ~200 cycles）
+>     if (i + 2 < N)
+>         __builtin_prefetch(&aos[i + 2], 0, 3);  // 读, 高时间局部性
+>
+>     aos[i].pos.x += aos[i].vel.dx * DT;
+>     aos[i].pos.y += aos[i].vel.dy * DT;
+> }
+> ```
+>
+> **效果**：可缩小 AoS 与 SoA 差距约 40-60%（因预先将未来数据拖入缓存），但无法完全消除差距——因为带宽仍浪费在无关字段上。SoA 的根本优势在于"不浪费带宽"。
 ---
 
 ## 4. 扩展阅读

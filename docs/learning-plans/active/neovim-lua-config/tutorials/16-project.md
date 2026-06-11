@@ -417,6 +417,183 @@ end)()
 
 ---
 
+## 5.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 添加 `todo-comments.nvim` 的详细步骤：
+>
+> 1. **插入位置**：在 `init.lua` 的 UI section（`-- ====== UI ======` 标记的 do 块），放在 colorscheme 配置之后、gitsigns 之前或之后均可，确保在 `do ... end` 块之内：
+>
+> ```lua
+> -- ==================================================================
+> -- UI
+> -- ==================================================================
+> do
+>   -- Colorscheme
+>   vim.pack.add { gh 'folke/tokyonight.nvim' }
+>   require('tokyonight').setup { styles = { comments = { italic = false } } }
+>   vim.cmd.colorscheme 'tokyonight-night'
+>
+>   -- TODO 注释高亮（新增）
+>   vim.pack.add { gh 'folke/todo-comments.nvim' }
+>   require('todo-comments').setup { signs = false }
+>
+>   -- Gitsigns（已有）
+>   ...
+> end
+> ```
+>
+> 2. **验证高亮效果**：在任意 Lua 文件中输入以下注释（注意关键词必须全大写）：
+> ```lua
+> -- TODO: 完成这个函数的错误处理
+> -- FIX: 这里的边界条件有 bug
+> -- HACK: 临时绕过 nvim-treesitter 的 Windows 编译问题
+> -- WARNING: 此函数在 Neovim 0.11 上行为不同
+> -- NOTE: 这个配置项的值来自上游 kickstart
+> ```
+> 每个关键词（TODO、FIX、HACK、WARNING、NOTE）应有不同的高亮颜色。
+>
+> 3. **Telescope 集成**：todo-comments 自带 Telescope 扩展——可以用 `<leader>st` (`:TodoTelescope`) 搜索项目中所有 TODO 注释。如果需要映射，在 Telescope section 添加：
+> ```lua
+> vim.keymap.set('n', '<leader>st', '<cmd>TodoTelescope<CR>', { desc = 'Search TODOs' })
+> ```
+
+> [!tip]- 练习 2 参考答案
+> 配置 conform.nvim 按文件类型自动格式化的完整方案：
+>
+> ```lua
+> -- ==================================================================
+> -- FORMATTING
+> -- ==================================================================
+> do
+>   vim.pack.add { gh 'stevearc/conform.nvim' }
+>   require('conform').setup {
+>     notify_on_error = false,
+>     default_format_opts = { lsp_format = 'fallback' },
+>
+>     -- 按文件类型配置自动格式化（新增）
+>     format_on_save = function(bufnr)
+>       -- 获取当前 buffer 的文件类型
+>       local ft = vim.bo[bufnr].filetype
+>
+>       -- Lua 文件：自动格式化，超时 500ms
+>       if ft == 'lua' then
+>         return { timeout_ms = 500, lsp_format = 'fallback' }
+>       end
+>
+>       -- Python 文件：自动格式化（假设安装了 ruff 或 black）
+>       if ft == 'python' then
+>         return { timeout_ms = 800, lsp_format = 'fallback' }
+>       end
+>
+>       -- 其他文件类型：不自动格式化（返回 nil = 禁用）
+>       -- 如果需要全局启用，取消下面的注释：
+>       -- return { timeout_ms = 500, lsp_format = 'fallback' }
+>     end,
+>   }
+>   vim.keymap.set({ 'n', 'v' }, '<leader>f',
+>     function() require('conform').format { async = true } end,
+>     { desc = '[F]ormat buffer' })
+> end
+> ```
+>
+> **验证方法**：
+> 1. 打开一个 Lua 文件，故意打乱缩进（如添加多余空格、不规则的换行）
+> 2. 执行 `:w` 保存——stylua 应自动修复缩进和格式
+> 3. 如果没有生效，检查 `:ConformInfo` — 确认 `stylua` 被识别为可用 formatter
+>
+> **`format_on_save` 的返回规则**：
+> - 返回 `false` 或 `nil`：当前 buffer 不自动格式化
+> - 返回一个 table：按表中的选项执行格式化
+> - `timeout_ms` 防止格式化卡住编辑器（LSP formatter 在大型文件中可能很慢）
+> - `lsp_format = 'fallback'`：优先使用 LSP 的 formatting 能力，如果 LSP 不支持则 fallback 到 conform 配置的其他 formatter
+
+> [!tip]- 练习 3 参考答案
+> 将 LSP section 提取为独立模块 `lua/config/lsp.lua`：
+>
+> ```lua
+> -- lua/config/lsp.lua
+> -- 将 init.lua 中整个 LSP do 块的内容移到这里
+>
+> return (function()
+>   vim.pack.add { gh 'j-hui/fidget.nvim' }
+>   require('fidget').setup {}
+>
+>   vim.api.nvim_create_autocmd('LspAttach', {
+>     group = vim.api.nvim_create_augroup('lsp-attach', { clear = true }),
+>     callback = function(ev)
+>       local map = function(keys, func, desc, mode)
+>         vim.keymap.set(mode or 'n', keys, func,
+>           { buffer = ev.buf, desc = 'LSP: ' .. desc })
+>       end
+>       map('grn', vim.lsp.buf.rename, '[R]e[n]ame')
+>       map('gra', vim.lsp.buf.code_action, 'Code [A]ction', { 'n', 'x' })
+>       map('grD', vim.lsp.buf.declaration, '[G]oto [D]eclaration')
+>
+>       local client = vim.lsp.get_client_by_id(ev.data.client_id)
+>       if client and client:supports_method('textDocument/documentHighlight', ev.buf) then
+>         local aug = vim.api.nvim_create_augroup('lsp-highlight-' .. ev.buf,
+>           { clear = true })
+>         vim.api.nvim_create_autocmd({ 'CursorHold', 'CursorHoldI' },
+>           { buffer = ev.buf, group = aug, callback = vim.lsp.buf.document_highlight })
+>         vim.api.nvim_create_autocmd({ 'CursorMoved', 'CursorMovedI' },
+>           { buffer = ev.buf, group = aug, callback = vim.lsp.buf.clear_references })
+>       end
+>
+>       if client and client:supports_method('textDocument/inlayHint', ev.buf) then
+>         map('<leader>th', function()
+>           vim.lsp.inlay_hint.enable(
+>             not vim.lsp.inlay_hint.is_enabled { bufnr = ev.buf })
+>         end, '[T]oggle Inlay [H]ints')
+>       end
+>     end,
+>   })
+>
+>   local servers = {
+>     stylua = {},
+>     lua_ls = {
+>       on_init = function(client)
+>         client.server_capabilities.documentFormattingProvider = false
+>       end,
+>       settings = { Lua = { format = { enable = false } } },
+>     },
+>     -- 添加你的语言
+>   }
+>
+>   vim.pack.add {
+>     gh 'neovim/nvim-lspconfig',
+>     gh 'mason-org/mason.nvim',
+>     gh 'mason-org/mason-lspconfig.nvim',
+>     gh 'WhoIsSethDaniel/mason-tool-installer.nvim',
+>   }
+>   require('mason').setup {}
+>   local ensure_installed = vim.tbl_keys(servers or {})
+>   require('mason-tool-installer').setup { ensure_installed = ensure_installed }
+>
+>   for name, server in pairs(servers) do
+>     vim.lsp.config(name, server)
+>     vim.lsp.enable(name)
+>   end
+> end)()
+> ```
+>
+> 在 `init.lua` 中将整个 LSP do 块替换为一行：
+> ```lua
+> require 'config.lsp'
+> ```
+>
+> **IIFE 模式解析**：`return (function() ... end)()` 是一个立即执行函数表达式（IIFE, Immediately Invoked Function Expression）。它创建一个局部作用域（替代原来的 `do ... end` 块），立即执行后返回。这保证了模块内的局部变量（`map`、`servers` 等）不会泄漏到全局，与 `do ... end` 块的行为完全一致。
+>
+> **拆分验证**：
+> 1. 备份 `init.lua` → `init.lua.bak`
+> 2. 创建 `lua/config/lsp.lua`（注意目录 `lua/config/` 需先创建）
+> 3. 修改 `init.lua`，用 `require 'config.lsp'` 替换 LSP do 块
+> 4. 重启 Neovim → 检查 `:checkhealth vim.lsp` → 确认 lua_ls 正常附着
+> 5. 功能测试：打开 `.lua` 文件 → 诊断应正常显示 → `<leader>f` 格式化应工作
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 6. 扩展阅读
 
 - [kickstart.nvim 完整仓库](https://github.com/nvim-lua/kickstart.nvim)

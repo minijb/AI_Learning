@@ -824,6 +824,264 @@ end
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 使用示例 A 的 table-based 引擎，完整的守卫 AI 行为树定义如下。关键设计：Selector 的三级优先级确保"逃跑 > 调查噪音 > 巡逻"。
+>
+> ```lua
+> -- 辅助函数：计算距离
+> local function distance(a, b)
+>     local dx, dy = a.x - b.x, a.y - b.y
+>     return math.sqrt(dx * dx + dy * dy)
+> end
+>
+> -- 守卫行为树 —— 三级优先级 Selector
+> local guard_tree = {
+>     type = "selector",
+>     children = {
+>         -- ===== 优先级 1：低血量逃跑 =====
+>         {
+>             type = "sequence",
+>             children = {
+>                 {
+>                     type = "condition",
+>                     check = function(agent, bb)
+>                         return agent.health < 30 and bb.nearest_threat ~= nil
+>                     end,
+>                 },
+>                 {
+>                     type = "action",
+>                     run = function(agent, bb)
+>                         local threat = bb.nearest_threat
+>                         if not threat then return "failure" end
+>                         -- 向远离威胁的方向移动
+>                         local dx = agent.x - threat.x
+>                         local dy = agent.y - threat.y
+>                         local dist = math.sqrt(dx * dx + dy * dy)
+>                         if dist > 200 then
+>                             return "success"  -- 已安全
+>                         end
+>                         -- 归一化方向并移动
+>                         local nx, ny = dx / dist, dy / dist
+>                         agent.x = agent.x + nx * agent.speed * bb.dt
+>                         agent.y = agent.y + ny * agent.speed * bb.dt
+>                         return "running"
+>                     end,
+>                 },
+>             },
+>         },
+>         -- ===== 优先级 2：调查噪音 =====
+>         {
+>             type = "sequence",
+>             children = {
+>                 {
+>                     type = "condition",
+>                     check = function(_, bb)
+>                         return bb.noise_position ~= nil
+>                     end,
+>                 },
+>                 -- 移动到噪音位置
+>                 {
+>                     type = "action",
+>                     run = function(agent, bb)
+>                         local np = bb.noise_position
+>                         if not np then return "failure" end
+>                         local d = distance(agent, np)
+>                         if d < 50 then  -- 到达噪音位置
+>                             -- 初始化观察计时器
+>                             if not agent._observe_timer then
+>                                 agent._observe_timer = 2.0
+>                             end
+>                             agent._observe_timer = agent._observe_timer - bb.dt
+>                             if agent._observe_timer <= 0 then
+>                                 agent._observe_timer = nil
+>                                 bb.noise_position = nil  -- 清除噪音
+>                                 return "success"
+>                             end
+>                             return "running"
+>                         end
+>                         -- 移向噪音
+>                         local dx, dy = np.x - agent.x, np.y - agent.y
+>                         agent.x = agent.x + (dx / d) * agent.speed * bb.dt
+>                         agent.y = agent.y + (dy / d) * agent.speed * bb.dt
+>                         return "running"
+>                     end,
+>                 },
+>             },
+>         },
+>         -- ===== 优先级 3：巡逻三个路径点 =====
+>         {
+>             type = "sequence",
+>             children = {
+>                 {
+>                     type = "action",
+>                     run = function(agent, bb)
+>                         if not agent.waypoints or #agent.waypoints == 0 then
+>                             return "failure"
+>                         end
+>                         local wp = agent.waypoints[agent.wp_index]
+>                         local d = distance(agent, wp)
+>                         if d < 50 then -- 到达路径点
+>                             -- 停顿 1 秒
+>                             if not agent._wait_timer then
+>                                 agent._wait_timer = 1.0
+>                             end
+>                             agent._wait_timer = agent._wait_timer - bb.dt
+>                             if agent._wait_timer <= 0 then
+>                                 agent._wait_timer = nil
+>                                 agent.wp_index = agent.wp_index % #agent.waypoints + 1
+>                                 return "success"
+>                             end
+>                             return "running"
+>                         end
+>                         -- 移向当前路径点
+>                         agent.x = agent.x + (wp.x - agent.x) / d * agent.speed * bb.dt
+>                         agent.y = agent.y + (wp.y - agent.y) / d * agent.speed * bb.dt
+>                         return "running"
+>                     end,
+>                 },
+>             },
+>         },
+>     },
+> }
+> ```
+>
+> **模拟验证（90 帧）**：伪代码驱动测试：
+> ```lua
+> local agent = { x=0, y=0, speed=100, health=100, waypoints={
+>     {x=100,y=0}, {x=100,y=100}, {x=0,y=100} }, wp_index=1 }
+> local bb = { dt=0.016, nearest_threat=nil, noise_position=nil }
+> -- 帧 0-30: 无人干扰 → 巡逻 A→B
+> -- 帧 30: 设置 bb.noise_position = {x=50, y=80}
+> -- 帧 30-50: 移向噪音位置（Selector 的 _last_running 跳到优先级 2）
+> -- 帧 50-60: 停顿观察 2 秒（10 帧 × 0.2s，调整 dt）
+> -- 帧 60: bb.noise_position = nil，恢复巡逻
+> -- 帧 70: agent.health = 20, bb.nearest_threat = {x=90, y=100}
+> -- 帧 70-90: 优先级 1 覆盖一切——远离威胁移动
+> ```
+>
+> **关键设计决策**：
+> - Selector 的 `_last_running` 实现在每次子节点返回 success/failure 时清除 `_last_running`，仅保留 running 状态。这确保"逃跑完成后"下一帧从头评估（恢复到巡逻/调查噪音）。
+> - 停顿计时器 (`_wait_timer`、`_observe_timer`) 存储在 agent 上而非闭包内——避免跨 agent 共享树时的状态污染。如果多 agent 共享树定义，每个 agent 通过 `deepcopy` 获得独立的 tree table。
+
+> [!tip]- 练习 2 参考答案
+> **1. 树定义文件 `guard_tree.lua`**：
+> ```lua
+> -- guard_tree.lua — 返回一个标准的 tree table
+> return {
+>     type = "selector",
+>     children = {
+>         -- ... 同练习 1 的树结构，但使用全局定义的辅助函数
+>     },
+> }
+> ```
+>
+> **2. `load_tree` 函数**：
+> ```lua
+> function load_tree(filepath)
+>     local ok, loader_or_err = pcall(loadfile, filepath)
+>     if not ok then
+>         print("[BT ERROR] Failed to load tree file: " .. tostring(loader_or_err))
+>         return nil
+>     end
+>     -- loader_or_err 现在是一个函数，chunk 内不能有语法错误（loadfile 已检查）
+>     local ok2, tree_or_err = pcall(loader_or_err)
+>     if not ok2 then
+>         print("[BT ERROR] Failed to execute tree file: " .. tostring(tree_or_err))
+>         return nil
+>     end
+>     if type(tree_or_err) ~= "table" then
+>         print("[BT ERROR] Tree file must return a table, got: " .. type(tree_or_err))
+>         return nil
+>     end
+>     return tree_or_err
+> end
+> ```
+>
+> **3. `reload_tree` 函数**：
+> ```lua
+> function reload_tree(bt_engine, filepath)
+>     local new_tree = load_tree(filepath)
+>     if not new_tree then return false end
+>     -- 保留旧引擎的 agent 和 blackboard 引用
+>     local old_agent = bt_engine.agent
+>     local old_bb = bt_engine.blackboard
+>     -- 替换根节点引用
+>     bt_engine.root = new_tree
+>     -- agent 和 bb 保持不变（它们是外部引用）
+>     bt_engine.agent = old_agent
+>     bt_engine.blackboard = old_bb
+>     -- 重置所有节点的 _last_running（新树无残留状态）
+>     BT.reset(bt_engine.root)
+>     print("[BT] Tree reloaded from: " .. filepath)
+>     return true
+> end
+> ```
+>
+> **4. 模拟循环中的热重载触发**：
+> ```lua
+> -- 每 300 帧自动热重载（模拟设计师保存文件）
+> local frame_count = 0
+> function update(dt)
+>     bb.dt = dt
+>     frame_count = frame_count + 1
+>     if frame_count % 300 == 0 then
+>         reload_tree(engine, "guard_tree.lua")
+>     end
+>     BT.tick(engine.root, agent, bb)
+> end
+> -- 或者按键触发（LÖVE2D 风格）：
+> function love.keypressed(key)
+>     if key == "r" then reload_tree(engine, "guard_tree.lua") end
+> end
+> ```
+>
+> **热重载后的行为验证**：修改 `guard_tree.lua` 中巡逻路径点顺序、逃跑阈值（30→40）、停顿时间等参数，按下 R 键后新行为应立刻生效。agent 当前位置、血量、Blackboard 内容不受影响——树结构变了但数据层不变。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **Lua-C++ 混合 BT 架构设计**：
+>
+> **1. C++ 侧需暴露给 Lua 的接口（≥5 个）**：
+> 1. `BT_RegisterTask(name, lua_fn_ref)` — 注册一个 Lua 函数引用作为可被行为树调用的 Task
+> 2. `BT_GetBBValue(key_name) → value` — 从 C++ Blackboard 读取值，类型自动转换（int/double/string/userdata）
+> 3. `BT_SetBBValue(key_name, value)` — 写入 C++ Blackboard 并触发 Observer 通知
+> 4. `BT_MoveTo(agent_ud, target_vec3)` — 发起寻路移动，返回 `"running"` 直到到达
+> 5. `BT_PlayAnimation(agent_ud, anim_name)` — 播放动画
+> 6. `BT_LineTrace(from_vec3, to_vec3) → hit_result` — 射线检测（用于视线检测、掩体查找）
+> 7. `BT_GetNearestEnemy(agent_ud, radius) → enemy_ud | nil` — 感知查询
+>
+> **2. Blackboard 跨语言访问的边界情况**：
+> - **类型转换**：Lua number → C++ 需区分 int vs float（Lua 5.3+ 有 integer subtype）；C++ userdata 指针 → Lua 用 `luaL_checkudata` + metatable。
+> - **生命周期**：Lua 侧通过 `__index` 读取的 userdata 必须在 C++ 侧存活——使用 `TWeakObjectPtr`（UE）或引用计数——避免悬垂指针。Lua GC 可能导致 C++ 对象被意外释放。
+> - **线程安全**：如果 AI tick 在游戏线程（通常如此），单线程方案安全。如果 BT 评估在 worker thread，需要锁或消息队列保护 Blackboard 读写——但跨 Lua state 的锁开销很大，推荐将 Lua 脚本调用和 Blackboard 访问都限制在主线程。
+>
+> **3. 80% C++ 节点 + 20% Lua 节点的 Tick 设计**：
+> C++ 树遍历为主，遇到 Lua 节点时调用 `lua_pcall`。关键优化：不是每帧都跨语言调用——在 C++ 层缓存 Lua 节点的"是否需要重新评估"：
+> ```
+> C++ Tick Loop:
+>   for each active node:
+>     if node.is_cpp:
+>       node->Tick(dt, bb)
+>     else:  // Lua node
+>       if node.last_status != Running or node.needs_reeval:
+>         lua_rawgeti(L, LUA_REGISTRYINDEX, node.lua_fn_ref)
+>         lua_pushuserdata(L, bb)
+>         lua_pcall(L, 1, 1, 0)
+>         status = lua_tostring(L, -1)
+>       // else skip — non-running Lua nodes don't need per-frame pcall
+> ```
+> 对于 Running 状态的 Lua Action，使用 `lua_getfield` + 缓存的方式减少 `lua_pcall` 的压栈开销。
+>
+> **4. Lua Action 返回 "running" 时 C++ 需维护的状态**：
+> C++ 引擎需要维护一个**节点索引**（标识树中的哪个 Lua 节点在 Running），而非 `lua_State` 的执行位置。因为：
+> - 行为树的 Running 语义是"下次 tick 从这个节点继续"，而不是"恢复 Lua 的执行"（不使用协程）。
+> - C++ 只需知道"哪个节点在 Running"，下次 tick 时重新调用该节点的 Lua 函数——Lua 函数应该是**纯函数**，每次调用检查 agent/bb 状态后返回当前状态。
+> - 如果使用协程风格（`coroutine.yield`），需要存储 `lua_State*` + 恢复位置，这会阻止 Lua 状态被其他 agent 复用。**推荐不用协程**——让 Lua 的 Action 函数每次被调用时都检查外部状态，返回 `"running"`，把状态（如计时器、路径进度）存在 agent 或 blackboard 上。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### LÖVE2D 行为树库

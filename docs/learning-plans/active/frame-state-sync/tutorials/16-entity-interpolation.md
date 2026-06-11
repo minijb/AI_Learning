@@ -1318,6 +1318,225 @@ return Interpolation
 
 **验收标准**：能通过滑动条实时观察参数变化对追踪行为的影响。成功找到至少一组临界阻尼参数。在注释中给出不同游戏场景推荐的参数范围（如 FPS vs MOBA vs 策略游戏）。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1：可视化插值测试器
+> #### 核心架构
+>
+> ```csharp
+> // VisualInterpolationTester.cs
+> public class VisualInterpolationTester : MonoBehaviour
+> {
+>     public Transform redCube;   // 无插值（直接跳到快照位置）
+>     public Transform blueCube;  // 插值渲染
+>     public int bufferSize = 2;  // 可调 0/1/2/3/4
+>
+>     private InterpolationSystem _interpSys;
+>     private float _timer;
+>     private Vector3 _randomWalkPos = Vector3.zero;
+>     private Vector3 _randomWalkVel;
+>     private uint _tick;
+>
+>     void Start()
+>     {
+>         _interpSys = new InterpolationSystem();
+>         _interpSys.SetServerTickRate(10f);
+>         _interpSys.SetInterpolationBuffer(bufferSize);
+>     }
+>
+>     void Update()
+>     {
+>         _timer += Time.deltaTime;
+>         // 每 100ms (10Hz) 生成一个新的随机游走位置
+>         if (_timer >= 0.1f)
+>         {
+>             _timer -= 0.1f;
+>             _randomWalkVel += new Vector3(
+>                 Random.Range(-0.5f, 0.5f), 0, Random.Range(-0.5f, 0.5f));
+>             _randomWalkVel = Vector3.ClampMagnitude(_randomWalkVel, 2f);
+>             _randomWalkPos += _randomWalkVel * 0.1f;
+>             _tick++;
+>
+>             // 喂入插值系统
+>             _interpSys.OnStateSnapshotReceived(new EntityStateSnapshot
+>             {
+>                 entityId = 1, serverTick = _tick,
+>                 timestamp = Time.time,
+>                 position = _randomWalkPos,
+>                 velocity = _randomWalkVel
+>             });
+>
+>             // 红色立方体：直接瞬移（无插值）
+>             redCube.position = _randomWalkPos;
+>         }
+>
+>         // 蓝色立方体：从插值系统获取平滑位置
+>         if (_interpSys.TryGetRenderPosition(1, out Vector3 smoothPos))
+>             blueCube.position = smoothPos;
+>     }
+>
+>     // UI 按钮切换缓冲大小
+>     public void SetBufferSize(int size)
+>     {
+>         bufferSize = size;
+>         _interpSys.SetInterpolationBuffer(size);
+>     }
+> }
+> ```
+>
+> #### 验收标准与预期现象
+>
+> | 缓冲大小 | 红色 Cube | 蓝色 Cube | 延迟感知 |
+> |---------|----------|-----------|---------|
+> | 0 帧 | 瞬移跳变 | 同红色（无数据可插） | 0ms |
+> | 1 帧 | 瞬移跳变 | 在两个快照间 Lerp（但仍有跳变初段） | ~50ms @10Hz |
+> | 2 帧 | 瞬移跳变 | 平滑过渡 | ~100ms |
+> | 3 帧 | 瞬移跳变 | 非常平滑 | ~150ms |
+> | 4 帧 | 瞬移跳变 | 极其平滑但明显滞后 | ~200ms |
+>
+> **截图要点**：同一时刻截取两个 Cube 的位置并行对比。缓冲=0 时蓝红重合；缓冲=4 时蓝色明显落后红色。
+
+> [!tip]- 练习 2：Dead Reckoning 误差分析与自动降级
+> #### 实现要点
+>
+> **1. 误差记录与展示**
+>
+> ```csharp
+> // 在 InterpolationSystem 中添加误差追踪
+> private Queue<float> _recentErrors = new(); // 最近 3 次修正误差
+> private List<float> _errorHistory = new();   // 完整误差曲线
+>
+> public void OnCorrected(Vector3 truePos, Vector3 predictedPos)
+> {
+>     float error = Vector3.Distance(truePos, predictedPos);
+>     _recentErrors.Enqueue(error);
+>     if (_recentErrors.Count > 3) _recentErrors.Dequeue();
+>     _errorHistory.Add(error);
+>
+>     // 自动降级判断
+>     float avgError = _recentErrors.Average();
+>     if (avgError > 1.0f && _deadReckoningEnabled)
+>     {
+>         _deadReckoningEnabled = false;
+>         Debug.Log($"[DR] 平均误差 {avgError:F2}m > 1m，关闭 Dead Reckoning");
+>     }
+>     else if (avgError < 0.3f && !_deadReckoningEnabled)
+>     {
+>         _deadReckoningEnabled = true;
+>         Debug.Log($"[DR] 平均误差 {avgError:F2}m < 0.3m，恢复 Dead Reckoning");
+>     }
+> }
+> ```
+>
+> **2. 误差曲线绘制**（用 LineRenderer）
+>
+> ```csharp
+> void UpdateErrorCurve()
+> {
+>     var lr = GetComponent<LineRenderer>();
+>     lr.positionCount = _errorHistory.Count;
+>     for (int i = 0; i < _errorHistory.Count; i++)
+>         lr.SetPosition(i, new Vector3(i * 0.1f, _errorHistory[i] * 2f, 0));
+> }
+> ```
+>
+> #### 分析要点
+>
+> - **误差峰值与速度突变对齐**：每隔 2s 改变速度和方向 → 在此后的 1-2 帧内，外推误差急剧增大（因为 Dead Reckoning 假设速度不变）。峰值出现时正是"最后一次已知速度"已经过时的时刻。
+> - **为什么 MOBA 少用 Dead Reckoning**：MOBA 中玩家频繁走 A（攻击移动）— 每 0.2-0.5 秒就改变一次方向。Dead Reckoning 的假设（速度恒定）持续被违反，外推几乎总是错误。反而"收到快照才更新"（配合较高 tickrate 如 30Hz）更简单可靠。
+> - **降级阈值 1m**：这是经验值。对 Dota2 类俯视角游戏，1m 已接近英雄模型的半个身位，玩家能明显感知"位置不对"。对 FPS，应降低到 0.3m。
+
+> [!tip]- 练习 3：多实体弹簧-阻尼系统调参工具
+> #### 参数调试器核心
+>
+> ```csharp
+> public class ShadowTuner : MonoBehaviour
+> {
+>     [System.Serializable]
+>     public struct ShadowConfig
+>     {
+>         public Transform shadowCube;
+>         public float stiffness;
+>         public float damping;
+>     }
+>
+>     public ShadowConfig[] shadows;          // 4 个影子
+>     public Transform logicEntity;           // 逻辑位置（正弦运动）
+>
+>     // 正弦运动参数
+>     public float amplitude = 5f;
+>     public float frequency = 1f;
+>
+>     private float _time;
+>     private Dictionary<Transform, Vector3> _shadowVels = new();
+>
+>     void Update()
+>     {
+>         _time += Time.deltaTime;
+>         // 15Hz 逻辑位置更新（每 1/15s 移动逻辑实体）
+>         Vector3 logicPos = new Vector3(
+>             amplitude * Mathf.Sin(frequency * _time),
+>             0,
+>             amplitude * Mathf.Cos(frequency * _time));
+>         logicEntity.position = logicPos;
+>
+>         // 每个影子独立弹簧-阻尼追踪
+>         foreach (var cfg in shadows)
+>         {
+>             if (!_shadowVels.ContainsKey(cfg.shadowCube))
+>                 _shadowVels[cfg.shadowCube] = Vector3.zero;
+>
+>             Vector3 vel = _shadowVels[cfg.shadowCube];
+>             Vector3 displacement = logicPos - cfg.shadowCube.position;
+>             Vector3 accel = displacement * cfg.stiffness - vel * cfg.damping;
+>
+>             vel += accel * Time.deltaTime;
+>             cfg.shadowCube.position += vel * Time.deltaTime;
+>             _shadowVels[cfg.shadowCube] = vel;
+>         }
+>     }
+>
+>     // GUI 滑条实时调整参数
+>     void OnGUI()
+>     {
+>         for (int i = 0; i < shadows.Length; i++)
+>         {
+>             float y = 10 + i * 60;
+>             GUI.Label(new Rect(10, y, 80, 20), $"Shadow {i+1}");
+>             shadows[i].stiffness = GUI.HorizontalSlider(
+>                 new Rect(90, y, 150, 20), shadows[i].stiffness, 1f, 50f);
+>             shadows[i].damping = GUI.HorizontalSlider(
+>                 new Rect(90, y + 25, 150, 20), shadows[i].damping, 1f, 50f);
+>         }
+>     }
+> }
+> ```
+>
+> #### 关键分析
+>
+> **临界阻尼条件**：`damping² = 4 × stiffness`（对于二阶线性系统）。例如 stiffness=25, damping=10 恰为临界阻尼。但为考虑离散时间步长的影响，实际中需要略增 damping。
+>
+> **stiffness=5, damping=5 vs stiffness=20, damping=20**：
+> - 两者阻尼比 `ζ = damping / (2√stiffness)` 不同：前者 ζ≈1.12，后者 ζ≈2.24。
+> - 前者接近临界阻尼 —— 影子以最快速度趋近逻辑位置，几乎无振荡。
+> - 后者是过阻尼 —— 影子"粘滞"，追踪缓慢，延迟更大但极平滑。
+> - **效果不同！** 增大 stiffness 和 damping 同比例 ≠ 行为一致。阻尼平方与 stiffness 的比率才是关键。
+>
+> **推荐参数范围**：
+>
+> | 游戏类型 | stiffness | damping | 说明 |
+> |---------|-----------|---------|------|
+> | FPS（高频走位） | 15-25 | 8-12 | 紧密跟踪，允许微量振荡 |
+> | MOBA（折返走位） | 8-15 | 6-10 | 平衡跟踪与平滑 |
+> | 策略/RTS | 3-8 | 4-8 | 平滑优先，延迟容忍 |
+> | 过场动画摄像机 | 20-30 | 10-15 | 精确跟踪但无振荡（临界阻尼） |
+
+> [!note] 答案使用方式
+> 以上参考答案提供的是**实现思路和关键代码片段**，而非可直接复制编译的完整脚本。建议：
+>
+> - 练习 1 着重理解"插值缓冲引入的延迟 = bufferSize × tickInterval"这个关系
+> - 练习 2 着重理解误差曲线的形状——峰值出现在速度/方向突变时，而非突变前
+> - 练习 3 尝试手动调到临界阻尼：让影子在逻辑位置改变后恰好不振荡地追上——这是面试中常见的"调参直觉"测试
 ---
 
 ## 4. 扩展阅读

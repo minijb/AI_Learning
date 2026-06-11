@@ -829,6 +829,288 @@ g++ -std=c++20 -fcoroutines -pthread -o ex3 ex3.cpp && ./ex3
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> #include <coroutine>
+> #include <iostream>
+> #include <string>
+> 
+> struct LoggingAwaiter {
+>     std::string label;
+>     int result_value;
+> 
+>     bool await_ready() const noexcept { return false; }
+> 
+>     void await_suspend(std::coroutine_handle<> h) {
+>         // 打印挂起信息并保存 handle 供外部恢复
+>         std::cout << "[" << label << "] suspended\n";
+>         saved_handle = h;  // 全局保存，main 中恢复
+>     }
+> 
+>     int await_resume() const noexcept {
+>         std::cout << "[" << label << "] resumed\n";
+>         return result_value;  // co_await 表达式的返回值
+>     }
+> };
+> 
+> // 全局 handle，简化示例（生产代码应封装在 promise_type 中）
+> std::coroutine_handle<> saved_handle;
+> 
+> // --- 最小协程返回类型（仅用于演示 awaiter） ---
+> struct Task {
+>     struct promise_type {
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_never initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_void() {}
+>         void unhandled_exception() { std::terminate(); }
+>     };
+> 
+>     std::coroutine_handle<promise_type> handle;
+>     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+>     ~Task() { if (handle) handle.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&&) = default;
+>     Task& operator=(Task&&) = default;
+> };
+> 
+> Task my_coroutine() {
+>     std::cout << "[coro] co_await \"first\" 前\n";
+>     int r1 = co_await LoggingAwaiter{"first", 100};
+>     std::cout << "[coro] 得到结果: " << r1 << "\n";
+> 
+>     std::cout << "[coro] co_await \"second\" 前\n";
+>     int r2 = co_await LoggingAwaiter{"second", 200};
+>     std::cout << "[coro] 得到结果: " << r2 << "\n";
+> 
+>     std::cout << "[coro] 结束\n";
+> }
+> 
+> int main() {
+>     std::cout << "[main] 启动\n";
+>     auto task = my_coroutine();   // 协程立即开始（initial_suspend = never）
+> 
+>     std::cout << "[main] 恢复\n";
+>     if (saved_handle) saved_handle.resume();  // 恢复第一次挂起
+> 
+>     std::cout << "[main] 恢复\n";
+>     if (saved_handle) saved_handle.resume();  // 恢复第二次挂起
+> }
+> ```
+> 
+> **关键点**：
+> - `await_suspend` 中保存 `coroutine_handle`——这是协程恢复的唯一入口
+> - `await_resume` 的返回值成为 `co_await` 表达式的结果
+> - `initial_suspend` 用 `suspend_never` 让协程立即执行到第一个 `co_await`
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> #include <coroutine>
+> #include <iostream>
+> #include <thread>
+> #include <chrono>
+> 
+> struct DelayAwaiter {
+>     int delay_ms;
+>     std::chrono::steady_clock::time_point start_time;
+> 
+>     bool await_ready() const noexcept { return false; }
+> 
+>     void await_suspend(std::coroutine_handle<> h) {
+>         // 记录开始时间，启动独立线程在 delay_ms 后恢复协程
+>         start_time = std::chrono::steady_clock::now();
+>         std::thread([h, ms = delay_ms] {
+>             std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+>             h.resume();  // 在独立线程中恢复协程
+>         }).detach();     // detach：线程自行结束，无需 join
+>     }
+> 
+>     void await_resume() {
+>         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+>             std::chrono::steady_clock::now() - start_time).count();
+>         std::cout << "[delay] resumed after " << elapsed << "ms\n";
+>     }
+> };
+> 
+> // --- 最小协程返回类型（同练习 1） ---
+> struct Task {
+>     struct promise_type {
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_never initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_void() {}
+>         void unhandled_exception() { std::terminate(); }
+>     };
+> 
+>     std::coroutine_handle<promise_type> handle;
+>     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+>     ~Task() { if (handle) handle.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&&) = default;
+>     Task& operator=(Task&&) = default;
+> };
+> 
+> Task my_coroutine() {
+>     std::cout << "[coro] 开始 co_await 500ms ...\n";
+>     co_await DelayAwaiter{500};
+>     std::cout << "[coro] 完成\n";
+> }
+> 
+> int main() {
+>     std::cout << "[main] 创建协程\n";
+>     auto task = my_coroutine();
+>     std::cout << "[main] 协程已挂起\n";
+> 
+>     // 协程在 delay 线程完成后会被自动恢复
+>     // 给足够时间让它完成（> 500ms）
+>     std::this_thread::sleep_for(std::chrono::milliseconds(600));
+> }
+> ```
+> 
+> **设计要点**：
+> - `await_suspend` 中 `detach()` 线程——线程自行结束，不阻塞 awaiter
+> - 使用 `std::chrono::steady_clock` 测量实际耗时（不受系统时间调整影响）
+> - **注意线程安全**：`h.resume()` 在另一个线程中调用，确保协程的 `promise_type` 支持多线程
+
+> [!tip]- 练习 3 参考答案
+> ```cpp
+> #include <coroutine>
+> #include <iostream>
+> #include <thread>
+> #include <mutex>
+> #include <condition_variable>
+> #include <queue>
+> 
+> // --- 跨线程恢复的基础设施 ---
+> std::mutex mtx;
+> std::condition_variable cv;
+> std::queue<std::coroutine_handle<>> ready_queue;  // 待恢复的协程队列
+> std::thread::id main_thread_id;
+> 
+> void enqueue_resume(std::coroutine_handle<> h) {
+>     {
+>         std::lock_guard lk(mtx);
+>         ready_queue.push(h);
+>     }
+>     cv.notify_one();
+> }
+> 
+> // --- 线程信息打印辅助 ---
+> std::string thread_str() {
+>     auto id = std::this_thread::get_id();
+>     std::ostringstream oss;
+>     oss << id;
+>     return oss.str();
+> }
+> 
+> // --- Awaiter：切换到新线程 ---
+> struct SwitchToNewThread {
+>     bool await_ready() const noexcept { return false; }
+> 
+>     void await_suspend(std::coroutine_handle<> h) {
+>         std::cout << "[awaiter] 线程 " << thread_str()
+>                   << " — switch_to_new_thread: await_suspend\n";
+>         // 在新线程中恢复协程
+>         std::thread([h] {
+>             h.resume();
+>         }).detach();
+>     }
+> 
+>     void await_resume() const noexcept {}
+> };
+> 
+> // --- Awaiter：切换回 main 线程 ---
+> struct SwitchBack {
+>     bool await_ready() const noexcept { return false; }
+> 
+>     void await_suspend(std::coroutine_handle<> h) {
+>         std::cout << "[awaiter] 线程 " << thread_str()
+>                   << " — switch_back: await_suspend，通知 main\n";
+>         // 将协程加入队列，通知 main 线程恢复
+>         enqueue_resume(h);
+>     }
+> 
+>     void await_resume() const noexcept {}
+> };
+> 
+> // --- 最小协程返回类型 ---
+> struct Task {
+>     struct promise_type {
+>         Task get_return_object() {
+>             return Task{std::coroutine_handle<promise_type>::from_promise(*this)};
+>         }
+>         std::suspend_never initial_suspend() { return {}; }
+>         std::suspend_always final_suspend() noexcept { return {}; }
+>         void return_void() {}
+>         void unhandled_exception() { std::terminate(); }
+>     };
+> 
+>     std::coroutine_handle<promise_type> handle;
+>     explicit Task(std::coroutine_handle<promise_type> h) : handle(h) {}
+>     ~Task() { if (handle) handle.destroy(); }
+>     Task(const Task&) = delete;
+>     Task& operator=(const Task&) = delete;
+>     Task(Task&&) = default;
+>     Task& operator=(Task&&) = default;
+> };
+> 
+> Task my_coroutine() {
+>     std::cout << "[coro]   线程 " << thread_str() << " — 在 main 线程\n";
+> 
+>     co_await SwitchToNewThread{};
+>     std::cout << "[coro]   线程 " << thread_str() << " — 现在在新线程\n";
+> 
+>     co_await SwitchBack{};
+>     std::cout << "[coro]   线程 " << thread_str() << " — 回到 main 线程！\n";
+> }
+> 
+> int main() {
+>     main_thread_id = std::this_thread::get_id();
+>     std::cout << "[main]   线程 " << thread_str() << " — 开始\n";
+> 
+>     auto task = my_coroutine();
+>     std::cout << "[main]   线程 " << thread_str() << " — 协程已离开 main 线程\n";
+> 
+>     // main 线程事件循环：等待协程恢复请求
+>     bool running = true;
+>     while (running && !task.handle.done()) {
+>         std::unique_lock lk(mtx);
+>         cv.wait(lk, [] { return !ready_queue.empty(); });
+> 
+>         while (!ready_queue.empty()) {
+>             auto h = ready_queue.front();
+>             ready_queue.pop();
+>             lk.unlock();
+> 
+>             std::cout << "[main]   线程 " << thread_str() << " — 收到通知, 恢复协程\n";
+>             h.resume();
+> 
+>             lk.lock();
+>         }
+>     }
+>     std::cout << "[main]   线程 " << thread_str() << " — 完成\n";
+> }
+> ```
+> 
+> **架构要点**：
+> 
+> - **消息队列 + condition_variable**：避免 busy-waiting，main 线程在 cv 上阻塞等待
+> - **协程路径**：`main thread → SwitchToNewThread (new thread) → SwitchBack (queue → main)`
+> - **SwitchToNewThread**：`await_suspend` 中启动新线程，新线程调用 `h.resume()` 恢复协程
+> - **SwitchBack**：`await_suspend` 中将 handle 入队，`cv.notify_one()` 唤醒 main 线程
+> - **线程安全**：`ready_queue` 由 `mutex` + `cv` 保护，确保多个 awaiter 并发入队安全
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 常见陷阱
 
 ### 陷阱 1：忘记 `resume()` → 协程泄漏

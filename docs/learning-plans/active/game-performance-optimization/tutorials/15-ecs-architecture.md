@@ -597,6 +597,135 @@ ECS 的 MovementUpdate 约快 27 倍。LifetimeUpdate 约快 29 倍。
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **添加 RenderSystem：**
+>
+> ```cpp
+> // 1. 定义 Component（纯数据 POD）
+> struct Renderable {
+>     uint32_t meshId;
+>     uint32_t materialId;
+> };
+>
+> // 2. RenderSystem — 收集 Position + Renderable 的实体
+> class RenderSystem : public ISystem {
+> public:
+>     void Execute(ComponentManager& cm, float dt) override {
+>         auto* positions = cm.GetArray<Position>();
+>         auto* renderables = cm.GetArray<Renderable>();
+>         if (!positions || !renderables) return;
+>
+>         size_t pos_count = positions->Size();
+>         size_t ren_count = renderables->Size();
+>
+>         // 方法 1: 双重循环 — O(N×M)，仅适合一方很小的情况
+>         // 方法 2: 对其中一个数组建 hash map (Entity → index)，O(N+M)
+>         // 方法 3 (推荐): 选较小的数组做 hash map
+>
+>         // 方法 2 实现：
+>         std::unordered_map<Entity, size_t> entity_to_pos;
+>         for (size_t i = 0; i < pos_count; ++i) {
+>             entity_to_pos[positions->GetEntity(i)] = i;
+>         }
+>
+>         size_t visible_count = 0;
+>         for (size_t i = 0; i < ren_count; ++i) {
+>             Entity e = renderables->GetEntity(i);
+>             auto it = entity_to_pos.find(e);
+>             if (it != entity_to_pos.end()) {
+>                 // 该实体同时拥有 Position 和 Renderable
+>                 const Position& pos = positions->Get(it->second);
+>                 const Renderable& ren = renderables->Get(i);
+>                 // 实际渲染：构建 draw call...
+>                 ++visible_count;
+>             }
+>         }
+>         std::cout << "Visible entities: " << visible_count << std::endl;
+>     }
+> };
+> ```
+>
+> **Join 两个 ComponentArray 的方法：**
+> 1. **Hash Map Join**（如上面实现）：将较小的 Array 的 Entity→Index 映射建 hash map，遍历较大的 Array 查询。O(N+M) 时间，O(min(N,M)) 额外空间。
+> 2. **排序合并 Join**：如果两个 Array 都按 Entity 排序（Archetype 存储天然保证），用双指针归并 O(N+M)，无需额外空间。
+> 3. **稀疏集直接索引**（EnTT 风格）：`sparse[entity]` 直接给出 dense 数组中的位置，O(1) 无需建 hash map。
+
+> [!tip]- 练习 2 参考答案
+> **Archetype 存储核心实现：**
+>
+> ```cpp
+> // Archetype = 一组 ComponentTypeID 的有序集合
+> struct Archetype {
+>     std::vector<ComponentTypeID> component_types;  // 已排序
+>     std::vector<Chunk*> chunks;
+> };
+>
+> // Chunk = 16KB 固定大小内存块，结构为:
+> // [EntityID[0]..EntityID[N]] [C0[0]..C0[N]] [C1[0]..C1[N]] ...
+> struct Chunk {
+>     static constexpr size_t CHUNK_SIZE = 16384;  // 16KB
+>     char     data[CHUNK_SIZE];
+>     uint32_t count = 0;     // 当前实体数
+>     uint32_t capacity;      // 最大实体数（由 component 组合大小决定）
+>     Archetype* archetype;
+> };
+>
+> // 实体添加 Component — 需要 Archetype 迁移
+> void EntityManager::AddComponent(Entity e, ComponentTypeID new_type) {
+>     Archetype* old_arch = entity_archetypes_[e];
+>     Archetype* new_arch = get_or_create_archetype(
+>         old_arch->component_types + new_type);  // 合并并排序
+>
+>     // 从旧 Chunk 拷贝数据到新 Chunk
+>     Chunk* new_chunk = new_arch->get_or_create_chunk();
+>     void* src = old_arch->get_entity_data(e);
+>     void* dst = new_chunk->allocate_slot();
+>     copy_components_except_new(src, dst, old_arch, new_arch, new_type);
+>
+>     // 从旧 Chunk 删除实体（swap-and-pop）
+>     old_arch->remove_entity(e);
+>     entity_archetypes_[e] = new_arch;
+> }
+>
+> // Archetype 迁移开销测量：
+> // 100K 实体批量添加一个 Component:
+> //   - 每个实体需要: 找到源数据 + 分配新槽位 + memcpy ~N bytes + swap-and-pop 旧槽位
+> //   - 总时间约 5-20ms（取决于 Component 大小）
+> //   - 如果逐个添加（非批量），每次迁移都触发 Chunk 级重排 → 更慢
+> ```
+>
+> **关键性能特征：**
+> - **Archetype 迁移本身是 O(实体数)**，因为数据必须物理拷贝。这是 Archetype 模型的主要代价。
+> - **但迁移之后的遍历极快**：同一 Archetype 的实体在 Chunk 中紧密排列，一次 cache line 加载多个实体的同一 Component。
+> - **批量操作缓解**：Unity DOTS 的 `EntityCommandBuffer` 将迁移推迟到帧末批量执行，且利用 `std::sort` + 批量 memcpy 优化。
+
+> [!tip]- 练习 3 参考答案
+> **三种 ECS 方案性能对比分析：**
+>
+> | 方案 | 存储模型 | 创建 100K 实体 | 遍历更新 | 添加 Component | 移除 Component |
+> |------|---------|---------------|---------|---------------|---------------|
+> | 本示例精简版 | Sparse Map（简化） | ~5ms | ~0.3ms | O(1) 快 | O(1) swap-pop |
+> | **EnTT** | Sparse Set（优化） | ~3ms | ~0.2ms | **O(1) 最快** | **O(1) 最快** |
+> | **Flecs** | Archetype | ~8ms | **~0.1ms** | O(实体数) 迁移 | O(实体数) 迁移 |
+>
+> **为什么 EnTT 的 Sparse Set 添加/移除快：**
+> - `sparse[entity]` 是一个索引，添加 = 设置索引 + push 到 dense 数组末尾 — 无需数据拷贝。
+> - 删除 = swap-and-pop dense 数组 + 更新 sparse 映射 — O(1)。
+>
+> **为什么 Flecs 的 Archetype 遍历快：**
+> - 所有拥有相同 Component 组合的实体在同一 Chunk 中，遍历时数据 100% 连续。
+> - Sparse Set 遍历时 Component 是连续的，但不同类型 Component 间的空间局部性差于 Archetype。
+>
+> **选择建议：**
+> - Component 频繁添加/移除 → EnTT (Sparse Set)
+> - Component 组合稳定、遍历是瓶颈 → Flecs (Archetype)
+> - 需要极致遍历性能 + 可接受迁移开销 → Unity DOTS (Archetype)
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 | 资源 | 说明 |

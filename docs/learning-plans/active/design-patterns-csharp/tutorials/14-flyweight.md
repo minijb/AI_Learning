@@ -880,6 +880,472 @@ public class Tree
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Concurrent;
+> using System.Collections.Generic;
+> using System.Linq;
+>
+> // ============================================
+> // TreeType — 内在状态享元（record 天然不可变）
+> // ============================================
+> public record TreeType(
+>     string Name,
+>     string BarkTexturePath,
+>     string LeafTexturePath,
+>     float MaxHeight,
+>     float LeafDensity
+> )
+> {
+>     // 纹理数据只加载一次（懒加载 + 缓存）
+>     private byte[]? _textureData;
+>
+>     public byte[] LoadTextures()
+>     {
+>         if (_textureData == null)
+>         {
+>             // 模拟从磁盘加载纹理（重量级操作，50KB）
+>             _textureData = new byte[1024 * 50];
+>             Array.Fill(_textureData, (byte)Name[0]);
+>         }
+>         return _textureData;
+>     }
+> }
+>
+> // ============================================
+> // Tree — 外在状态（每个实例独有）
+> // ============================================
+> public class Tree
+> {
+>     public TreeType Type { get; }       // 共享引用
+>     public float X { get; }
+>     public float Y { get; }
+>     public float Scale { get; }
+>     public float Rotation { get; }
+>
+>     public Tree(TreeType type, float x, float y, float scale = 1.0f, float rotation = 0f)
+>     {
+>         Type = type;
+>         X = x;
+>         Y = y;
+>         Scale = scale;
+>         Rotation = rotation;
+>     }
+> }
+>
+> // ============================================
+> // TreeTypeFactory — 线程安全享元工厂
+> // ============================================
+> public class TreeTypeFactory
+> {
+>     private readonly ConcurrentDictionary<string, TreeType> _types = new();
+>
+>     public TreeType GetTreeType(string name, string barkPath, string leafPath,
+>         float maxHeight, float leafDensity)
+>     {
+>         // 用名称作为唯一 key（同一树种共享同一 TreeType）
+>         return _types.GetOrAdd(name, _ =>
+>             new TreeType(name, barkPath, leafPath, maxHeight, leafDensity));
+>     }
+>
+>     public int Count => _types.Count;
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> var factory = new TreeTypeFactory();
+> var forest = new List<Tree>();
+>
+> // 预定义 20 种树类型
+> string[] treeNames = {
+>     "橡树", "松树", "桦树", "枫树", "杉树",
+>     "银杏", "梧桐", "柳树", "柏树", "槐树",
+>     "榆树", "樟树", "楠木", "红杉", "雪松",
+>     "白杨", "栗树", "榉树", "桉树", "铁杉"
+> };
+>
+> Random rng = new(42);
+>
+> // 创建 1,000,000 棵树，但只有 20 种 TreeType
+> const int TreeCount = 1_000_000;
+> for (int i = 0; i < TreeCount; i++)
+> {
+>     int typeIdx = i % treeNames.Length;
+>     string name = treeNames[typeIdx];
+>     var type = factory.GetTreeType(name,
+>         $"textures/{name}_bark.png",
+>         $"textures/{name}_leaf.png",
+>         maxHeight: 10f + rng.NextSingle() * 40f,
+>         leafDensity: rng.NextSingle());
+>
+>     forest.Add(new Tree(type,
+>         x: rng.NextSingle() * 10000f,
+>         y: rng.NextSingle() * 10000f,
+>         scale: 0.5f + rng.NextSingle() * 1.5f,
+>         rotation: rng.NextSingle() * 360f));
+> }
+>
+> // 内存对比
+> Console.WriteLine("=== 树渲染系统 — 享元模式 ===");
+> Console.WriteLine($"树木总数: {forest.Count:N0}");
+> Console.WriteLine($"TreeType 享元数: {factory.Count} (而非 {forest.Count:N0})");
+>
+> // 验证共享：第 0 棵和第 20 棵是同一种树，应共享同一个 TreeType
+> Console.WriteLine($"第 0 棵与第 20 棵共享同一 TreeType: " +
+>     $"{ReferenceEquals(forest[0].Type, forest[20].Type)}");
+>
+> // 用 GC.GetTotalMemory 验证实际内存占用
+> GC.Collect();
+> GC.WaitForPendingFinalizers();
+> GC.Collect();
+> long memAfter = GC.GetTotalMemory(true);
+>
+> // 估算
+> long perTypeTextureKB = 50; // 50KB 纹理
+> long typeMemoryKB = factory.Count * perTypeTextureKB;
+> long instanceEstimateKB = forest.Count * 80 / 1024; // ~80 字节/实例
+> long withoutFlyweightKB = forest.Count * perTypeTextureKB;
+>
+> Console.WriteLine($"\n内存估算:");
+> Console.WriteLine($"  享元模式: {typeMemoryKB}KB (类型纹理) + ~{instanceEstimateKB}KB (实例) ≈ {typeMemoryKB + instanceEstimateKB}KB");
+> Console.WriteLine($"  无享元:   {withoutFlyweightKB:N0}KB (每棵树独立纹理)");
+> Console.WriteLine($"  节省:     {withoutFlyweightKB - typeMemoryKB - instanceEstimateKB:N0}KB");
+> Console.WriteLine($"GC 后堆内存: {memAfter / 1024:N0}KB");
+> ```
+>
+> **关键点**：
+> - `record` 提供内置不可变性——`Name`、`BarkTexturePath` 等属性都是 `init`-only
+> - `ConcurrentDictionary.GetOrAdd` 保证线程安全：原子地"不存在则创建，存在则返回"
+> - 纹理加载使用懒初始化：`LoadTextures()` 首次调用才分配 50KB，若从未调用则不分配
+> - 1,000,000 棵树在循环中使用 `List<T>` 存储，每棵树 ~80 字节（引用 + 4 个 float）≈ 80MB，加上 20×50KB = 1MB 纹理 = 总计 ~81MB；无享元则为 20+ 50GB
+
+> [!tip]- 练习 2 参考答案
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+>
+> // ============================================
+> // ParticleEmitterConfig — 内在状态享元（不可变）
+> // ============================================
+> public record ParticleEmitterConfig(
+>     string Name,
+>     string TexturePath,
+>     float Lifetime,          // 粒子最大生存时间（秒）
+>     float InitialSpeed,      // 初始发射速度
+>     string ColorGradient,    // 颜色渐变描述（如 "red→yellow→white"）
+>     float EmissionRate       // 每秒发射粒子数
+> );
+>
+> // ============================================
+> // Particle（class 版）— 外在状态 + 享元引用
+> // ============================================
+> public class Particle
+> {
+>     public ParticleEmitterConfig Config { get; }  // 共享引用
+>     public float X { get; set; }
+>     public float Y { get; set; }
+>     public float Vx { get; set; }
+>     public float Vy { get; set; }
+>     public float RemainingLife { get; set; }      // 剩余生命
+>     public float CurrentAlpha { get; set; }       // 当前透明度
+>
+>     public Particle(ParticleEmitterConfig config, float x, float y,
+>         float vx, float vy, float life, float alpha = 1.0f)
+>     {
+>         Config = config;
+>         X = x; Y = y;
+>         Vx = vx; Vy = vy;
+>         RemainingLife = life;
+>         CurrentAlpha = alpha;
+>     }
+>
+>     public bool IsAlive => RemainingLife > 0;
+>
+>     public void Update(float deltaTime)
+>     {
+>         RemainingLife -= deltaTime;
+>         X += Vx * deltaTime;
+>         Y += Vy * deltaTime;
+>         // 透明度随生命周期衰减
+>         CurrentAlpha = Math.Max(0, RemainingLife / Config.Lifetime);
+>     }
+> }
+>
+> // ============================================
+> // ParticleEmitterConfigFactory — 享元工厂
+> // ============================================
+> public class ParticleEmitterConfigFactory
+> {
+>     private readonly Dictionary<string, ParticleEmitterConfig> _configs = new();
+>
+>     public ParticleEmitterConfig GetConfig(string name, string texture,
+>         float lifetime, float speed, string color, float rate)
+>     {
+>         if (!_configs.TryGetValue(name, out var config))
+>         {
+>             config = new ParticleEmitterConfig(name, texture, lifetime, speed, color, rate);
+>             _configs[name] = config;
+>         }
+>         return config;
+>     }
+>
+>     public int Count => _configs.Count;
+> }
+>
+> // ============================================
+> // 验证代码
+> // ============================================
+> var configFactory = new ParticleEmitterConfigFactory();
+>
+> // 定义 3 种发射器配置
+> var fireConfig = configFactory.GetConfig(
+>     "Fire", "textures/fire.png", lifetime: 2.0f, speed: 150f,
+>     color: "red→orange→yellow", rate: 200f);
+> var smokeConfig = configFactory.GetConfig(
+>     "Smoke", "textures/smoke.png", lifetime: 5.0f, speed: 30f,
+>     color: "gray→lightgray→transparent", rate: 50f);
+> var sparkConfig = configFactory.GetConfig(
+>     "Spark", "textures/spark.png", lifetime: 0.5f, speed: 300f,
+>     color: "white→yellow→orange", rate: 500f);
+>
+> // 每种发射器生成 33,333 个粒子，共 ~100,000 个
+> var particles = new List<Particle>();
+> Random rng = new(42);
+>
+> void SpawnParticles(ParticleEmitterConfig config, int count)
+> {
+>     for (int i = 0; i < count; i++)
+>     {
+>         particles.Add(new Particle(config,
+>             x: rng.NextSingle() * 800f,
+>             y: rng.NextSingle() * 600f,
+>             vx: (rng.NextSingle() - 0.5f) * config.InitialSpeed,
+>             vy: -rng.NextSingle() * config.InitialSpeed,
+>             life: rng.NextSingle() * config.Lifetime));
+>     }
+> }
+>
+> SpawnParticles(fireConfig, 33_333);
+> SpawnParticles(smokeConfig, 33_333);
+> SpawnParticles(sparkConfig, 33_334);
+>
+> Console.WriteLine("=== 粒子系统 — 享元模式 ===");
+> Console.WriteLine($"粒子总数: {particles.Count:N0}");
+> Console.WriteLine($"发射器配置数: {configFactory.Count} (而非 {particles.Count:N0})");
+>
+> // 验证共享
+> var fireParticles = particles.Where(p => p.Config.Name == "Fire").Take(3).ToList();
+> Console.WriteLine($"\n所有 Fire 粒子共享同一配置: " +
+>     $"{ReferenceEquals(fireParticles[0].Config, fireParticles[1].Config)}");
+>
+> // struct vs class 分析
+> Console.WriteLine($"\n--- struct vs class 分析 ---");
+> // class Particle: 每个 ~48 字节（引用类型开销 + 字段）× 100,000 ≈ 4.8MB
+> // struct Particle: 每个 ~40 字节 × 100,000 ≈ 4.0MB（连续数组，缓存友好）
+> // 享元引用在 struct 中仍然是指针（8 字节引用），不影响共享性
+> Console.WriteLine("Particle 为 class:  每个 ~48 字节 (堆分配，GC 压力)");
+> Console.WriteLine("Particle 为 struct: 每个 ~40 字节 (数组连续存储，缓存友好)");
+> Console.WriteLine("无论 struct/class，Config 引用都是指向堆上共享享元的指针");
+> ```
+>
+> **关键点**：
+> - `ParticleEmitterConfig` 使用 `record`——不可变，适合作为共享享元
+> - `Particle` 作为 class：每个粒子在堆上独立分配，GC 管理生命周期，100K 粒子 ≈ 4.8MB + 对象头开销
+> - 若 `Particle` 改为 struct：数组 `Particle[]` 将所有数据连续存储，缓存局部性极佳，且无 GC 压力
+> - struct 中的 `ParticleEmitterConfig` 引用仍是指向堆对象的指针（8 字节）—享元共享不受影响
+
+> [!tip]- 练习 3 参考答案（可选）
+>
+> ```csharp
+> using System;
+> using System.Collections.Generic;
+> using System.Diagnostics;
+> using BenchmarkDotNet.Attributes;
+> using BenchmarkDotNet.Running;
+> using BenchmarkDotNet.Configs;
+> using BenchmarkDotNet.Jobs;
+>
+> // ============================================
+> // 共享数据结构 — 两种实现共享同一个测试场景
+> // ============================================
+>
+> // 内在状态享元
+> public record GlyphFlyweight(char Symbol, string Font, int Size, byte[] GlyphData);
+>
+> // 无享元版本：每个"字符"对象包含全部数据
+> public class HeavyCharacter
+> {
+>     public char Symbol { get; }
+>     public string Font { get; } = "Consolas";
+>     public int Size { get; } = 14;
+>     public int X { get; }
+>     public int Y { get; }
+>     public ConsoleColor Color { get; }
+>     public byte[] GlyphData { get; }  // 每个实例独立持有
+>
+>     public HeavyCharacter(char symbol, int x, int y, ConsoleColor color)
+>     {
+>         Symbol = symbol;
+>         X = x; Y = y; Color = color;
+>         GlyphData = new byte[1024];     // 1KB 字形数据（每个实例独立）
+>         Array.Fill(GlyphData, (byte)symbol);
+>     }
+> }
+>
+> // 有享元版本：Context 持有享元引用
+> public class LightCharacter
+> {
+>     public GlyphFlyweight Flyweight { get; }
+>     public int X { get; }
+>     public int Y { get; }
+>     public ConsoleColor Color { get; }
+>
+>     public LightCharacter(GlyphFlyweight fw, int x, int y, ConsoleColor color)
+>     {
+>         Flyweight = fw; X = x; Y = y; Color = color;
+>     }
+> }
+>
+> // ============================================
+> // BenchmarkDotNet 基准测试
+> // ============================================
+> [MemoryDiagnoser]          // 测量内存分配
+> [SimpleJob(RuntimeMoniker.Net80)]
+> public class FlyweightBenchmark
+> {
+>     private const int N = 1_000_000;
+>
+>     private HeavyCharacter[] _heavyChars = null!;
+>     private LightCharacter[] _lightChars = null!;
+>
+>     [GlobalSetup]
+>     public void Setup()
+>     {
+>         var rng = new Random(42);
+>         const string text = "Hello World! Flyweight Pattern in C# .NET 8.0 Benchmark";
+>
+>         // 无享元：每个字符独立分配 1KB 字形 + 对象
+>         _heavyChars = new HeavyCharacter[N];
+>         for (int i = 0; i < N; i++)
+>         {
+>             _heavyChars[i] = new HeavyCharacter(
+>                 text[i % text.Length],  // 循环使用有限字符集
+>                 rng.Next(0, 1920),
+>                 rng.Next(0, 1080),
+>                 (ConsoleColor)rng.Next(1, 16));
+>         }
+>
+>         // 有享元：共享字形数据
+>         var factory = new Dictionary<char, GlyphFlyweight>();
+>         _lightChars = new LightCharacter[N];
+>
+>         for (int i = 0; i < N; i++)
+>         {
+>             char c = text[i % text.Length];
+>             if (!factory.TryGetValue(c, out var fw))
+>             {
+>                 var data = new byte[1024];
+>                 Array.Fill(data, (byte)c);
+>                 fw = new GlyphFlyweight(c, "Consolas", 14, data);
+>                 factory[c] = fw;
+>             }
+>             _lightChars[i] = new LightCharacter(fw,
+>                 rng.Next(0, 1920), rng.Next(0, 1080),
+>                 (ConsoleColor)rng.Next(1, 16));
+>         }
+>     }
+>
+>     [Benchmark(Description = "无享元 — 遍历 1M 对象")]
+>     public int IterateHeavy()
+>     {
+>         int sumX = 0;
+>         for (int i = 0; i < N; i++)
+>             sumX += _heavyChars[i].X;
+>         return sumX;
+>     }
+>
+>     [Benchmark(Description = "有享元 — 遍历 1M 对象")]
+>     public int IterateLight()
+>     {
+>         int sumX = 0;
+>         for (int i = 0; i < N; i++)
+>             sumX += _lightChars[i].X;
+>         return sumX;
+>     }
+>
+>     [Benchmark(Description = "无享元 — 访问 GlyphData")]
+>     public int AccessHeavyGlyph()
+>     {
+>         int sum = 0;
+>         for (int i = 0; i < N; i++)
+>             sum += _heavyChars[i].GlyphData[0];
+>         return sum;
+>     }
+>
+>     [Benchmark(Description = "有享元 — 访问 Flyweight.GlyphData")]
+>     public int AccessLightGlyph()
+>     {
+>         int sum = 0;
+>         for (int i = 0; i < N; i++)
+>             sum += _lightChars[i].Flyweight.GlyphData[0];
+>         return sum;
+>     }
+> }
+>
+> // 运行入口（注释掉以编译为标准 console 而非 benchmark runner）
+> // BenchmarkRunner.Run<FlyweightBenchmark>();
+>
+> // ============================================
+> // 简化版手动验证（无需 BenchmarkDotNet 也可运行）
+> // ============================================
+> Console.WriteLine("=== 手动内存对比 ===");
+> GC.Collect();
+> GC.WaitForPendingFinalizers();
+> GC.Collect();
+>
+> long before = GC.GetTotalMemory(true);
+>
+> // 创建 10,000 个 HeavyCharacter（可缩放到合理大小避免 OOM）
+> const int TestN = 10_000;
+> var heavy = new HeavyCharacter[TestN];
+> for (int i = 0; i < TestN; i++)
+>     heavy[i] = new HeavyCharacter('A', i, 0, ConsoleColor.White);
+>
+> GC.Collect();
+> long heavyMem = GC.GetTotalMemory(false) - before;
+> Console.WriteLine($"无享元 ({TestN:N0} 个对象): ~{heavyMem / 1024:N0}KB");
+>
+> heavy = null;
+> GC.Collect();
+>
+> long before2 = GC.GetTotalMemory(true);
+>
+> var fw = new GlyphFlyweight('A', "Consolas", 14, new byte[1024]);
+> var light = new LightCharacter[TestN];
+> for (int i = 0; i < TestN; i++)
+>     light[i] = new LightCharacter(fw, i, 0, ConsoleColor.White);
+>
+> GC.Collect();
+> long lightMem = GC.GetTotalMemory(false) - before2;
+> Console.WriteLine($"有享元 ({TestN:N0} 个对象): ~{lightMem / 1024:N0}KB");
+> Console.WriteLine($"内存节省: {(1 - (double)lightMem / heavyMem) * 100:F1}%");
+> ```
+>
+> **结论分析**：
+> 1. **内存节省**：无享元版本每个对象 1KB 字形 × 1M = 1GB；有享元版本仅 ~30 个字符的 1KB 字形 = 30KB，节省 >99%
+> 2. **遍历速度**：有享元版本稍快——LightCharacter 对象更小，CPU 缓存能容纳更多对象。HeavyCharacter 的 1KB `GlyphData` 可能跨越多个 cache line
+> 3. **访问 GlyphData**：有享元版本多了间接引用（`Flyweight.GlyphData`），但在大数据量下，享元的 GlyphData 在 L2/L3 缓存中命中率极高（反复访问同一对象），而 HeavyCharacter 的 GlyphData 散布在整个堆上
+> 4. **享元降低性能的场景**：当外在状态组合数 ≈ 实例总数（几乎没有可共享的内在状态），或享元工厂的字典查找开销超过内存节省时，享元无益甚至有害。典型反例：每个字符的位置、颜色都独一无二且字形数据极小时（<16 字节），享元的间接引用 + 字典查找开销反而拖慢性能
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [[04-factory-method|工厂方法模式]] — FlyweightFactory 就是工厂方法 + 缓存的具体化

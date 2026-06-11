@@ -234,6 +234,96 @@ lua table_demo.lua
 ### 练习 3: 统计词频（可选）
 写一个函数，接受一个字符串数组，返回一个 table，key 是单词，value 是出现次数。用 `pairs` 打印结果。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```lua
+> -- exercise1_array.lua
+> local nums = { 10, 20, 30, 40, 50 }
+>
+> -- 追加两个新数字
+> table.insert(nums, 60)
+> table.insert(nums, 70)
+>
+> -- 删除第 3 个元素（索引为 3，值为 30）
+> table.remove(nums, 3)
+>
+> -- 打印所有元素和长度
+> print("当前数组内容:")
+> for i, v in ipairs(nums) do
+>     print("  nums[" .. i .. "] = " .. v)
+> end
+> print("数组长度: " .. #nums)  -- 应为 6
+> ```
+>
+> **预期结果：** 删除 30 后数组变为 `{10, 20, 40, 50, 60, 70}`，长度 6。`table.remove` 会压缩数组，后续元素自动前移。
+
+> [!tip]- 练习 2 参考答案
+> ```lua
+> -- exercise2_plugin_config.lua
+> local plugin_config = {
+>     name = "nvim-cmp",
+>     lazy = false,
+>     dependencies = { "hrsh7th/cmp-nvim-lsp", "hrsh7th/cmp-buffer" },
+>     opts = {
+>         mapping = { ["<CR>"] = "confirm", ["<Tab>"] = "select_next" },
+>     },
+> }
+>
+> print("插件配置:")
+> for key, value in pairs(plugin_config) do
+>     if type(value) == "table" then
+>         -- 递归打印嵌套 table
+>         print("  " .. key .. ":")
+>         for k2, v2 in pairs(value) do
+>             if type(v2) == "table" then
+>                 print("    " .. k2 .. ":")
+>                 for k3, v3 in pairs(v2) do
+>                     print("      " .. k3 .. " = " .. v3)
+>                 end
+>             else
+>                 print("    " .. k2 .. " = " .. tostring(v2))
+>             end
+>         end
+>     else
+>         print("  " .. key .. " = " .. tostring(value))
+>     end
+> end
+> ```
+>
+> **关键点：** 键含特殊字符（如 `<CR>`）时必须用 `["<CR>"]` 方括号语法，不能用 `.` 语法。遍历嵌套 table 时需要判断 `type(value) == "table"` 来决定是否继续深入。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```lua
+> -- exercise3_wordcount.lua
+> local function word_count(words)
+>     local counts = {}
+>     for _, word in ipairs(words) do
+>         if counts[word] then
+>             counts[word] = counts[word] + 1
+>         else
+>             counts[word] = 1
+>         end
+>     end
+>     return counts
+> end
+>
+> -- 测试
+> local sample = { "lua", "neovim", "lua", "vim", "neovim", "lua" }
+> local result = word_count(sample)
+>
+> print("词频统计:")
+> for word, count in pairs(result) do
+>     print("  " .. word .. ": " .. count .. " 次")
+> end
+> -- 预期: lua: 3, neovim: 2, vim: 1
+> ```
+>
+> **技巧：** `counts[word]` 初值为 `nil`（等价于 `false`），所以 `if counts[word]` 可判断是否已存在该键。也可以写成 `counts[word] = (counts[word] or 0) + 1` 一行搞定。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

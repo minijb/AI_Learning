@@ -1768,6 +1768,507 @@ Raw -> Processed
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // GestureRecognizer.hpp —— 触屏手势识别
+>
+> #include <vector>
+> #include <unordered_map>
+> #include <chrono>
+>
+> // 触摸事件
+> struct TouchEvent {
+>     int fingerId;           // 手指ID（多点触摸区分）
+>     float x, y;             // 触摸位置
+>     uint64_t timestamp;     // 微秒时间戳
+>     bool pressed;           // true=按下, false=释放
+> };
+>
+> // 手势事件类型
+> enum class GestureType { Tap, LongPress, Swipe, Pinch, None };
+>
+> // 手势事件
+> struct GestureEvent {
+>     GestureType type;
+>     float x, y;             // 手势中心位置
+>     float dx, dy;           // 滑动方向 / 捏合变化量
+>     float duration;         // 手势持续时间(ms)
+>     float scale;            // 捏合缩放因子
+> };
+>
+> // 触摸历史轨迹
+> struct TouchTrace {
+>     int fingerId;
+>     float startX, startY;
+>     float lastX, lastY;
+>     uint64_t startTime;
+>     uint64_t lastTime;
+>     bool active;
+>     // 累计滑动距离
+>     float totalDistance() const {
+>         float dx = lastX - startX, dy = lastY - startY;
+>         return std::sqrt(dx*dx + dy*dy);
+>     }
+> };
+>
+> class GestureRecognizer {
+> public:
+>     // 状态机——用于区分点击和长按
+>     enum State { Idle, Touching, Holding };
+>
+>     // 配置参数
+>     float tapMaxDistance = 20.0f;       // 点击最大移动距离
+>     uint64_t longPressThreshold = 500;  // 长按阈值(ms)
+>     float swipeMinDistance = 80.0f;     // 滑动最小距离
+>     float swipeMinSpeed = 0.3f;         // 滑动最小速度(px/ms)
+>
+>     // 处理触摸事件，返回识别到的手势
+>     std::vector<GestureEvent> ProcessTouchEvents(
+>         const std::vector<TouchEvent>& touches,
+>         uint64_t currentTime)
+>     {
+>         std::vector<GestureEvent> gestures;
+>
+>         for (auto& t : touches) {
+>             if (t.pressed) {
+>                 // 手指按下：创建新轨迹
+>                 TouchTrace trace;
+>                 trace.fingerId = t.fingerId;
+>                 trace.startX = trace.lastX = t.x;
+>                 trace.startY = trace.lastY = t.y;
+>                 trace.startTime = trace.lastTime = t.timestamp;
+>                 trace.active = true;
+>                 traces_[t.fingerId] = trace;
+>                 state_ = State::Touching;
+>             } else {
+>                 // 手指释放：判断手势类型
+>                 auto it = traces_.find(t.fingerId);
+>                 if (it != traces_.end()) {
+>                     auto& trace = it->second;
+>                     trace.lastX = t.x;
+>                     trace.lastY = t.y;
+>                     trace.lastTime = t.timestamp;
+>                     trace.active = false;
+>
+>                     float dist = trace.totalDistance();
+>                     float dur = (trace.lastTime - trace.startTime) / 1000.0f;
+>
+>                     GestureEvent ge;
+>                     ge.x = t.x; ge.y = t.y;
+>                     ge.duration = dur;
+>
+>                     if (dist < tapMaxDistance && dur < 500) {
+>                         ge.type = GestureType::Tap;
+>                     } else if (dist > swipeMinDistance &&
+>                                dur > 0 && (dist / dur) > swipeMinSpeed) {
+>                         ge.type = GestureType::Swipe;
+>                         ge.dx = trace.lastX - trace.startX;
+>                         ge.dy = trace.lastY - trace.startY;
+>                     }
+>                     gestures.push_back(ge);
+>                     traces_.erase(it);
+>                 }
+>                 state_ = Idle;
+>             }
+>         }
+>
+>         // 检查长按：手指仍在屏幕上超过阈值
+>         if (activeFingerCount() == 1) {
+>             for (auto& [id, trace] : traces_) {
+>                 float dur = (currentTime - trace.startTime) / 1000.0f;
+>                 if (dur > longPressThreshold && state_ == Touching) {
+>                     GestureEvent ge;
+>                     ge.type = GestureType::LongPress;
+>                     ge.x = trace.startX; ge.y = trace.startY;
+>                     ge.duration = dur;
+>                     gestures.push_back(ge);
+>                     state_ = Holding;  // 防止重复触发
+>                 }
+>             }
+>         }
+>
+>         // 捏合检测（双指）
+>         if (activeFingerCount() == 2) {
+>             detectPinch(currentTime, gestures);
+>         }
+>
+>         return gestures;
+>     }
+>
+> private:
+>     int activeFingerCount() const {
+>         int count = 0;
+>         for (auto& [_, t] : traces_) if (t.active) ++count;
+>         return count;
+>     }
+>
+>     void detectPinch(uint64_t currentTime,
+>                      std::vector<GestureEvent>& gestures) {
+>         // 收集两个活跃手指
+>         TouchTrace* fingers[2] = {nullptr, nullptr};
+>         int idx = 0;
+>         for (auto& [_, t] : traces_) {
+>             if (t.active && idx < 2) fingers[idx++] = &t;
+>         }
+>         if (!fingers[0] || !fingers[1]) return;
+>
+>         // 计算当前距离
+>         float dx = fingers[0]->lastX - fingers[1]->lastX;
+>         float dy = fingers[0]->lastY - fingers[1]->lastY;
+>         float curDist = std::sqrt(dx*dx + dy*dy);
+>
+>         // 与上一帧距离对比
+>         if (prevPinchDist_ > 0) {
+>             float scale = curDist / prevPinchDist_;
+>             GestureEvent ge;
+>             ge.type = GestureType::Pinch;
+>             // 中点位置
+>             ge.x = (fingers[0]->lastX + fingers[1]->lastX) / 2.0f;
+>             ge.y = (fingers[0]->lastY + fingers[1]->lastY) / 2.0f;
+>             ge.scale = scale;
+>             ge.dx = curDist - prevPinchDist_;
+>             gestures.push_back(ge);
+>         }
+>         prevPinchDist_ = curDist;
+>     }
+>
+>     std::unordered_map<int, TouchTrace> traces_;
+>     State state_ = Idle;
+>     float prevPinchDist_ = 0.0f;
+> };
+> ```
+>
+> **核心思路**：手势识别的关键是维护每个触摸点的历史轨迹。通过比较起点与终点的距离和时间差来判断手势类型：距离小、时间短→点击；距离大、速度快→滑动；持续时间长→长按；双指距离变化→捏合。状态机防止长按被重复触发，`prevPinchDist_` 记录上一帧的双指距离用于计算缩放因子。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // InputBuffer.hpp —— 格斗游戏输入缓冲 & 连招检测
+>
+> #include <vector>
+> #include <string>
+> #include <array>
+> #include <cmath>
+>
+> // 方向枚举（格斗游戏的八方向）
+> enum class Direction {
+>     Neutral = 0,
+>     Forward, Back, Up, Down,
+>     DownForward, DownBack, UpForward, UpBack
+> };
+>
+> // 单帧输入快照
+> struct InputSnapshot {
+>     Direction dir = Direction::Neutral;
+>     bool attack  = false;   // 攻击键
+>     bool special = false;   // 特殊键
+>     bool jump    = false;   // 跳跃键
+>     uint64_t frame = 0;     // 帧号
+> };
+>
+> // 连招定义中的单个步骤
+> struct ComboStep {
+>     Direction dir;
+>     bool attack;
+>     bool special;
+>     bool jump;
+>     // 方向容差（度），如 45 度范围内都算"下"
+>     float tolerance = 45.0f;
+> };
+>
+> // 连招定义
+> struct ComboDefinition {
+>     std::string name;               // "升龙拳"、"波动拳"
+>     std::vector<ComboStep> steps;
+>     int maxFrameSpan = 30;          // 整个连招最大跨度的帧数
+>     int priority = 0;               // 优先级（越大越优先）
+> };
+>
+> // 输入缓冲系统
+> class InputBuffer {
+> public:
+>     static constexpr size_t BUFFER_SIZE = 60;  // 1秒 @ 60fps
+>
+>     InputBuffer() { history_.resize(BUFFER_SIZE); }
+>
+>     // 每帧记录一次输入
+>     void RecordFrame(const InputSnapshot& snap) {
+>         history_[writeHead_] = snap;
+>         writeHead_ = (writeHead_ + 1) % BUFFER_SIZE;
+>         frameCount_++;
+>     }
+>
+>     // 检测连招，返回匹配的最高优先级连招名称
+>     std::string DetectCombo(
+>         const std::vector<ComboDefinition>& combos) {
+>
+>         std::string bestCombo;
+>         int bestPriority = -1;
+>         size_t bestLength = 0;
+>
+>         for (auto& combo : combos) {
+>             if (MatchCombo(combo)) {
+>                 // 优先选择优先级更高的；相同优先级选更长的
+>                 if (combo.priority > bestPriority ||
+>                     (combo.priority == bestPriority &&
+>                      combo.steps.size() > bestLength)) {
+>                     bestCombo = combo.name;
+>                     bestPriority = combo.priority;
+>                     bestLength = combo.steps.size();
+>                 }
+>             }
+>         }
+>         return bestCombo;
+>     }
+>
+>     // 获取当前缓冲的帧数
+>     size_t Size() const { return std::min(frameCount_, BUFFER_SIZE); }
+>
+>     // 获取历史帧（0 = 最新帧，N = N帧前）
+>     InputSnapshot GetFrame(size_t framesAgo) const {
+>         size_t idx = (writeHead_ + BUFFER_SIZE - 1 - framesAgo) % BUFFER_SIZE;
+>         return history_[idx];
+>     }
+>
+>     // 调试输出：显示当前缓冲内容
+>     void DebugPrint() const {
+>         std::cout << "Buffer (newest first): ";
+>         size_t count = Size();
+>         for (size_t i = 0; i < count && i < 10; ++i) {
+>             auto& f = GetFrame(i);
+>             std::cout << "[" << dirToString(f.dir);
+>             if (f.attack) std::cout << "+A";
+>             if (f.special) std::cout << "+S";
+>             std::cout << "] ";
+>         }
+>         std::cout << std::endl;
+>     }
+>
+> private:
+>     // 检查一个连招是否在缓冲中匹配
+>     bool MatchCombo(const ComboDefinition& combo) const {
+>         size_t bufSize = Size();
+>         if (bufSize < combo.steps.size()) return false;
+>
+>         // 从最近帧往前扫描可能的起始位置
+>         size_t maxStart = std::min(bufSize - combo.steps.size(),
+>                                    (size_t)combo.maxFrameSpan);
+>         for (size_t start = 0; start <= maxStart; ++start) {
+>             bool matched = true;
+>             for (size_t i = 0; i < combo.steps.size(); ++i) {
+>                 auto& histFrame = GetFrame(start + i);
+>                 auto& step = combo.steps[i];
+>                 if (!MatchStep(histFrame, step)) {
+>                     matched = false;
+>                     break;
+>                 }
+>             }
+>             if (matched) return true;
+>         }
+>         return false;
+>     }
+>
+>     // 检查单帧输入是否匹配连招步骤
+>     bool MatchStep(const InputSnapshot& snap,
+>                    const ComboStep& step) const {
+>         // 方向匹配（支持容差：如"下"允许 225-315 度）
+>         if (step.dir != Direction::Neutral) {
+>             if (!directionInRange(snap.dir, step.dir,
+>                                   step.tolerance)) return false;
+>         }
+>         if (step.attack  && !snap.attack)  return false;
+>         if (step.special && !snap.special) return false;
+>         if (step.jump    && !snap.jump)    return false;
+>         return true;
+>     }
+>
+>     // 方向角度计算（0度=右，90度=上，180度=左，270度=下）
+>     static float dirToAngle(Direction d) {
+>         switch (d) {
+>             case Direction::Forward:     return 0.0f;
+>             case Direction::UpForward:   return 45.0f;
+>             case Direction::Up:          return 90.0f;
+>             case Direction::UpBack:      return 135.0f;
+>             case Direction::Back:        return 180.0f;
+>             case Direction::DownBack:    return 225.0f;
+>             case Direction::Down:        return 270.0f;
+>             case Direction::DownForward: return 315.0f;
+>             default: return 0.0f;
+>         }
+>     }
+>
+>     static bool directionInRange(Direction actual,
+>                                   Direction target, float tol) {
+>         float a = dirToAngle(actual);
+>         float t = dirToAngle(target);
+>         float diff = std::fabs(a - t);
+>         // 处理角度环绕（如 350 度和 10 度）
+>         if (diff > 180.0f) diff = 360.0f - diff;
+>         return diff <= tol;
+>     }
+>
+>     // 配置连招表
+> public:
+>     static std::vector<ComboDefinition> DefaultCombos() {
+>         return {
+>             // 波动拳：下 → 右下 → 右 + 攻击
+>             {"Hadouken", {
+>                 {Direction::Down, false, false, false},
+>                 {Direction::DownForward, false, false, false},
+>                 {Direction::Forward, true, false, false}
+>             }, 15, 0},
+>             // 升龙拳：右 → 下 → 右下 + 攻击
+>             {"Shoryuken", {
+>                 {Direction::Forward, false, false, false},
+>                 {Direction::Down, false, false, false},
+>                 {Direction::DownForward, true, false, false}
+>             }, 15, 10},  // 更高优先级
+>         };
+>     }
+>
+> private:
+>     std::vector<InputSnapshot> history_;
+>     size_t writeHead_ = 0;
+>     size_t frameCount_ = 0;
+> };
+> ```
+>
+> **核心思路**：环形缓冲区(大小为60帧=1秒)避免每次插入时移动数据。连招匹配从最近帧往前扫描，每次尝试将连续N帧与连招定义的N个步骤比对。方向容差通过角度比较实现——将八方向映射为0-360度，差值在容差范围内即匹配。优先级机制确保当多个连招同时匹配时（如升龙拳vs波动拳），选择更优的那个。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // IInputBackend.hpp —— 跨平台抽象接口
+>
+> #include <functional>
+> #include <memory>
+>
+> // 原始输入事件（平台无关）
+> struct RawInputEvent {
+>     enum Type { KeyDown, KeyUp, MouseMove, MouseButton, Axis };
+>     Type type;
+>     uint32_t deviceId;     // 设备标识
+>     uint32_t code;         // 键码/按钮ID/轴ID
+>     int32_t value;         // 值
+>     uint64_t timestamp;    // 微秒时间戳
+> };
+>
+> // 输入后端接口
+> class IInputBackend {
+> public:
+>     virtual ~IInputBackend() = default;
+>     virtual bool Initialize() = 0;
+>     virtual void Shutdown() = 0;
+>     // 轮询输入事件（非阻塞）
+>     virtual std::vector<RawInputEvent> PollEvents() = 0;
+>     virtual const char* GetName() const = 0;
+> };
+>
+> // -----------------------------------------------
+> // Windows: RegisterRawInputDevices + WM_INPUT
+> // -----------------------------------------------
+> #ifdef _WIN32
+> #include <windows.h>
+>
+> class WindowsRawInputBackend : public IInputBackend {
+>     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
+>                                      WPARAM wp, LPARAM lp) {
+>         // WM_INPUT → 解析 RAWINPUT → 加入事件队列
+>         // 需要配合隐藏窗口或集成到游戏主窗口的WndProc
+>         return DefWindowProc(hwnd, msg, wp, lp);
+>     }
+> public:
+>     bool Initialize() override {
+>         // 注册原始输入设备
+>         RAWINPUTDEVICE devices[2] = {};
+>         // 鼠标
+>         devices[0].usUsagePage = 0x01;
+>         devices[0].usUsage = 0x02;  // 鼠标
+>         devices[0].dwFlags = RIDEV_INPUTSINK;
+>         devices[0].hwndTarget = hwnd_;
+>         // 键盘
+>         devices[1].usUsagePage = 0x01;
+>         devices[1].usUsage = 0x06;  // 键盘
+>         devices[1].dwFlags = RIDEV_INPUTSINK;
+>         devices[1].hwndTarget = hwnd_;
+>         return RegisterRawInputDevices(devices, 2,
+>                 sizeof(RAWINPUTDEVICE)) != FALSE;
+>     }
+>     // ... (完整实现涉及消息循环集成)
+>     const char* GetName() const override {
+>         return "Windows Raw Input";
+>     }
+> private:
+>     HWND hwnd_ = nullptr;
+>     std::vector<RawInputEvent> queue_;
+> };
+> #endif
+>
+> // -----------------------------------------------
+> // Linux: evdev (/dev/input/event*)
+> // -----------------------------------------------
+> #ifdef __linux__
+> #include <linux/input.h>
+> #include <fcntl.h>
+> #include <unistd.h>
+>
+> class LinuxEvdevBackend : public IInputBackend {
+> public:
+>     bool Initialize() override {
+>         // 打开 /dev/input/event* 设备
+>         // 读取 input_event 结构的原始数据
+>         // 使用非阻塞I/O (O_NONBLOCK)
+>         int fd = open("/dev/input/event3", O_RDONLY | O_NONBLOCK);
+>         if (fd < 0) return false;
+>         fds_.push_back(fd);
+>         return true;
+>     }
+>     std::vector<RawInputEvent> PollEvents() override {
+>         std::vector<RawInputEvent> events;
+>         for (int fd : fds_) {
+>             struct input_event ev;
+>             while (read(fd, &ev, sizeof(ev)) > 0) {
+>                 RawInputEvent raw;
+>                 raw.type = (ev.type == EV_KEY) ?
+>                     RawInputEvent::KeyDown : RawInputEvent::Axis;
+>                 raw.code = ev.code;
+>                 raw.value = ev.value;
+>                 raw.timestamp = ev.time.tv_sec * 1000000ULL
+>                              + ev.time.tv_usec;
+>                 events.push_back(raw);
+>             }
+>         }
+>         return events;
+>     }
+>     void Shutdown() override {
+>         for (int fd : fds_) close(fd);
+>         fds_.clear();
+>     }
+>     const char* GetName() const override {
+>         return "Linux evdev";
+>     }
+> private:
+>     std::vector<int> fds_;
+> };
+> #endif
+>
+> // 工厂函数：根据平台选择后端
+> inline std::unique_ptr<IInputBackend> CreateInputBackend() {
+> #ifdef _WIN32
+>     return std::make_unique<WindowsRawInputBackend>();
+> #elif defined(__linux__)
+>     return std::make_unique<LinuxEvdevBackend>();
+> #else
+>     return nullptr;  // 不支持的平台
+> #endif
+> }
+> ```
+>
+> **核心思路**：Raw Input 比标准窗口消息延迟更低，因为它跳过操作系统的消息队列加速/合并步骤，直接从 HID 驱动获取原始数据。Windows 的 RAWINPUT 通过 `RegisterRawInputDevices` 注册设备，`WM_INPUT` 消息携带原始 HID 报文；Linux 的 evdev 接口通过直接读取 `/dev/input/event*` 文件描述符获取 `input_event` 结构。工厂模式(`CreateInputBackend`)在编译时根据平台宏选择实现，`IInputBackend` 接口保证了上层代码的平台无关性。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 书籍

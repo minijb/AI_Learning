@@ -627,6 +627,128 @@ if __name__ == "__main__":
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **纹理预算审计实操框架：**
+>
+> 使用 `texture_budget_calc.py`（教程中的工具）生成报告。典型发现示例：
+>
+> ```
+> === Texture Budget Audit ===
+> Total VRAM (estimated): 5120 MB (5 GB)
+>
+> Texture                     Resolution   Format     MiP?   VRAM      Bandwidth/frame
+> ─────────────────────────────────────────────────────────────────────────────────
+> character_diffuse_01        2048×2048    RGBA8      Yes    21.3 MB   42.6 MB  ← #1
+> terrain_splatmap            4096×4096    RGBA8      Yes    85.3 MB   170.7 MB  ← #2 BIGGEST
+> skybox_hdr                  2048×2048    BC6H       Yes    10.7 MB   21.3 MB
+> particle_atlas              1024×1024    RGBA8      No      5.3 MB    10.7 MB  ← #3 (no mip!)
+> ui_main_atlas               2048×2048    RGBA8      No     21.3 MB   21.3 MB
+> normal_detail_01            1024×1024    BC5        Yes     5.3 MB    10.7 MB
+> roughness_metal_01          512×512      BC4        Yes     1.3 MB    2.7 MB   ← optimal
+> ─────────────────────────────────────────────────────────────────────────────────
+> ```
+>
+> **Top 5 大纹理的降带宽方案：**
+>
+> | 纹理 | 当前 | 方案 | 节省 | 理由 |
+> |------|------|------|------|------|
+> | `terrain_splatmap` (4096² RGBA8) | 85 MB | → 2048² BC7 | **节省 ~74 MB** | Splatmap 不需要 4K 精度；BC7 4:1 压缩率 |
+> | `character_diffuse_01` (2048² RGBA8) | 21 MB | → BC7 | **节省 ~16 MB** | 角色纹理最受益于 BC7 高质量压缩 |
+> | `particle_atlas` (1024² RGBA8, no mip) | 5.3 MB | → BC3 + mip | **节省 ~3 MB + 降低采样带宽 50%** | mip 解决远处粒子采样时的带宽浪费 |
+> | `ui_main_atlas` (2048² RGBA8) | 21 MB | → BC7 或保持 RGBA8 | **0-16 MB** | UI 纹理需要像素级精度——评估 BC7 的视觉差异 |
+> | `skybox_hdr` (2048² BC6H) | 11 MB | 已最优 | — | BC6H 是 HDR 纹理的最佳选择 |
+>
+> **估算总带宽节省**：从 ~277 MB/frame → ~180 MB/frame（**节省 35%**）
+
+> [!tip]- 练习 2 参考答案
+> **移动端 TBR Deferred Renderer 分析：**
+>
+> **1. G-Buffer tile memory 占用：**
+> ```
+> Mali G710 tile memory per core: 典型 ~32KB (Valhall 架构)
+> Apple A17 tile memory per core: ~128KB (Apple GPU)
+>
+> G-Buffer layout (per pixel, 32-bit = 4 bytes per channel):
+>   - Albedo:   RGBA8  = 4 bytes
+>   - Normal:    RG8    = 2 bytes
+>   - PBR:       RGBA8  = 4 bytes
+>   - Depth:     32-bit  = 4 bytes
+>   Total per pixel: 14 bytes
+>
+> 32×32 tile = 1024 pixels × 14 bytes = 14.3 KB per tile
+> ```
+>
+> - **Mali G710**: 14.3 KB < 32KB ✓ 在 tile memory 限制内，但接近（~45% 占用）。额外 bandwidth compression 可降低到 8-10KB。
+> - **Apple A17**: 14.3 KB << 128KB ✓ 非常充裕。
+> - **如果增加到 4 个 RT**（如添加 Velocity buffer RG16F = 4 bytes），则 ~18.3 KB/tile → Mali 上仍可接受，但已无多余空间做 blend 操作。
+>
+> **2. G-Buffer → Lighting pass 的 Load 优化：**
+> ```cpp
+> // Vulkan: 使用 subpass 避免 VRAM round-trip
+> // Subpass 0: G-Buffer fill (3 color attachments + depth)
+> // Subpass 1: Lighting (read G-Buffer as input attachments, write to final color)
+>
+> VkAttachmentDescription colorAttachments[4] = {
+>     { /* Albedo  */ .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+>                     .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE },
+>     { /* Normal  */ .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+>                     .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE },
+>     { /* PBR     */ .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+>                     .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE },
+>     { /* Final   */ .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+>                     .storeOp = VK_ATTACHMENT_STORE_OP_STORE },
+> };
+> // G-Buffer attachments 在 subpass 之间保留在 tile memory 中
+> // Lighting subpass 通过 input attachment 读取 → tile memory 内传输，零 VRAM 带宽！
+> ```
+> - **Metal**: 使用 `StoreAction.dontCare` 让 G-Buffer 不写回 VRAM。Lighting pass 用 `[[color(0)]]` 在 tile memory 中消费 G-Buffer。
+> - **关键优化**：G-Buffer 只在 tile memory 中生存，永不 touch VRAM。只有 final color buffer 最终 Store。
+>
+> **3. Bloom 在 TBR 上的代价和优化：**
+> - **代价**：每个 fullscreen pass 都是 tile write-back to VRAM + next pass tile load from VRAM。两次 Bloom pass = 2× write + 2× read = ~66 MB 带宽（1080p × 4 bytes × 2 × 2）。
+> - **优化 1**：降采样到 540p 做 Bloom → 带宽降为 1/4。
+> - **优化 2**：合并 Bloom + ToneMapping + TAA 到一个 pass（tile 内计算 → 一次 write-back）。
+> - **Metal 最优解**：使用 Tile Shaders — Bloom blur 在 tile memory 中完成，不写回 VRAM。
+>
+> **4. TAA 对前一帧 Color Buffer 的 Load：**
+> - TAA 需要 `historyColor = Load(frame_N_minus_1)`。
+> - 在 TBR 上，上一个 frame 的 color buffer 在 VRAM 中 → Load 必须从 VRAM 读取。这在 TBR 上是昂贵的。
+> - **优化**：如果 TAA + ToneMap 在同一 pass 合并，history 读取是一次性的，后续计算在 tile memory 中完成。
+> - **进一步优化**：使用 `VK_ATTACHMENT_LOAD_OP_LOAD` 或 Metal 的 `LoadAction.load` 仅在必要时。如果可以用上一帧的 depth 做 reprojection 来减少 sample 点，可降低带宽。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **带宽剖面实测步骤（NVIDIA NSight Graphics）：**
+>
+> 1. **捕获帧**：`Quick Launch` → 运行游戏 → `F11` 捕获帧
+> 2. **GPU Trace 视图**：展开帧 → 找到 `Memory` 标签页
+> 3. **识别 Top-3 带宽消耗者**：
+>
+> 典型结果示例（虚构但 realistic）：
+>
+> | Event | Operation | Resources | Read BW | Write BW | Total |
+> |-------|-----------|-----------|---------|----------|-------|
+> | #145 Shadows | Draw (1024×4 cascade) | Depth RT (R32) | 12 MB | 48 MB | **60 MB** |
+> | #278 Opaque | Draw (Forward pass) | 8× texture samples | 85 MB | 32 MB | **117 MB** ← #1 |
+> | #389 Bloom V | Compute (540p blur) | 540p RT R11G11B10 | 48 MB | 24 MB | **72 MB** |
+>
+> **优化方案：**
+> - **Event #278 (Opaque)** — 最大带宽消耗：
+>   - 8 个纹理中 3 个是 RGBA8 → 换 BC7/BC5（节省 ~60 MB 读带宽）。
+>   - BaseColor + Normal + PBR → 已在 BC7/BC5 阶段后，预估节省 40%。
+> - **Event #145 (Shadows)**：
+>   - 4× cascade shadow maps → 考虑用 PSSM 优化，减少到 2 cascade + 更紧缩的 frustum fit，带宽减半。
+>   - 使用 D32_SFLOAT 替代 R32_UINT（硬件 depth compression 友好）。
+> - **Event #389 (Bloom)**：
+>   - 降采样到 1/4 分辨率（270p）→ 带宽降为 1/4。
+>   - 合并 Bloom + ToneMap 到一个 pass → 减少一次 full-screen write。
+>
+> **总估算节省**：~140 MB/frame → ~80 MB/frame（**节省 43%**）
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 - [GPUOpen: Texture Compression](https://gpuopen.com/learn/using-modern-texture-compression/) — BCn/ASTC 最佳实践

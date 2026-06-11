@@ -3500,6 +3500,1345 @@ class PostProcess {
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1：完善渲染系统
+> ### ResourceManager — 统一资源加载与缓存
+>
+> 核心设计：用 `std::unordered_map` 按路径缓存已加载资源，返回原始指针（所有权在 Manager 手中）。
+> `GetOrLoad<T>` 模板方法统一 Mesh / Texture / Material / Shader 的懒加载逻辑。
+>
+> #### ResourceManager.hpp
+>
+> ```cpp
+> #pragma once
+> #include "MiniEngine/Core/Types.hpp"
+> #include "MiniEngine/Render/Mesh.hpp"
+> #include "MiniEngine/Render/Texture.hpp"
+> #include "MiniEngine/Render/Material.hpp"
+> #include "MiniEngine/Render/Shader.hpp"
+> #include <string>
+> #include <unordered_map>
+> #include <memory>
+> #include <mutex>
+>
+> namespace MiniEngine::Resources {
+>
+> // 资源句柄：带路径的轻量 ID，比 shared_ptr 更可控
+> struct ResourceID {
+>     u32 index = 0;
+>     u32 generation = 0;
+>     bool Valid() const { return generation != 0; }
+>     bool operator==(const ResourceID& o) const { return index == o.index && generation == o.generation; }
+> };
+>
+> class ResourceManager {
+> public:
+>     static ResourceManager& Instance();
+>
+>     // ── 资源获取 (懒加载) ──
+>     Render::Mesh*     GetMesh(const std::string& path);
+>     Render::Texture*  GetTexture(const std::string& path, bool sRGB = true);
+>     Render::Material* GetMaterial(const std::string& path);
+>     Render::Shader*   GetShader(const std::string& vertPath, const std::string& fragPath);
+>
+>     // ── 资源ID版本（供 MeshRenderer 存储）──
+>     ResourceID GetMeshID(const std::string& path);
+>     ResourceID GetMaterialID(const std::string& path);
+>     Render::Mesh*     ResolveMesh(ResourceID id);
+>     Render::Material* ResolveMaterial(ResourceID id);
+>
+>     // ── 缓存管理 ──
+>     void UnloadUnused();          // 释放引用计数为 0 的资源
+>     void Clear();
+>     bool Reload(const std::string& path);  // 热重载
+>
+>     // ── 默认资源（加载失败时的回退）──
+>     Render::Mesh*     GetDefaultMesh();
+>     Render::Texture*  GetDefaultTexture();
+>     Render::Material* GetDefaultMaterial();
+>
+> private:
+>     ResourceManager() = default;
+>
+>     template<typename T>
+>     struct CacheEntry {
+>         std::shared_ptr<T> resource;
+>         u32 refCount = 0;
+>         u32 generation = 1;
+>     };
+>
+>     template<typename T>
+>     T* GetOrLoad(const std::string& key,
+>                  std::unordered_map<std::string, CacheEntry<T>>& cache,
+>                  std::function<std::shared_ptr<T>(const std::string&)> loader);
+>
+>     template<typename T>
+>     ResourceID GetOrLoadID(const std::string& key,
+>                            std::unordered_map<std::string, CacheEntry<T>>& cache,
+>                            std::vector<CacheEntry<T>>& idTable,
+>                            std::function<std::shared_ptr<T>(const std::string&)> loader);
+>
+>     template<typename T>
+>     T* Resolve(ResourceID id, const std::vector<CacheEntry<T>>& idTable);
+>
+>     std::unordered_map<std::string, CacheEntry<Render::Mesh>>     m_meshes;
+>     std::unordered_map<std::string, CacheEntry<Render::Texture>>  m_textures;
+>     std::unordered_map<std::string, CacheEntry<Render::Material>> m_materials;
+>     std::unordered_map<std::string, CacheEntry<Render::Shader>>   m_shaders;
+>
+>     // ID 表：用 index 做 O(1) 查找，generation 防范悬空 ID
+>     std::vector<CacheEntry<Render::Mesh>>     m_meshIDTable;
+>     std::vector<CacheEntry<Render::Material>> m_materialIDTable;
+>
+>     std::mutex m_mutex;  // 线程安全
+> };
+>
+> } // namespace MiniEngine::Resources
+> ```
+>
+> #### ResourceManager.cpp（核心实现）
+>
+> ```cpp
+> #include "MiniEngine/Resources/ResourceManager.hpp"
+> #include "MiniEngine/Core/Log.hpp"
+> #include <fstream>
+> #include <sstream>
+>
+> namespace MiniEngine::Resources {
+>
+> ResourceManager& ResourceManager::Instance() {
+>     static ResourceManager mgr;
+>     return mgr;
+> }
+>
+> // ── 模板：字符串key查找 ──
+> template<typename T>
+> T* ResourceManager::GetOrLoad(const std::string& key,
+>                               std::unordered_map<std::string, CacheEntry<T>>& cache,
+>                               std::function<std::shared_ptr<T>(const std::string&)> loader) {
+>     std::lock_guard<std::mutex> lock(m_mutex);
+>     auto it = cache.find(key);
+>     if (it != cache.end()) {
+>         it->second.refCount++;
+>         return it->second.resource.get();
+>     }
+>     auto resource = loader(key);
+>     if (!resource) {
+>         ME_LOG_WARN("ResourceManager: failed to load '{}', using fallback", key);
+>         return nullptr;
+>     }
+>     CacheEntry<T> entry{ resource, 1, 1 };
+>     T* ptr = resource.get();
+>     cache[key] = std::move(entry);
+>     return ptr;
+> }
+>
+> // ── 具体类型加载器 ──
+> Render::Mesh* ResourceManager::GetMesh(const std::string& path) {
+>     return GetOrLoad<Render::Mesh>(path, m_meshes, [](const std::string& p) {
+>         auto m = std::make_shared<Render::Mesh>();
+>         // TODO: 调用 ModelLoader 解析 glTF/OBJ 并填充顶点/索引
+>         // if (!ModelLoader::Load(p, *m)) return nullptr;
+>         return m;
+>     });
+> }
+>
+> Render::Texture* ResourceManager::GetTexture(const std::string& path, bool sRGB) {
+>     // 将 sRGB 参数编码到 key 中
+>     std::string key = path + (sRGB ? "#srgb" : "#linear");
+>     return GetOrLoad<Render::Texture>(key, m_textures, [sRGB](const std::string& p) {
+>         auto t = std::make_shared<Render::Texture>();
+>         if (!t->LoadFromFile(p, sRGB)) return std::shared_ptr<Render::Texture>(nullptr);
+>         return t;
+>     });
+> }
+>
+> Render::Material* ResourceManager::GetMaterial(const std::string& path) {
+>     return GetOrLoad<Render::Material>(path, m_materials, [this](const std::string& p) {
+>         // 简单 JSON 材质定义：{ "shader":"pbr", "albedoMap":"...", "normalMap":"...", ... }
+>         auto mat = std::make_shared<Render::Material>();
+>         // TODO: JSON 解析后填充材质参数和纹理指针
+>         // mat->albedoMap.reset(GetTexture(albedoPath));
+>         // mat->normalMap.reset(GetTexture(normalPath));
+>         mat->shader = std::shared_ptr<Render::Shader>(GetShader("shaders/pbr.vert", "shaders/pbr.frag"));
+>         return mat;
+>     });
+> }
+>
+> Render::Shader* ResourceManager::GetShader(const std::string& vertPath, const std::string& fragPath) {
+>     std::string key = vertPath + "|" + fragPath;
+>     return GetOrLoad<Render::Shader>(key, m_shaders, [&](const std::string&) {
+>         auto s = std::make_shared<Render::Shader>();
+>         if (!s->LoadFromFiles(vertPath, fragPath)) return std::shared_ptr<Render::Shader>(nullptr);
+>         return s;
+>     });
+> }
+>
+> // ── ResourceID 版本 ──
+> template<typename T>
+> ResourceID ResourceManager::GetOrLoadID(const std::string& key,
+>         std::unordered_map<std::string, CacheEntry<T>>& cache,
+>         std::vector<CacheEntry<T>>& idTable,
+>         std::function<std::shared_ptr<T>(const std::string&)> loader) {
+>     std::lock_guard<std::mutex> lock(m_mutex);
+>     auto it = cache.find(key);
+>     if (it != cache.end()) {
+>         it->second.refCount++;
+>         // 在 ID 表中定位已有条目
+>         for (u32 i = 0; i < idTable.size(); ++i) {
+>             if (idTable[i].resource == it->second.resource)
+>                 return { i, idTable[i].generation };
+>         }
+>     }
+>     auto resource = loader(key);
+>     if (!resource) return { 0, 0 };
+>
+>     CacheEntry<T> entry{ resource, 1, 1 };
+>     cache[key] = entry;
+>
+>     // 插入 ID 表（复用空洞或追加）
+>     u32 idx;
+>     for (idx = 0; idx < idTable.size(); ++idx) {
+>         if (idTable[idx].generation == 0) break; // 找到空洞
+>     }
+>     if (idx == idTable.size()) {
+>         idTable.push_back(entry);
+>     } else {
+>         idTable[idx] = entry;
+>     }
+>     return { idx, idTable[idx].generation };
+> }
+> ```
+>
+> ### Material::Bind() — 材质切换时绑定纹理和 Uniform
+>
+> ```cpp
+> // Material.cpp
+> #include "MiniEngine/Render/Material.hpp"
+> #include <glad/glad.h>
+>
+> namespace MiniEngine::Render {
+>
+> void Material::Bind() const {
+>     if (!shader || !shader->IsValid()) return;
+>     shader->Bind();
+>
+>     // ── PBR 标量参数 ──
+>     shader->SetVec3("albedo", albedo);
+>     shader->SetFloat("metallic", metallic);
+>     shader->SetFloat("roughness", roughness);
+>     shader->SetFloat("ao", ao);
+>     shader->SetFloat("emissive", emissive);
+>
+>     // ── 纹理绑定（固定槽位分配）──
+>     auto bindTex = [&](const std::shared_ptr<Texture>& tex, u32 slot,
+>                        const char* uniformName, const char* flagName) {
+>         if (tex && tex->GetID()) {
+>             tex->Bind(slot);
+>             shader->SetInt(uniformName, static_cast<i32>(slot));
+>             shader->SetInt(flagName, 1);
+>         } else {
+>             shader->SetInt(flagName, 0);
+>         }
+>     };
+>
+>     // 槽位分配：albedo=0, normal=1, metallic=2, roughness=3, ao=4
+>     bindTex(albedoMap,    0, "albedoMap",    "hasAlbedoMap");
+>     bindTex(normalMap,    1, "normalMap",    "hasNormalMap");
+>     bindTex(metallicMap,  2, "metallicMap",  "hasMetallicMap");
+>     bindTex(roughnessMap, 3, "roughnessMap", "hasRoughnessMap");
+>     bindTex(aoMap,        4, "aoMap",        "hasAOMap");
+>
+>     // 双面渲染
+>     if (doubleSided) {
+>         glDisable(GL_CULL_FACE);
+>     }
+> }
+>
+> void Material::Unbind() const {
+>     if (doubleSided) {
+>         glEnable(GL_CULL_FACE);
+>     }
+> }
+>
+> } // namespace MiniEngine::Render
+> ```
+>
+> ### MeshRenderer 组件增强 — 场景加载时自动解析
+>
+> ```cpp
+> // 在 Components.hpp 中更新 MeshRenderer
+> struct MeshRenderer : IComponent {
+>     std::string meshPath;
+>     std::string materialPath;
+>     bool castShadow = true;
+>     bool receiveShadow = true;
+>
+>     // 运行时解析后的资源 ID（由 ResourceManager 分配）
+>     Resources::ResourceID meshID;
+>     Resources::ResourceID materialID;
+>
+>     // 场景加载后调用：将路径转化为资源句柄
+>     void ResolveAssets() {
+>         auto& rm = Resources::ResourceManager::Instance();
+>         if (!meshPath.empty())
+>             meshID = rm.GetMeshID(meshPath);
+>         if (!materialPath.empty())
+>             materialID = rm.GetMaterialID(materialPath);
+>     }
+>
+>     // 获取运行时指针（每帧渲染前调用）
+>     Render::Mesh* GetMesh() const {
+>         return Resources::ResourceManager::Instance().ResolveMesh(meshID);
+>     }
+>     Render::Material* GetMaterial() const {
+>         return Resources::ResourceManager::Instance().ResolveMaterial(materialID);
+>     }
+> };
+> ```
+>
+> ### 修改 Renderer::SubmitRenderCommands — 注入 ResourceManager
+>
+> ```cpp
+> void Renderer::SubmitRenderCommands(ECS::World* world) {
+>     m_opaqueQueue.clear();
+>     m_transparentQueue.clear();
+>
+>     auto& meshPool = world->GetComponentPool<ECS::MeshRenderer>();
+>     auto& transformPool = world->GetComponentPool<ECS::Transform>();
+>
+>     for (auto& [entity, mr] : meshPool) {
+>         auto* transform = transformPool.TryGet(entity);
+>         if (!transform) continue;
+>
+>         // ── 从 ResourceManager 获取实际资源 ──
+>         auto* mesh = mr.GetMesh();
+>         auto* material = mr.GetMaterial();
+>         if (!mesh || !material) continue;
+>
+>         RenderCommand cmd;
+>         cmd.mesh = mesh;
+>         cmd.material = material;
+>         cmd.transform = transform->GetMatrix();
+>         cmd.bounds = mesh->GetBounds().Transform(cmd.transform);
+>         cmd.entityID = entity.id;
+>
+>         // 根据材质透明度分流队列
+>         if (material->transparent) {
+>             m_transparentQueue.push_back(cmd);
+>         } else {
+>             m_opaqueQueue.push_back(cmd);
+>         }
+>     }
+>
+>     // 不透明队列：按 material 指针排序，减少 shader/texture 切换
+>     std::sort(m_opaqueQueue.begin(), m_opaqueQueue.end(),
+>         [](const RenderCommand& a, const RenderCommand& b) {
+>             return a.material < b.material;
+>         });
+>
+>     // 透明队列：按视距排序（后到先渲染）
+>     // std::sort(m_transparentQueue.begin(), ...);
+> }
+>
+> void Renderer::ExecuteRenderCommands() {
+>     const Material* lastMaterial = nullptr;
+>
+>     for (const auto& cmd : m_opaqueQueue) {
+>         // 材质切换检测
+>         if (cmd.material != lastMaterial) {
+>             cmd.material->Bind();
+>             m_stats.shaderSwitches++;
+>             lastMaterial = cmd.material;
+>         }
+>
+>         // 设置 per-draw uniforms
+>         cmd.material->shader->SetMat4("model", cmd.transform);
+>
+>         cmd.mesh->Bind();
+>         cmd.mesh->Draw();
+>         m_stats.drawCalls++;
+>     }
+>
+>     // 恢复状态
+>     if (lastMaterial) {
+>         if (lastMaterial->doubleSided)
+>             glEnable(GL_CULL_FACE);
+>     }
+> }
+> ```
+>
+> ### 场景加载集成
+>
+> ```cpp
+> // 场景加载时自动解析所有 MeshRenderer
+> void SceneLoader::LoadScene(const std::string& path) {
+>     // ... JSON/YAML 解析，创建 Entity ...
+>
+>     // 遍历所有 MeshRenderer 组件，触发资源解析
+>     world->ForEach<ECS::MeshRenderer>([](ECS::MeshRenderer& mr) {
+>         mr.ResolveAssets();
+>     });
+> }
+> ```
+
+> [!tip]- 练习 2：空间分割加速结构
+> ### 选项 A：均匀网格（Uniform Grid）
+>
+> 设计思路：将世界空间以固定单元尺寸划分为 3D 网格，每个碰撞体根据 AABB 中心点注册。
+> 碰撞检测时只遍历自身所在及相邻 26 个网格单元中的碰撞体。
+>
+> #### UniformGrid.hpp
+>
+> ```cpp
+> #pragma once
+> #include "MiniEngine/Core/Types.hpp"
+> #include "MiniEngine/Core/Math.hpp"
+> #include "MiniEngine/ECS/Entity.hpp"
+> #include <vector>
+> #include <unordered_map>
+> #include <tuple>
+>
+> namespace MiniEngine::Physics {
+>
+> class UniformGrid {
+> public:
+>     explicit UniformGrid(f32 cellSize = 5.0f)
+>         : m_cellSize(cellSize), m_invCellSize(1.0f / cellSize) {}
+>
+>     // 每帧开始时调用：清空网格，重新注册所有碰撞体
+>     void Clear();
+>
+>     // 注册一个碰撞体：用 AABB 中心点计算所属网格单元
+>     void Insert(ECS::EntityID entity, const Math::AABB& worldBounds);
+>
+>     // 查询与给定碰撞体可能相交的邻居
+>     std::vector<ECS::EntityID> Query(const Math::AABB& worldBounds) const;
+>
+>     // 获取所有潜在碰撞对（去重）
+>     std::vector<std::pair<ECS::EntityID, ECS::EntityID>> GetPotentialPairs() const;
+>
+>     void SetCellSize(f32 size) { m_cellSize = size; m_invCellSize = 1.0f / size; }
+>
+>     // 统计信息
+>     u32 CellCount() const { return static_cast<u32>(m_cells.size()); }
+>     u32 EntityCount() const { return m_entityCount; }
+>
+> private:
+>     struct CellKey {
+>         i32 x, y, z;
+>         bool operator==(const CellKey& o) const { return x == o.x && y == o.y && z == o.z; }
+>     };
+>
+>     struct CellKeyHash {
+>         size_t operator()(const CellKey& k) const {
+>             // 位混合，避免邻近坐标碰撞
+>             return ((size_t)k.x * 73856093) ^ ((size_t)k.y * 19349663) ^ ((size_t)k.z * 83492791);
+>         }
+>     };
+>
+>     CellKey ComputeCell(const Math::Vec3& pos) const;
+>
+>     f32 m_cellSize;
+>     f32 m_invCellSize;
+>     std::unordered_map<CellKey, std::vector<ECS::EntityID>, CellKeyHash> m_cells;
+>     u32 m_entityCount = 0;
+> };
+>
+> } // namespace MiniEngine::Physics
+> ```
+>
+> #### UniformGrid.cpp
+>
+> ```cpp
+> #include "UniformGrid.hpp"
+> #include <unordered_set>
+>
+> namespace MiniEngine::Physics {
+>
+> void UniformGrid::Clear() {
+>     m_cells.clear();
+>     m_entityCount = 0;
+> }
+>
+> UniformGrid::CellKey UniformGrid::ComputeCell(const Math::Vec3& pos) const {
+>     return {
+>         static_cast<i32>(std::floor(pos.x * m_invCellSize)),
+>         static_cast<i32>(std::floor(pos.y * m_invCellSize)),
+>         static_cast<i32>(std::floor(pos.z * m_invCellSize)),
+>     };
+> }
+>
+> void UniformGrid::Insert(ECS::EntityID entity, const Math::AABB& worldBounds) {
+>     Math::Vec3 center = worldBounds.Center();
+>     CellKey key = ComputeCell(center);
+>     m_cells[key].push_back(entity);
+>     m_entityCount++;
+> }
+>
+> std::vector<ECS::EntityID> UniformGrid::Query(const Math::AABB& worldBounds) const {
+>     std::vector<ECS::EntityID> result;
+>     std::unordered_set<ECS::EntityID> seen;
+>
+>     // 计算 AABB 覆盖的所有网格范围
+>     Math::Vec3 min = worldBounds.min;
+>     Math::Vec3 max = worldBounds.max;
+>     CellKey minCell = ComputeCell(min);
+>     CellKey maxCell = ComputeCell(max);
+>
+>     for (i32 x = minCell.x; x <= maxCell.x; ++x) {
+>         for (i32 y = minCell.y; y <= maxCell.y; ++y) {
+>             for (i32 z = minCell.z; z <= maxCell.z; ++z) {
+>                 CellKey key{ x, y, z };
+>                 auto it = m_cells.find(key);
+>                 if (it == m_cells.end()) continue;
+>                 for (auto e : it->second) {
+>                     if (seen.insert(e).second)
+>                         result.push_back(e);
+>                 }
+>             }
+>         }
+>     }
+>     return result;
+> }
+>
+> std::vector<std::pair<ECS::EntityID, ECS::EntityID>> UniformGrid::GetPotentialPairs() const {
+>     std::vector<std::pair<ECS::EntityID, ECS::EntityID>> pairs;
+>     // 对每个非空单元，自身内部配对 + 与正方向邻居配对
+>     for (const auto& [key, entities] : m_cells) {
+>         u32 n = static_cast<u32>(entities.size());
+>         // 自身内部
+>         for (u32 i = 0; i < n; ++i)
+>             for (u32 j = i + 1; j < n; ++j)
+>                 pairs.emplace_back(entities[i], entities[j]);
+>
+>         // 只检查正方向邻居，避免重复
+>         for (i32 dx : {0, 1})
+>             for (i32 dy : {0, 1})
+>                 for (i32 dz : {0, 1}) {
+>                     if (dx == 0 && dy == 0 && dz == 0) continue;
+>                     CellKey nk{ key.x + dx, key.y + dy, key.z + dz };
+>                     auto nit = m_cells.find(nk);
+>                     if (nit == m_cells.end()) continue;
+>                     for (auto e1 : entities)
+>                         for (auto e2 : nit->second)
+>                             pairs.emplace_back(e1, e2);
+>                 }
+>     }
+>     return pairs;
+> }
+>
+> } // namespace MiniEngine::Physics
+> ```
+>
+> ### 选项 B：BVH（Bounding Volume Hierarchy）
+>
+> 采用自顶向下构建，每帧 refit：叶子节点更新 AABB，自底向上重新计算父节点 AABB。
+> 分裂策略使用表面积启发式（SAH）的简化版——中点分割。
+>
+> #### BVH.hpp
+>
+> ```cpp
+> #pragma once
+> #include "MiniEngine/Core/Types.hpp"
+> #include "MiniEngine/Core/Math.hpp"
+> #include "MiniEngine/ECS/Entity.hpp"
+> #include <vector>
+> #include <memory>
+>
+> namespace MiniEngine::Physics {
+>
+> struct BVHNode {
+>     Math::AABB bounds;
+>     i32 left = -1;   // 左子节点索引（-1 表示叶子）
+>     i32 right = -1;
+>     i32 firstPrim = 0;  // 叶子节点：primitive 起始偏移
+>     i32 primCount = 0;  // 叶子节点：primitive 数量
+>     i32 parent = -1;
+> };
+>
+> struct BVHPrimitive {
+>     ECS::EntityID entity;
+>     Math::AABB bounds;
+>     Math::Vec3 center;  // 缓存中心点，加速分裂
+> };
+>
+> class BVH {
+> public:
+>     BVH() = default;
+>
+>     // 全量重建（首次或树质量差时）
+>     void Build(std::vector<BVHPrimitive> primitives);
+>
+>     // 增量更新：每帧 refit（只更新 AABB，不改拓扑）
+>     void Refit(const std::vector<Math::AABB>& newBounds);
+>
+>     // 查询与给定 AABB 相交的所有实体
+>     void Query(const Math::AABB& queryBounds,
+>                std::vector<ECS::EntityID>& out) const;
+>
+>     // 返回所有潜在碰撞对（自碰撞检测）
+>     void GetSelfCollisionPairs(
+>         std::vector<std::pair<ECS::EntityID, ECS::EntityID>>& out) const;
+>
+>     bool Empty() const { return m_nodes.empty(); }
+>     u32 NodeCount() const { return static_cast<u32>(m_nodes.size()); }
+>
+> private:
+>     i32 BuildRecursive(i32 start, i32 end);
+>     void RefitNode(i32 nodeIdx);
+>     void QueryNode(i32 nodeIdx, const Math::AABB& queryBounds,
+>                    std::vector<ECS::EntityID>& out) const;
+>     void SelfCollide(i32 nodeIdx,
+>                      std::vector<std::pair<ECS::EntityID, ECS::EntityID>>& out) const;
+>
+>     std::vector<BVHNode> m_nodes;
+>     std::vector<BVHPrimitive> m_primitives;
+> };
+>
+> } // namespace MiniEngine::Physics
+> ```
+>
+> #### BVH.cpp（关键方法）
+>
+> ```cpp
+> #include "BVH.hpp"
+> #include <algorithm>
+> #include <stack>
+>
+> namespace MiniEngine::Physics {
+>
+> void BVH::Build(std::vector<BVHPrimitive> primitives) {
+>     m_primitives = std::move(primitives);
+>     m_nodes.clear();
+>     if (m_primitives.empty()) return;
+>
+>     m_nodes.reserve(m_primitives.size() * 2);
+>     BuildRecursive(0, static_cast<i32>(m_primitives.size()));
+> }
+>
+> i32 BVH::BuildRecursive(i32 start, i32 end) {
+>     i32 nodeIdx = static_cast<i32>(m_nodes.size());
+>     m_nodes.emplace_back();
+>     BVHNode& node = m_nodes.back();
+>
+>     // 计算包围盒
+>     node.bounds = m_primitives[start].bounds;
+>     for (i32 i = start + 1; i < end; ++i)
+>         node.bounds = node.bounds.Union(m_primitives[i].bounds);
+>
+>     i32 count = end - start;
+>     if (count <= 4) {  // 叶子节点：最多 4 个 primitive
+>         node.firstPrim = start;
+>         node.primCount = count;
+>         return nodeIdx;
+>     }
+>
+>     // ── 中点分裂：选跨度最大的轴 ──
+>     Math::Vec3 extent = node.bounds.max - node.bounds.min;
+>     i32 axis = 0;
+>     if (extent.y > extent.x) axis = 1;
+>     if (extent.z > extent[axis]) axis = 2;
+>
+>     i32 mid = start + count / 2;
+>     std::nth_element(m_primitives.begin() + start,
+>                      m_primitives.begin() + mid,
+>                      m_primitives.begin() + end,
+>         [axis](const BVHPrimitive& a, const BVHPrimitive& b) {
+>             return a.center[axis] < b.center[axis];
+>         });
+>
+>     i32 leftIdx = BuildRecursive(start, mid);
+>     i32 rightIdx = BuildRecursive(mid, end);
+>
+>     m_nodes[nodeIdx].left = leftIdx;
+>     m_nodes[nodeIdx].right = rightIdx;
+>     m_nodes[leftIdx].parent = nodeIdx;
+>     m_nodes[rightIdx].parent = nodeIdx;
+>
+>     return nodeIdx;
+> }
+>
+> void BVH::Refit(const std::vector<Math::AABB>& newBounds) {
+>     // 更新叶子节点 AABB（按 primitive 顺序对应）
+>     for (i32 i = 0; i < static_cast<i32>(m_nodes.size()); ++i) {
+>         if (m_nodes[i].left == -1) {  // 叶子
+>             Math::AABB merged;
+>             for (i32 p = 0; p < m_nodes[i].primCount; ++p) {
+>                 u32 pi = static_cast<u32>(m_nodes[i].firstPrim + p);
+>                 merged = merged.Union(newBounds[pi]);
+>             }
+>             m_nodes[i].bounds = merged;
+>         }
+>     }
+>
+>     // 自底向上重新计算父节点：用 parent 指针反向遍历
+>     for (i32 i = static_cast<i32>(m_nodes.size()) - 1; i >= 0; --i) {
+>         i32 p = m_nodes[i].parent;
+>         if (p >= 0) {
+>             m_nodes[p].bounds = m_nodes[m_nodes[p].left].bounds
+>                                .Union(m_nodes[m_nodes[p].right].bounds);
+>         }
+>     }
+> }
+>
+> void BVH::Query(const Math::AABB& queryBounds,
+>                 std::vector<ECS::EntityID>& out) const {
+>     if (m_nodes.empty()) return;
+>     std::stack<i32> stack;
+>     stack.push(0);
+>     while (!stack.empty()) {
+>         i32 idx = stack.top(); stack.pop();
+>         const BVHNode& node = m_nodes[idx];
+>         if (!node.bounds.Intersects(queryBounds)) continue;
+>
+>         if (node.left == -1) {  // 叶子
+>             for (i32 i = 0; i < node.primCount; ++i)
+>                 out.push_back(m_primitives[node.firstPrim + i].entity);
+>         } else {
+>             stack.push(node.right);
+>             stack.push(node.left);  // 左子节点后进先出（也可以不关心顺序）
+>         }
+>     }
+> }
+>
+> void BVH::SelfCollide(i32 nodeIdx,
+>         std::vector<std::pair<ECS::EntityID, ECS::EntityID>>& out) const {
+>     const BVHNode& node = m_nodes[nodeIdx];
+>     if (node.left == -1) {
+>         // 叶子内部：所有 primitive 两两配对
+>         for (i32 i = 0; i < node.primCount; ++i)
+>             for (i32 j = i + 1; j < node.primCount; ++j)
+>                 out.emplace_back(
+>                     m_primitives[node.firstPrim + i].entity,
+>                     m_primitives[node.firstPrim + j].entity);
+>         return;
+>     }
+>
+>     // 递归：左右子树内部各自配对 + 左右子树之间交叉配对
+>     SelfCollide(node.left, out);
+>     SelfCollide(node.right, out);
+>
+>     // 跨子树碰撞检测：用栈遍历，只检查 AABB 相交的子树
+>     std::stack<std::pair<i32, i32>> crossStack;
+>     crossStack.push({ node.left, node.right });
+>     while (!crossStack.empty()) {
+>         auto [a, b] = crossStack.top(); crossStack.pop();
+>         if (!m_nodes[a].bounds.Intersects(m_nodes[b].bounds)) continue;
+>
+>         bool aLeaf = (m_nodes[a].left == -1);
+>         bool bLeaf = (m_nodes[b].left == -1);
+>
+>         if (aLeaf && bLeaf) {
+>             for (i32 i = 0; i < m_nodes[a].primCount; ++i)
+>                 for (i32 j = 0; j < m_nodes[b].primCount; ++j)
+>                     out.emplace_back(
+>                         m_primitives[m_nodes[a].firstPrim + i].entity,
+>                         m_primitives[m_nodes[b].firstPrim + j].entity);
+>         } else if (aLeaf) {
+>             crossStack.push({ a, m_nodes[b].left });
+>             crossStack.push({ a, m_nodes[b].right });
+>         } else if (bLeaf) {
+>             crossStack.push({ m_nodes[a].left, b });
+>             crossStack.push({ m_nodes[a].right, b });
+>         } else {
+>             // 选体积更大的子树先分裂，减小栈深度
+>             f32 volA = m_nodes[a].bounds.Volume();
+>             f32 volB = m_nodes[b].bounds.Volume();
+>             if (volA > volB) {
+>                 crossStack.push({ m_nodes[a].left,  b });
+>                 crossStack.push({ m_nodes[a].right, b });
+>             } else {
+>                 crossStack.push({ a, m_nodes[b].left  });
+>                 crossStack.push({ a, m_nodes[b].right });
+>             }
+>         }
+>     }
+> }
+> ```
+>
+> ### 集成到 PhysicsWorld 并对比性能
+>
+> ```cpp
+> // PhysicsSystem 中二选一
+> class PhysicsWorld {
+> public:
+>     enum BroadPhase { BruteForce, UniformGrid, BVH };
+>     void SetBroadPhase(BroadPhase bp) { m_mode = bp; }
+>
+>     void Step(f32 dt) {
+>         UpdateBounds();
+>         switch (m_mode) {
+>             case UniformGrid: DetectCollisionsGrid(); break;
+>             case BVH:        DetectCollisionsBVH();  break;
+>             default:         DetectCollisionsBrute(); break;
+>         }
+>         ResolveCollisions(dt);
+>     }
+>
+> private:
+>     void DetectCollisionsGrid() {
+>         m_grid.Clear();
+>         for (auto& [entity, collider] : m_colliders)
+>             m_grid.Insert(entity, collider.worldBounds);
+>
+>         auto pairs = m_grid.GetPotentialPairs();
+>         for (auto& [a, b] : pairs) {
+>             if (m_colliders[a].worldBounds.Intersects(m_colliders[b].worldBounds))
+>                 m_contacts.emplace_back(a, b);
+>         }
+>     }
+>
+>     void DetectCollisionsBVH() {
+>         // 第一帧：构建 BVH；后续帧：refit
+>         if (m_bvh.Empty()) {
+>             std::vector<BVHPrimitive> prims;
+>             for (auto& [entity, col] : m_colliders)
+>                 prims.push_back({ entity, col.worldBounds, col.worldBounds.Center() });
+>             m_bvh.Build(std::move(prims));
+>         } else {
+>             std::vector<Math::AABB> newBounds;
+>             for (auto& [entity, col] : m_colliders)  // 保持 primitive 顺序
+>                 newBounds.push_back(col.worldBounds);
+>             m_bvh.Refit(newBounds);
+>         }
+>
+>         m_bvh.GetSelfCollisionPairs(m_candidatePairs);
+>         // 窄相交检测...
+>     }
+>
+>     // ── 性能对比 ──
+>     void Benchmark() {
+>         // 创建 100 个带 RigidBody + Collider 的实体，随机分布
+>         // 分别跑 100 帧，取平均帧时间
+>         ME_LOG_INFO("BruteForce: {:.2f}ms, Grid: {:.2f}ms, BVH: {:.2f}ms",
+>             benchBrute, benchGrid, benchBVH);
+>         // 预期：100 体时 Grid/BVH 约为 Brute 的 10-20% 时间
+>     }
+>
+>     BroadPhase m_mode = UniformGrid;
+>     UniformGrid m_grid{ 5.0f };
+>     BVH m_bvh;
+>     // ...
+> };
+> ```
+>
+> ### 选择建议
+>
+> | 场景 | 推荐 |
+> |------|------|
+> | 实体密集分布在有限区域（如室内） | Uniform Grid |
+> | 实体稀疏或极不均匀（如开放世界） | BVH |
+> | 实体经常增删重建 | Uniform Grid（重建 O(n)） |
+> | 实体移动为主、数量稳定 | BVH（refit O(n)） |
+
+> [!tip]- 练习 3（可选）：后期处理管线
+> ### PostProcess 架构
+>
+> 每个效果继承 `PostProcessEffect` 基类，`PostProcess` 按注册顺序链式执行。
+> 使用 ping-pong framebuffer 避免同纹理读写冲突。
+>
+> #### PostProcess.hpp
+>
+> ```cpp
+> #pragma once
+> #include "MiniEngine/Core/Types.hpp"
+> #include "MiniEngine/Render/Texture.hpp"
+> #include "MiniEngine/Render/Shader.hpp"
+> #include "MiniEngine/Render/Framebuffer.hpp"
+> #include <memory>
+> #include <vector>
+> #include <string>
+>
+> namespace MiniEngine::Render {
+>
+> // 后处理效果基类
+> class PostProcessEffect {
+> public:
+>     virtual ~PostProcessEffect() = default;
+>     virtual const char* Name() const = 0;
+>
+>     // 核心接口：输入纹理，渲染到当前绑定的 FBO
+>     virtual void Apply(Texture* input, u32 outputWidth, u32 outputHeight) = 0;
+>
+>     // ImGui 控制面板
+>     virtual void OnGUI() {}
+>
+>     bool enabled = true;
+> };
+>
+> // 效果链管理器
+> class PostProcess {
+> public:
+>     PostProcess();
+>     ~PostProcess();
+>
+>     bool Initialize(u32 width, u32 height);
+>     void Resize(u32 width, u32 height);
+>
+>     // 链式执行所有效果
+>     void Render(Texture* sceneColor, Texture* sceneDepth);
+>
+>     // 注册效果（按添加顺序执行）
+>     void AddEffect(std::unique_ptr<PostProcessEffect> effect);
+>
+>     // ImGui 全局面板
+>     void OnGUI();
+>
+> private:
+>     // Ping-pong framebuffer
+>     struct PingPong {
+>         std::unique_ptr<Texture> texA, texB;
+>         std::unique_ptr<Framebuffer> fboA, fboB;
+>         bool flip = false;  // false = A 是读端，B 是写端
+>
+>         void Initialize(u32 w, u32 h);
+>         void Resize(u32 w, u32 h);
+>         Texture* ReadTarget()  const { return flip ? texB.get() : texA.get(); }
+>         Framebuffer* WriteTarget() { return flip ? fboA.get() : fboB.get(); }
+>         void Swap() { flip = !flip; }
+>     };
+>
+>     PingPong m_pingPong;
+>     std::vector<std::unique_ptr<PostProcessEffect>> m_effects;
+>     std::unique_ptr<Shader> m_fullscreenQuadShader;
+>
+>     u32 m_width = 0, m_height = 0;
+>     bool m_enabled = true;
+> };
+>
+> } // namespace MiniEngine::Render
+> ```
+>
+> #### PostProcess.cpp — 主链执行
+>
+> ```cpp
+> #include "MiniEngine/Render/PostProcess.hpp"
+> #include <glad/glad.h>
+>
+> namespace MiniEngine::Render {
+>
+> void PostProcess::PingPong::Initialize(u32 w, u32 h) {
+>     auto createTex = [w, h]() {
+>         auto t = std::make_unique<Texture>();
+>         t->CreateEmpty(w, h, Texture::Format::RGBA, Texture::Filter::Linear);
+>         return t;
+>     };
+>     texA = createTex(); texB = createTex();
+>     fboA = std::make_unique<Framebuffer>();
+>     fboB = std::make_unique<Framebuffer>();
+>     fboA->AttachColor(texA->GetID());
+>     fboB->AttachColor(texB->GetID());
+> }
+>
+> void PostProcess::Render(Texture* sceneColor, Texture* /*sceneDepth*/) {
+>     if (!m_enabled || m_effects.empty()) return;
+>
+>     glDisable(GL_DEPTH_TEST);
+>
+>     // 将场景颜色拷贝到 ping-pong 的 A 端作为初始输入
+>     // （简化：直接用 sceneColor 作为首个输入）
+>     Texture* currentInput = sceneColor;
+>
+>     for (auto& effect : m_effects) {
+>         if (!effect->enabled) continue;
+>
+>         // 绑定 ping-pong 的写端
+>         m_pingPong.WriteTarget()->Bind();
+>         glViewport(0, 0, m_width, m_height);
+>
+>         effect->Apply(currentInput, m_width, m_height);
+>
+>         // 翻转：刚写入的变成下一效果的输入
+>         m_pingPong.Swap();
+>         currentInput = m_pingPong.ReadTarget();
+>     }
+>
+>     // 将最终结果 blit 到默认 framebuffer
+>     glBindFramebuffer(GL_READ_FRAMEBUFFER,
+>                       m_pingPong.flip ? m_pingPong.fboA->GetID()
+>                                       : m_pingPong.fboB->GetID());
+>     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+>     glBlitFramebuffer(0, 0, m_width, m_height, 0, 0, m_width, m_height,
+>                       GL_COLOR_BUFFER_BIT, GL_NEAREST);
+>
+>     glEnable(GL_DEPTH_TEST);
+> }
+>
+> void PostProcess::AddEffect(std::unique_ptr<PostProcessEffect> effect) {
+>     m_effects.push_back(std::move(effect));
+> }
+> ```
+>
+> ### 具体效果实现
+>
+> #### Bloom — 高亮提取 → 高斯模糊 → 混合
+>
+> ```cpp
+> // Bloom.hpp
+> #pragma once
+> #include "MiniEngine/Render/PostProcess.hpp"
+>
+> namespace MiniEngine::Render {
+>
+> class BloomEffect : public PostProcessEffect {
+> public:
+>     const char* Name() const override { return "Bloom"; }
+>     void Apply(Texture* input, u32 w, u32 h) override;
+>     void OnGUI() override;
+>
+>     f32 threshold = 1.0f;    // 亮度阈值
+>     f32 intensity = 0.8f;    // 混合强度
+>     i32 blurPasses = 5;      // 高斯模糊次数
+>     f32 blurRadius = 1.0f;
+>
+> private:
+>     std::unique_ptr<Shader> m_extractShader;
+>     std::unique_ptr<Shader> m_blurShader;
+>     std::unique_ptr<Shader> m_compositeShader;
+>     std::unique_ptr<Texture> m_blurTempA, m_blurTempB;
+> };
+> ```
+>
+> ```cpp
+> // Bloom.cpp
+> void BloomEffect::Apply(Texture* input, u32 w, u32 h) {
+>     // 步骤 1：提取高亮区域
+>     m_extractShader->Bind();
+>     m_extractShader->SetFloat("threshold", threshold);
+>     input->Bind(0);
+>     m_extractShader->SetInt("sceneTex", 0);
+>     // 渲染到当前绑定的 FBO（PostProcess 已绑定 write target）
+>     RenderFullscreenQuad();
+>
+>     // 步骤 2：多 pass 高斯模糊（降采样 + 模糊）
+>     // 先用半分辨率模糊以减少开销
+>     u32 hw = w / 2, hh = h / 2;
+>     if (!m_blurTempA) {
+>         m_blurTempA = std::make_unique<Texture>();
+>         m_blurTempB = std::make_unique<Texture>();
+>         m_blurTempA->CreateEmpty(hw, hh, Texture::Format::RGBA);
+>         m_blurTempB->CreateEmpty(hw, hh, Texture::Format::RGBA);
+>     }
+>
+>     m_blurShader->Bind();
+>     for (i32 i = 0; i < blurPasses; ++i) {
+>         bool horizontal = (i % 2 == 0);
+>         m_blurShader->SetInt("horizontal", horizontal ? 1 : 0);
+>         m_blurShader->SetFloat("radius", blurRadius * f32(i + 1));
+>
+>         Texture* src = (i == 0) ? /* 半分辨率高亮提取结果 */ (Texture*)nullptr
+>                                 : (horizontal ? m_blurTempA.get() : m_blurTempB.get());
+>         // fullscreen quad → 交替写入 m_blurTempA / m_blurTempB
+>     }
+>
+>     // 步骤 3：与场景颜色混合（对原始 input 二次采样）
+>     m_compositeShader->Bind();
+>     m_compositeShader->SetFloat("intensity", intensity);
+>     input->Bind(0);
+>     m_compositeShader->SetInt("sceneTex", 0);
+>     m_blurTempA->Bind(1);
+>     m_compositeShader->SetInt("bloomTex", 1);
+>     RenderFullscreenQuad();
+> }
+> ```
+>
+> #### Tone Mapping — ACES 近似
+>
+> ```cpp
+> class ToneMappingEffect : public PostProcessEffect {
+> public:
+>     enum Mode { Reinhard, ACES, Uncharted2 };
+>     Mode mode = ACES;
+>     f32 exposure = 1.0f;
+>     f32 gamma = 2.2f;
+>
+>     const char* Name() const override { return "Tone Mapping"; }
+>
+>     void Apply(Texture* input, u32 w, u32 h) override {
+>         m_shader->Bind();
+>         m_shader->SetFloat("exposure", exposure);
+>         m_shader->SetFloat("gamma", gamma);
+>         m_shader->SetInt("mode", static_cast<i32>(mode));
+>         input->Bind(0);
+>         m_shader->SetInt("hdrTex", 0);
+>         RenderFullscreenQuad();
+>     }
+>
+>     void OnGUI() override {
+>         ImGui::Combo("Mode", (int*)&mode, "Reinhard\0ACES\0Uncharted2\0");
+>         ImGui::SliderFloat("Exposure", &exposure, 0.1f, 5.0f);
+>         ImGui::SliderFloat("Gamma", &gamma, 1.0f, 3.0f);
+>     }
+> private:
+>     std::unique_ptr<Shader> m_shader;
+> };
+>
+> // tone_mapping.frag（内联在代码中）
+> static const char* s_toneMappingFS = R"(
+> #version 330 core
+> uniform sampler2D hdrTex;
+> uniform float exposure;
+> uniform float gamma;
+> uniform int mode;
+> in vec2 TexCoord;
+> out vec4 FragColor;
+>
+> vec3 Reinhard(vec3 x) { return x / (x + 1.0); }
+>
+> vec3 ACESFilm(vec3 x) {
+>     float a = 2.51; float b = 0.03; float c = 2.43;
+>     float d = 0.59; float e = 0.14;
+>     return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+> }
+>
+> void main() {
+>     vec3 hdr = texture(hdrTex, TexCoord).rgb * exposure;
+>     vec3 mapped;
+>     if (mode == 0)      mapped = Reinhard(hdr);
+>     else if (mode == 1) mapped = ACESFilm(hdr);
+>     else                mapped = vec3(1.0) - exp(-hdr);
+>     FragColor = vec4(pow(mapped, vec3(1.0 / gamma)), 1.0);
+> }
+> )";
+> ```
+>
+> #### FXAA — 快速近似抗锯齿
+>
+> ```cpp
+> class FXAAEffect : public PostProcessEffect {
+> public:
+>     f32 qualitySubpix = 0.75f;   // 亚像素 AA 强度
+>     f32 qualityEdgeThreshold = 0.166f;  // 边缘检测阈值
+>     f32 qualityEdgeThresholdMin = 0.0833f;
+>
+>     const char* Name() const override { return "FXAA"; }
+>
+>     void Apply(Texture* input, u32 w, u32 h) override {
+>         m_shader->Bind();
+>         m_shader->SetVec2("invScreenSize", Math::Vec2(1.0f / w, 1.0f / h));
+>         m_shader->SetFloat("qualitySubpix", qualitySubpix);
+>         m_shader->SetFloat("qualityEdgeThreshold", qualityEdgeThreshold);
+>         m_shader->SetFloat("qualityEdgeThresholdMin", qualityEdgeThresholdMin);
+>         input->Bind(0);
+>         m_shader->SetInt("colorTex", 0);
+>         RenderFullscreenQuad();
+>     }
+>
+>     void OnGUI() override {
+>         ImGui::SliderFloat("Subpix Quality", &qualitySubpix, 0.0f, 1.0f);
+>         ImGui::SliderFloat("Edge Threshold", &qualityEdgeThreshold, 0.063f, 0.333f);
+>     }
+> private:
+>     std::unique_ptr<Shader> m_shader;
+> };
+>
+> // FXAA 核心（NVIDIA FXAA 3.11 简化版）
+> static const char* s_fxaaFS = R"(
+> #version 330 core
+> uniform sampler2D colorTex;
+> uniform vec2 invScreenSize;
+> uniform float qualitySubpix;
+> uniform float qualityEdgeThreshold;
+> uniform float qualityEdgeThresholdMin;
+> in vec2 TexCoord;
+> out vec4 FragColor;
+>
+> #define FxaaTex(t, p) texture(t, p)
+>
+> void main() {
+>     vec2 uv = TexCoord;
+>     vec3 rgbNW = FxaaTex(colorTex, uv + vec2(-1,-1)*invScreenSize).rgb;
+>     vec3 rgbNE = FxaaTex(colorTex, uv + vec2( 1,-1)*invScreenSize).rgb;
+>     vec3 rgbSW = FxaaTex(colorTex, uv + vec2(-1, 1)*invScreenSize).rgb;
+>     vec3 rgbSE = FxaaTex(colorTex, uv + vec2( 1, 1)*invScreenSize).rgb;
+>     vec3 rgbM  = FxaaTex(colorTex, uv).rgb;
+>
+>     float lumaNW = dot(rgbNW, vec3(0.299, 0.587, 0.114));
+>     float lumaNE = dot(rgbNE, vec3(0.299, 0.587, 0.114));
+>     float lumaSW = dot(rgbSW, vec3(0.299, 0.587, 0.114));
+>     float lumaSE = dot(rgbSE, vec3(0.299, 0.587, 0.114));
+>     float lumaM  = dot(rgbM,  vec3(0.299, 0.587, 0.114));
+>
+>     float lumaMin = min(lumaM, min(min(lumaNW, lumaNE), min(lumaSW, lumaSE)));
+>     float lumaMax = max(lumaM, max(max(lumaNW, lumaNE), max(lumaSW, lumaSE)));
+>     float range = lumaMax - lumaMin;
+>
+>     if (range < max(qualityEdgeThresholdMin, lumaMax * qualityEdgeThreshold)) {
+>         FragColor = vec4(rgbM, 1.0);
+>         return;
+>     }
+>
+>     // 边缘方向估算与混合
+>     float lumaL = (lumaNW + lumaSW + lumaNE + lumaSE) * 0.25;
+>     float rangeL = abs(lumaL - lumaM);
+>     float blendL = max(0.0, (rangeL / range) - qualitySubpix) * (1.0 / (1.0 - qualitySubpix));
+>
+>     // 沿边缘方向采样并混合
+>     float edgeVert = abs(lumaNW + (-2.0*lumaNE) + lumaSE)
+>                    + abs(lumaSW + (-2.0*lumaNW) + lumaNE) * 2.0;
+>     float edgeHorz = abs(lumaNW + (-2.0*lumaSW) + lumaSE)
+>                    + abs(lumaNE + (-2.0*lumaNW) + lumaSW) * 2.0;
+>     bool horzSpan = edgeHorz >= edgeVert;
+>
+>     vec2 step = horzSpan ? vec2(invScreenSize.x, 0) : vec2(0, invScreenSize.y);
+>     vec3 rgbA = 0.5 * (FxaaTex(colorTex, uv - step).rgb + FxaaTex(colorTex, uv + step).rgb);
+>     float lumaA = dot(rgbA, vec3(0.299, 0.587, 0.114));
+>     bool useA = abs(lumaA - lumaM) < range * 0.5;
+>
+>     FragColor = vec4(mix(rgbM, rgbA, useA ? blendL : 0.0), 1.0);
+> }
+> )";
+> ```
+>
+> #### Vignette — 暗角效果
+>
+> ```cpp
+> class VignetteEffect : public PostProcessEffect {
+> public:
+>     f32 intensity = 0.4f;   // 0~1，暗角强度
+>     f32 smoothness = 0.3f;  // 过渡柔和度
+>     Math::Color color = Math::Color(0, 0, 0);  // 暗角颜色
+>
+>     const char* Name() const override { return "Vignette"; }
+>
+>     void Apply(Texture* input, u32 w, u32 h) override {
+>         m_shader->Bind();
+>         m_shader->SetFloat("intensity", intensity);
+>         m_shader->SetFloat("smoothness", smoothness);
+>         m_shader->SetVec3("vignetteColor",
+>             Math::Vec3(color.r, color.g, color.b));
+>         input->Bind(0);
+>         m_shader->SetInt("sceneTex", 0);
+>         RenderFullscreenQuad();
+>     }
+>
+>     void OnGUI() override {
+>         ImGui::SliderFloat("Intensity", &intensity, 0.0f, 1.0f);
+>         ImGui::SliderFloat("Smoothness", &smoothness, 0.01f, 1.0f);
+>         ImGui::ColorEdit3("Color", &color.r);
+>     }
+> private:
+>     std::unique_ptr<Shader> m_shader;
+> };
+>
+> // vignette.frag
+> static const char* s_vignetteFS = R"(
+> #version 330 core
+> uniform sampler2D sceneTex;
+> uniform float intensity;
+> uniform float smoothness;
+> uniform vec3 vignetteColor;
+> in vec2 TexCoord;
+> out vec4 FragColor;
+>
+> void main() {
+>     vec3 color = texture(sceneTex, TexCoord).rgb;
+>     // 以屏幕中心为原点计算距离
+>     vec2 uv = TexCoord * 2.0 - 1.0;
+>     float dist = length(uv);
+>     float vignette = smoothstep(0.8, smoothness, dist);
+>     color = mix(color, vignetteColor, vignette * intensity);
+>     FragColor = vec4(color, 1.0);
+> }
+> )";
+> ```
+>
+> ### 全屏四边形渲染辅助
+>
+> ```cpp
+> // PostProcess 调用此函数绘制全屏四边形
+> static void RenderFullscreenQuad() {
+>     static u32 quadVAO = 0;
+>     if (!quadVAO) {
+>         float verts[] = { -1,1,  -1,-1,  1,-1,  -1,1,  1,-1,  1,1 };
+>         float uvs[]   = {  0,1,   0, 0,  1, 0,   0,1,  1, 0,  1,1 };
+>         u32 vbo[2]; glGenBuffers(2, vbo);
+>         glGenVertexArrays(1, &quadVAO);
+>         glBindVertexArray(quadVAO);
+>         glBindBuffer(GL_ARRAY_BUFFER, vbo[0]);
+>         glBufferData(GL_ARRAY_BUFFER, sizeof(verts), verts, GL_STATIC_DRAW);
+>         glEnableVertexAttribArray(0);
+>         glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+>         glBindBuffer(GL_ARRAY_BUFFER, vbo[1]);
+>         glBufferData(GL_ARRAY_BUFFER, sizeof(uvs), uvs, GL_STATIC_DRAW);
+>         glEnableVertexAttribArray(1);
+>         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+>         glBindVertexArray(0);
+>     }
+>     glBindVertexArray(quadVAO);
+>     glDrawArrays(GL_TRIANGLES, 0, 6);
+> }
+> ```
+>
+> ### ImGui 后期处理面板
+>
+> ```cpp
+> void PostProcess::OnGUI() {
+>     if (!ImGui::Begin("Post Processing", &m_enabled)) {
+>         ImGui::End();
+>         return;
+>     }
+>     ImGui::Checkbox("Enabled", &m_enabled);
+>     ImGui::Separator();
+>
+>     for (auto& effect : m_effects) {
+>         bool open = ImGui::CollapsingHeader(effect->Name(),
+>             effect->enabled ? ImGuiTreeNodeFlags_DefaultOpen : 0);
+>
+>         // 右键菜单：启用/禁用
+>         if (ImGui::BeginPopupContextItem()) {
+>             if (ImGui::MenuItem("Toggle")) effect->enabled = !effect->enabled;
+>             ImGui::EndPopup();
+>         }
+>
+>         if (open) {
+>             ImGui::Checkbox("Enabled", &effect->enabled);
+>             effect->OnGUI();
+>         }
+>     }
+>
+>     ImGui::End();
+> }
+> ```
+>
+> ### 在 Renderer 中集成 PostProcess
+>
+> ```cpp
+> // Renderer::RenderFrame 末尾
+> void Renderer::RenderFrame(ECS::World* world) {
+>     // ... 阴影 pass, 主渲染 pass (渲染到 m_sceneFBO) ...
+>
+>     // 后期处理
+>     if (m_postProcess) {
+>         m_postProcess->Render(m_sceneColorTex.get(), m_sceneDepthTex.get());
+>     } else {
+>         // 无后期处理：直接 blit sceneFBO 到默认 framebuffer
+>         glBindFramebuffer(GL_READ_FRAMEBUFFER, m_sceneFBO->GetID());
+>         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+>         glBlitFramebuffer(0, 0, m_width, m_height, 0, 0, m_width, m_height,
+>                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+>     }
+>
+>     // ImGui 面板
+>     if (m_showPostProcessPanel) {
+>         m_postProcess->OnGUI();
+>     }
+> }
+>
+> // 初始化时注册效果链（建议顺序：Bloom → ToneMapping → FXAA → Vignette）
+> void SetupPostProcess() {
+>     m_postProcess = std::make_unique<PostProcess>();
+>     m_postProcess->Initialize(m_width, m_height);
+>     m_postProcess->AddEffect(std::make_unique<BloomEffect>());
+>     m_postProcess->AddEffect(std::make_unique<ToneMappingEffect>());
+>     m_postProcess->AddEffect(std::make_unique<FXAAEffect>());
+>     m_postProcess->AddEffect(std::make_unique<VignetteEffect>());
+> }
+> ```
+
+---
 ## 3. 前置项目：软渲染器（Software Rasterizer）
 
 在构建基于GPU的MiniEngine之前，强烈建议先完成一个**CPU软渲染器**项目。软渲染器完全在CPU上执行光栅化过程，不依赖GPU硬件加速。这个经历会让你在面对GPU上的调试难题时拥有直觉性的判断力——当屏幕上出现错误像素时，你能从CPU端验证管线的数学正确性。

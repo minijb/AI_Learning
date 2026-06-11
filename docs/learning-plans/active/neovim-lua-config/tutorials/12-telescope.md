@@ -235,6 +235,79 @@ end, { desc = "搜索选中文本" })
 ### 练习 3: 安装 fzf-native（可选）
 如果系统有 `make`，在配置中启用 `telescope-fzf-native.nvim`。对比安装前后的排序速度差异（在大型项目中用 `<leader>ff` 测试）。
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 基础查找的使用方法：
+>
+> - **`<leader>ff` 查找文件**：输入 `init` → Telescope 实时过滤，显示所有路径包含 `init` 的文件（如 `init.lua`、`init.vim`）。按 `<C-n>`/`<C-p>` 在列表中上下移动，`<CR>` 在当前窗口打开，`<C-v>` 垂直分割打开。预览窗口实时显示当前高亮项的文件内容。
+> - **`<leader>fg` 搜索文本**（live_grep）：输入 `vim.opt` → Telescope 执行 regex 搜索并实时更新结果。与 `find_files` 不同，`live_grep` 按内容匹配，结果列出文件名:行号:匹配行。需要 `ripgrep`（`rg`）已安装在 PATH 中。如果没有 rg，该命令会报错。
+> - **`<leader>fb` 切换缓冲区**：显示所有已打开的 buffer 列表，按最近使用排序（`sort_lastused = true`）。选择一个 buffer 后按 `<CR>` 跳转过去。相比 `:bnext`/`:bprev`，Telescope 缓冲区列表更适合在有 10+ 个 buffer 打开时快速切换。
+>
+> **关键技巧**：在 Telescope 窗口中按 `?` 可以查看所有可用的按键映射——包括 `<C-t>` 新 Tab 打开、`<C-u>`/`<C-d>` 滚动预览窗口等。
+
+> [!tip]- 练习 2 参考答案
+> 在 telescope 插件 spec 中添加 LSP 符号和诊断映射：
+>
+> ```lua
+> -- 在 lua/plugins/telescope.lua 的 keys 表中追加：
+> {
+>   "<leader>fs",
+>   function() require("telescope.builtin").lsp_document_symbols() end,
+>   desc = "查找当前文件符号"
+> },
+> {
+>   "fd",
+>   function() require("telescope.builtin").diagnostics() end,
+>   desc = "查找诊断信息"
+> },
+> ```
+>
+> 或者在 LspAttach 回调中按 buffer 添加（更贴近 kickstart 风格）：
+>
+> ```lua
+> -- 在 telescope LspAttach autocmd 的回调函数内追加：
+> vim.keymap.set('n', '<leader>fs', builtin.lsp_document_symbols,
+>   { buffer = b, desc = 'Document Symbols' })
+> vim.keymap.set('n', '<leader>fd', builtin.diagnostics,
+>   { buffer = b, desc = 'Diagnostics' })
+> ```
+>
+> `lsp_document_symbols` 列出当前文件中的所有函数、类、变量定义——本质上是文件结构浏览器。选中后跳转到对应位置。`diagnostics` 列出所有文件中的 LSP 诊断（错误、警告、提示），支持模糊匹配错误消息。
+
+> [!tip]- 练习 3 参考答案（可选）
+> 安装 `telescope-fzf-native.nvim` 的步骤与效果：
+>
+> 1. **确保 `make` 可用**：终端执行 `make --version` 确认
+> 2. **在 telescope 依赖中启用**：
+>
+> ```lua
+> dependencies = {
+>   "nvim-lua/plenary.nvim",
+>   {
+>     "nvim-telescope/telescope-fzf-native.nvim",
+>     build = "make",
+>     cond = function()
+>       return vim.fn.executable("make") == 1
+>     end,
+>   },
+> },
+> ```
+>
+> 3. **在 config 中加载**：已有的 `pcall(telescope.load_extension, "fzf")` 会在 build 成功后加载 fzf 排序器
+> 4. **验证**：执行 `:checkhealth telescope`，应看到 `fzf` extension OK
+>
+> **性能对比测试**：
+> - 在一个 1000+ 文件的仓库中按 `<leader>ff` 并输入模糊串
+> - 安装 fzf-native 前：排序结果可能在输入停止后还有 0.5-1s 延迟
+> - 安装 fzf-native 后：排序几乎是即时的（fzf 算法对模糊匹配做了极致优化）
+> - 在小型项目（< 100 文件）中差异不可感知——默认排序器足够
+>
+> **Windows 注意事项**：如果没有 `make`，`cond` 函数会跳过安装。可以安装 `scoop install make` 或使用 `cmake` 替代（需修改 build 命令）。不装 fzf-native 也不影响正常使用。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
 ## 4. 扩展阅读

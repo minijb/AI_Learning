@@ -1267,6 +1267,170 @@ private:
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 以下是以 **F.E.A.R. (Monolith) — GOAP** 为目标的架构总结示例（目标岗位：AI 系统工程）。
+>
+> **游戏 & 架构**：F.E.A.R. (2005, Monolith Productions) — 使用 **GOAP (Goal-Oriented Action Planning)** 驱动敌人 AI。核心挑战：在小规模高强度枪战中创造 emergent 的、不可预测的敌人行为，使玩家感知 AI "聪明"。
+>
+> **架构图（文字描述）**：
+> ```
+> Perception → World State (~20 bools/enums)
+>                   ↓
+>             Goal Selector (KillPlayer / StayAlive / FlankPlayer)
+>                   ↓
+>             A* Planner ← Action Set (~50 actions: MoveTo, FireAt, Reload, ThrowGrenade, TakeCover)
+>                   ↓
+>             Plan [Action₁, Action₂, …] → Execute → Replan on failure/state change
+> ```
+>
+> **为什么选择 GOAP？**
+> 1. **行为空间**：敌人需要动态组合"移动 + 攻击 + 掩护 + 撤退"，手动设计所有行为序列的组合爆炸不可行。GOAP 通过 A* 搜索自动合成序列。
+> 2. **玩家不可预测性**：Monolith 希望 AI 行为不重复。GOAP 基于实时 World State 规划——同一敌人不同局势做不同选择。
+> 3. **设计哲学**：小规模遭遇（5-8 敌活跃），允许每 AI 0.3-0.5ms 的规划开销。关卡设计保证了 enemy cap，使 GOAP 性能可行。
+>
+> **关键权衡**：牺牲了**可预测性和可调试性**换取**emergent behavior**。当 AI 做出意料之外的行为时，开发者难以确定是"合理规划"还是 bug。代价是复杂的 World State 可视化工具和调优流程。
+>
+> **如果今天重做**：保留 GOAP 的 A* 规划核心，但用 **Utility AI 做 Goal Selection**（替代硬编码优先级）——例如 `KillPlayer` 和 `StayAlive` 的竞争基于效用评分而非固定规则。这样"太聪明反而不好玩"的问题可以通过调整 Utility 曲线来系统性控制（而非手动添加"故意犯错"逻辑）。同时，将规划器改为异步 Job（现代硬件支持），消除 5-8 enemy cap。
+
+> [!tip]- 练习 2 参考答案
+> **恐怖游戏导演 AI 架构设计**
+>
+> **1. 输入（6 种）**
+>
+> | 输入 | 为什么对恐怖节奏至关重要 |
+> |------|------------------------|
+> | 玩家心率（通过外设或游戏内行为推断——移动速度、视角抖动频率） | 直接衡量恐怖效果的生理指标。心率下降 → 需要制造紧张；心率持续过高 → 需要释放窗口 |
+> | 玩家位置 + 视线方向 | 决定怪物从哪个方向出现不会被直接看到——"看不见的威胁"比"正面遭遇"更恐怖 |
+> | 玩家资源（弹药、电池、药品） | 资源充裕 → 玩家有安全感 → 需要制造消耗；资源枯竭 → 需要给予微量补给但设置高风险 |
+> | 上次惊吓以来的时间 | 核心节奏指标。30 秒内连续惊吓 → 免疫；2 分钟无事件 → 无聊。目标：每隔 45-90 秒一次"威胁波动" |
+> | 玩家所在区域类型（安全室/走廊/开阔大厅） | 不同空间类型的恐怖潜力不同。狭窄走廊 → 幽闭恐惧；安全室 → 虚假安全感后的背叛 |
+> | 游戏进度 + 故事节点 | 前 1/3 建立恐怖基调（低频低强度），中 1/3 递增（频率 + 强度上升），后 1/3 高潮（Boss 战 + 追逐） |
+>
+> **2. 输出（3 种以上可控制元素）**
+>
+> | 输出 | 说明 |
+> |------|------|
+> | 怪物生成与行为 | 决定何时、何地、何种怪物出现。不一定是"生成"——可能是"从天花板掉下来"、"从通风口爬出"、"在走廊尽头一闪而过" |
+> | 环境操控（灯光、音效、门） | 灯光闪烁/熄灭（失去视觉控制）、远处脚步声（暗示威胁存在）、门被锁/自动打开（路径控制） |
+> | 资源投放（弹药、药品、电池） | 微量、高风险位置（怪物巡逻路径上）、附带心理代价（"我需要那个药包——但它就在那只怪物的脚边"） |
+> | 叙事触发器 | 收音机自动播放、电话铃声、NPC 惨叫——制造"有事情发生了但我不在场"的不安 |
+>
+> **3. 紧张度曲线**
+>
+> ```
+> Tension
+>   1.0 ┤                          ╭─ Boss ╮
+>       │                  ╭─ Chase ─╮      │
+>   0.8 ┤          ╭─ Hunt ─╮  │         ╰──┤
+>       │   ╭─ Creep ─╮  │     ╰──Safe──╮  │
+>   0.6 ┤   │      ╰──Safe─╮             ╰──┤
+>       │   │             ╰──Creep──╮       │
+>   0.4 ┤   ╰──Safe──╮               ╰──Safe─┤
+>       │           ╰──Creep──╮              │
+>   0.2 ┤──Intro──╮           ╰──Safe────────┤
+>       │         ╰──Creep──╮                │
+>   0.0 ┤──────────────────╰────────────────╰──
+>       0    5    10   15   20   25   30   35min
+> ```
+>
+> 节奏合理的原因：遵循"紧张-释放-紧张"的交替模式。每次高峰后有明确的安全室/剧情段落提供释放。曲线整体呈上升趋势（前 1/3 低频，后 1/3 高频），但保持波动而非单调递增——连续高压使玩家脱敏。
+>
+> **4. 防止恐怖免疫的两种策略**
+>
+> **策略 A — 动态怪物行为库**：Director 维护一个"最近使用的惊吓模式"历史记录（近 30 分钟）。模式包括：正面出现、背后出现、一闪而过、声音暗示、假警报（无怪物但环境变化）。Director 强制轮换——同一种模式在 15 分钟内不重复。随游戏时间增加，解锁新的、玩家未见过的怪物类型和行为模式（"二阶恐怖"——玩家以为熟悉了规则，但规则已经改变）。
+>
+> **策略 B — 虚假安全感**：前 5 小时建立安全室的可靠性——音乐舒缓、灯光稳定、不可被怪物进入。在第 6 小时的一个节点，怪物**打破**这个规则（安全室门被撞开、音乐突然停止）。玩家对"安全"的信任被瓦解——后续所有安全室都变得不确定。这不是简单的"更多怪物"——这是**对玩家已建立安全感的系统性背叛**，重新激活恐怖反应。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```csharp
+> // SquadCoordinator.cs — 简化的小队协调实现
+> using System.Collections.Generic;
+> using UnityEngine;
+>
+> public enum SquadRole { Unassigned, Suppressor, Flanker, Grenadier }
+>
+> public class SquadCoordinator : MonoBehaviour
+> {
+>     [SerializeField] private Transform _player;
+>     [SerializeField] private List<SquadAgent> _members = new();
+>
+>     private void Update()
+>     {
+>         AssignRoles();
+>         VisualizeRoles();
+>     }
+>
+>     void AssignRoles()
+>     {
+>         // Step 1: 收集存活成员
+>         var alive = _members.FindAll(m => m.IsAlive);
+>         foreach (var m in alive) m.Role = SquadRole.Unassigned;
+>
+>         // Step 2: 强制保证至少一个 Suppressor 和一个 Flanker
+>         // Suppressor: 最近接玩家的成员——需要在正面吸引火力
+>         alive.Sort((a, b) =>
+>             Vector3.Distance(a.transform.position, _player.position)
+>             .CompareTo(Vector3.Distance(b.transform.position, _player.position)));
+>
+>         if (alive.Count > 0) alive[0].Role = SquadRole.Suppressor;
+>
+>         // Flanker: 最远离玩家的成员——有空间绕路
+>         if (alive.Count > 1) {
+>             // 优先选择与 Suppressor 在不同方向的成员
+>             SquadAgent bestFlanker = alive[alive.Count - 1];
+>             Vector3 toPlayer = (_player.position - bestFlanker.transform.position).normalized;
+>             Vector3 supToPlayer = (_player.position - alive[0].transform.position).normalized;
+>             float dot = Vector3.Dot(toPlayer, supToPlayer);
+>
+>             // 如果方向太接近 Suppressor（dot > 0.5），选下一个
+>             if (dot > 0.5f && alive.Count > 2) {
+>                 bestFlanker = alive[alive.Count - 2];
+>             }
+>             bestFlanker.Role = SquadRole.Flanker;
+>         }
+>
+>         // Grenadier: 剩余成员中距玩家中等距离的
+>         if (alive.Count > 2) {
+>             var mid = alive[alive.Count / 2];
+>             if (mid.Role == SquadRole.Unassigned)
+>                 mid.Role = SquadRole.Grenadier;
+>         }
+>
+>         // Step 3: 角色切换平滑处理——保留上帧角色直到新指令到达
+>         // （通过 "角色分配与角色执行分离"——Coordinator 只写 Role 到 Blackboard，
+>         //  个体 BT 在下一帧读取并切换到新角色行为）
+>     }
+>
+>     void VisualizeRoles()
+>     {
+>         foreach (var m in _members) {
+>             if (!m.IsAlive) continue;
+>             Color c = m.Role switch {
+>                 SquadRole.Suppressor => Color.red,
+>                 SquadRole.Flanker    => Color.blue,
+>                 SquadRole.Grenadier  => Color.yellow,
+>                 _                    => Color.gray
+>             };
+>             Debug.DrawLine(m.transform.position, _player.position, c);
+>             // 头顶文字标签在 OnDrawGizmos 中实现
+>         }
+>     }
+> }
+>
+> public class SquadAgent : MonoBehaviour
+> {
+>     public SquadRole Role;
+>     public bool IsAlive = true;
+>     // ... BT 组件、Blackboard 引用
+> }
+> ```
+>
+> **自评**：
+> - **角色分配是否合理？** 最小分配保证（至少 1 Suppressor + 1 Flanker）+ 方向性检查避免两个角色从同一方向接近。不会三个全选同一角色。
+> - **角色切换是否平滑？** Coordinator 每帧重新评估并写入 Blackboard。个体 BT 通过"角色分配与角色执行分离"在下一帧读取新角色并切换行为——无中断、无空帧。
+> - **玩家感受**：正面有人压制（玩家忙于躲掩体）→ 侧翼出现敌人（玩家被迫移动）→ 手雷逼迫换位。三层压力创造"被包抄"的紧张感。
 ## 4. 扩展阅读
 
 ### GDC 演讲（核心 — 必看）

@@ -1499,6 +1499,323 @@ Closed ──[playerNear]──→ Opening ──[animationComplete]──→ Op
 
 **挑战**：Reloading 完成后需要"回到之前的武器状态"，但普通 FSM 没有状态记忆能力。你有两种解决方案：(a) 在 `StateMachineRunner` 上记录 `_lastWeaponState` 字段，Reloading 完成时手动跳转回去；(b) 给 Reloading 状态创建两个副本——`ReloadingFromMelee` 和 `ReloadingFromRanged`，各自连到正确的回退状态。讨论两种方案的优缺点。
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> **IState 接口与 StateMachine 控制器：**
+>
+> ```csharp
+> public interface IState
+> {
+>     void Enter();
+>     void Update();
+>     void Exit();
+> }
+>
+> public class StateMachine
+> {
+>     private IState _currentState;
+>     public void ChangeState(IState newState)
+>     {
+>         _currentState?.Exit();
+>         _currentState = newState;
+>         _currentState?.Enter();
+>     }
+>     public void Update() => _currentState?.Update();
+> }
+> ```
+>
+> **四个门状态类：**
+>
+> ```csharp
+> public class DoorClosedState : IState
+> {
+>     private readonly Door _door;
+>     public DoorClosedState(Door door) { _door = door; }
+>
+>     public void Enter()
+>     {
+>         _door.Collider.enabled = true;  // 碰撞体激活，阻挡通行
+>         _door.SetIndicator(Color.red);
+>         Debug.Log("[Door] Closed");
+>     }
+>     public void Update()
+>     {
+>         if (_door.IsPlayerNear())
+>             _door.StateMachine.ChangeState(_door.OpeningState);
+>     }
+>     public void Exit() { }
+> }
+>
+> public class DoorOpeningState : IState
+> {
+>     private readonly Door _door;
+>     public DoorOpeningState(Door door) { _door = door; }
+>
+>     public void Enter()
+>     {
+>         _door.Animator.SetTrigger("Open");
+>         _door.SetIndicator(Color.yellow);
+>         Debug.Log("[Door] Opening...");
+>     }
+>     public void Update()
+>     {
+>         // 检查动画是否播放完毕
+>         var stateInfo = _door.Animator.GetCurrentAnimatorStateInfo(0);
+>         if (stateInfo.IsName("DoorOpen") && stateInfo.normalizedTime >= 1f)
+>             _door.StateMachine.ChangeState(_door.OpenState);
+>     }
+>     public void Exit() { }
+> }
+>
+> public class DoorOpenState : IState
+> {
+>     private readonly Door _door;
+>     private float _leaveTimer;
+>     public DoorOpenState(Door door) { _door = door; }
+>
+>     public void Enter()
+>     {
+>         _door.Collider.enabled = false; // 碰撞体禁用，允许通行
+>         _door.SetIndicator(Color.green);
+>         _leaveTimer = 0f;
+>         Debug.Log("[Door] Open");
+>     }
+>     public void Update()
+>     {
+>         if (!_door.IsPlayerNear())
+>         {
+>             _leaveTimer += Time.deltaTime;
+>             if (_leaveTimer >= 2f) // 玩家离开 2 秒后关门
+>                 _door.StateMachine.ChangeState(_door.ClosingState);
+>         }
+>         else
+>         {
+>             _leaveTimer = 0f; // 玩家还在附近，重置计时
+>         }
+>     }
+>     public void Exit() { }
+> }
+>
+> public class DoorClosingState : IState
+> {
+>     private readonly Door _door;
+>     public DoorClosingState(Door door) { _door = door; }
+>
+>     public void Enter()
+>     {
+>         _door.Animator.SetTrigger("Close");
+>         _door.Collider.enabled = true; // 关门动画一开始就恢复碰撞
+>         _door.SetIndicator(Color.yellow);
+>         Debug.Log("[Door] Closing...");
+>     }
+>     public void Update()
+>     {
+>         var stateInfo = _door.Animator.GetCurrentAnimatorStateInfo(0);
+>         if (stateInfo.IsName("DoorClosed") && stateInfo.normalizedTime >= 1f)
+>             _door.StateMachine.ChangeState(_door.ClosedState);
+>     }
+>     public void Exit() { }
+> }
+> ```
+>
+> **Door 宿主 MonoBehaviour：**
+>
+> ```csharp
+> public class Door : MonoBehaviour
+> {
+>     public StateMachine StateMachine { get; private set; }
+>     public IState ClosedState, OpeningState, OpenState, ClosingState;
+>
+>     [SerializeField] private Collider _collider;
+>     [SerializeField] private Animator _animator;
+>     [SerializeField] private float _triggerRadius = 3f;
+>
+>     public Collider Collider => _collider;
+>     public Animator Animator => _animator;
+>
+>     private Transform _player;
+>
+>     void Awake()
+>     {
+>         _player = GameObject.FindGameObjectWithTag("Player")?.transform;
+>         StateMachine = new StateMachine();
+>         // 预创建所有状态对象，避免 GC
+>         ClosedState  = new DoorClosedState(this);
+>         OpeningState = new DoorOpeningState(this);
+>         OpenState    = new DoorOpenState(this);
+>         ClosingState = new DoorClosingState(this);
+>     }
+>
+>     void Start() => StateMachine.ChangeState(ClosedState);
+>     void Update() => StateMachine.Update();
+>
+>     public bool IsPlayerNear()
+>     {
+>         if (_player == null) return false;
+>         return Vector3.Distance(transform.position, _player.position) < _triggerRadius;
+>     }
+>
+>     void OnDrawGizmos()
+>     {
+>         Gizmos.color = Color.yellow;
+>         Gizmos.DrawWireSphere(transform.position, _triggerRadius);
+>         // 显示当前状态
+>         var stateName = StateMachine?._currentState?.GetType().Name ?? "None";
+>         UnityEditor.Handles.Label(transform.position + Vector3.up * 2f, stateName);
+>     }
+>
+>     private void SetIndicator(Color c) { /* 可视化指示灯逻辑 */ }
+> }
+> ```
+
+> [!tip]- 练习 2 参考答案
+> **ScriptableObject 资产创建：**
+>
+> ```csharp
+> // StateActionSO.cs — 可序列化的行为片段
+> public abstract class StateActionSO : ScriptableObject
+> {
+>     public abstract void OnStateEnter(StateMachineRunner runner);
+>     public abstract void OnStateUpdate(StateMachineRunner runner);
+>     public abstract void OnStateExit(StateMachineRunner runner);
+> }
+>
+> // PlayAnimationAction.cs
+> [CreateAssetMenu(menuName = "FSM/Actions/PlayAnimation")]
+> public class PlayAnimationAction : StateActionSO
+> {
+>     public string triggerName;
+>     public override void OnStateEnter(StateMachineRunner runner)
+>     {
+>         runner.GetComponent<Animator>().SetTrigger(triggerName);
+>     }
+>     public override void OnStateUpdate(StateMachineRunner runner) { }
+>     public override void OnStateExit(StateMachineRunner runner) { }
+> }
+>
+> // SetColliderAction.cs
+> [CreateAssetMenu(menuName = "FSM/Actions/SetCollider")]
+> public class SetColliderAction : StateActionSO
+> {
+>     public bool enabled;
+>     public override void OnStateEnter(StateMachineRunner runner)
+>     {
+>         runner.GetComponent<Collider>().enabled = enabled;
+>     }
+>     public override void OnStateUpdate(StateMachineRunner runner) { }
+>     public override void OnStateExit(StateMachineRunner runner) { }
+> }
+>
+> // DecisionSO.cs — 可序列化的条件判断
+> public abstract class DecisionSO : ScriptableObject
+> {
+>     public abstract bool Decide(StateMachineRunner runner);
+> }
+>
+> // PlayerInRangeDecision.cs
+> [CreateAssetMenu(menuName = "FSM/Decisions/PlayerInRange")]
+> public class PlayerInRangeDecision : DecisionSO
+> {
+>     public float radius = 3f;
+>     public override bool Decide(StateMachineRunner runner)
+>     {
+>         var player = GameObject.FindGameObjectWithTag("Player");
+>         if (player == null) return false;
+>         return Vector3.Distance(runner.transform.position, player.transform.position) < radius;
+>     }
+> }
+>
+> // AnimationCompleteDecision.cs
+> [CreateAssetMenu(menuName = "FSM/Decisions/AnimationComplete")]
+> public class AnimationCompleteDecision : DecisionSO
+> {
+>     public string stateName;
+>     public override bool Decide(StateMachineRunner runner)
+>     {
+>         var info = runner.GetComponent<Animator>().GetCurrentAnimatorStateInfo(0);
+>         return info.IsName(stateName) && info.normalizedTime >= 1f;
+>     }
+> }
+> ```
+>
+> **思考题回答：防止策划错误连接**
+>
+> 如果策划把 `Door_Open` 连回 `Door_Closed`（跳过关门动画），可通过以下工具层面防护：
+> 1. **转移验证器（Transition Validator）**：在 Editor 中为每个 StateSO 添加 `[ValidateTransition(StateSO from, StateSO to)]` 特性，在 OnValidate 中检查不合法的转移。例如 Open 状态只能转移到 Closing 状态，不能直接到 Closed。
+> 2. **转移白名单**：每个 StateSO 维护 `List<StateSO> allowedTargetStates`，StateMachineRunner 的 ChangeState 在 Editor 中检查目标是否在白名单中。不在则弹出警告对话框。
+> 3. **Editor 脚本 + 连线约束**：自定义 Inspector 或节点图编辑器，绘制转移边时只显示合法目标。这会从 UX 层面杜绝错误连线。
+> 4. **自动化测试**：写一个 PlayMode 测试遍历所有状态转移路径，验证门的状态序列总是 `Closed→Opening→Open→Closing→Closed` 的循环。
+
+> [!tip]- 练习 3 参考答案（可选）
+> **武器状态系统的完整 StateSO 配置方案：**
+>
+> ```csharp
+> // EquipWeaponAction.cs
+> [CreateAssetMenu(menuName = "FSM/Actions/EquipWeapon")]
+> public class EquipWeaponAction : StateActionSO
+> {
+>     public string weaponModelName; // 要启用的子 GameObject 名称
+>     public override void OnStateEnter(StateMachineRunner runner)
+>     {
+>         // 禁用所有武器模型，只启用指定模型
+>         foreach (Transform child in runner.transform)
+>         {
+>             if (child.CompareTag("WeaponModel"))
+>                 child.gameObject.SetActive(child.name == weaponModelName);
+>         }
+>     }
+>     public override void OnStateUpdate(StateMachineRunner runner) { }
+>     public override void OnStateExit(StateMachineRunner runner) { }
+> }
+>
+> // ReloadAction.cs — 使用 TimerDecision 驱动完成
+> [CreateAssetMenu(menuName = "FSM/Actions/Reload")]
+> public class ReloadAction : StateActionSO
+> {
+>     public float duration = 2.5f;
+>     public override void OnStateEnter(StateMachineRunner runner)
+>     {
+>         runner.GetComponent<Animator>().SetTrigger("Reload");
+>         runner.Blackboard.Set("reloadStartTime", Time.time);
+>     }
+>     public override void OnStateUpdate(StateMachineRunner runner)
+>     {
+>         // 动画 + 计时由 Transition 中的 TimerDecision 评估
+>     }
+>     public override void OnStateExit(StateMachineRunner runner) { }
+> }
+>
+> // InputDecision.cs
+> [CreateAssetMenu(menuName = "FSM/Decisions/InputKey")]
+> public class InputDecision : DecisionSO
+> {
+>     public KeyCode key;
+>     public override bool Decide(StateMachineRunner runner)
+>         => Input.GetKeyDown(key);
+> }
+>
+> // AmmoDecision.cs
+> [CreateAssetMenu(menuName = "FSM/Decisions/AmmoEmpty")]
+> public class AmmoDecision : DecisionSO
+> {
+>     public override bool Decide(StateMachineRunner runner)
+>         => runner.Blackboard.Get<int>("currentAmmo") <= 0;
+> }
+> ```
+>
+> **Reloading 后"回到之前的武器状态"的两种方案对比：**
+>
+> | 方案 | 优点 | 缺点 |
+> |------|------|------|
+> | (a) Blackboard 记录 `_lastWeaponState` | 只需一个 Reloading 状态，逻辑集中；新增武器类型自动支持 | 隐式依赖——Reloading 状态的转移目标依赖于 Blackboard 中的历史值，阅读行为树时需要追踪数据流 |
+> | (b) ReloadingFromMelee / ReloadingFromRanged 两个副本 | 显式——从图上一目了然"从哪里来，回哪里去" | 状态数量膨胀（N 种武器 → N 个 Reloading 子状态）；新增武器类型需要新增状态 |
+>
+> **推荐 (a)**：通过 Blackboard 记录 `previousWeaponState` 字符串，Reloading 完成时读取并跳转。这在 ScriptableObject 方案中最自然——StateMachineRunner 已有 Blackboard。为防止隐式依赖的调试困难，可以在 Inspector 中为 `ReloadAction` 添加 Tooltip 说明其依赖的 Blackboard key。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读

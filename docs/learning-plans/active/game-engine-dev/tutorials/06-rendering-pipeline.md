@@ -1533,6 +1533,184 @@ glDrawArraysInstanced(GL_TRIANGLES, 0, 36, 100);
 
 ---
 
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> ```cpp
+> // 索引缓冲绘制（EBO/IBO）：用 24 个面独立顶点 + 36 个索引绘制立方体
+> // 策略：每个面使用独立的顶点（共 24 个顶点），每个面有独立的法线和颜色
+>
+> // 24 个顶点：8 个角 × 每个角 3 个面 = 但每个面有独立法线/颜色需拆分
+> // 采用面独立顶点方案：6 个面 × 4 个顶点 = 24 个顶点
+> float faceVertices[] = {
+>     // 背面 (z=-0.5, 红色, 法线 -Z)
+>     -0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  0.8f, 0.2f, 0.2f,  // 0
+>      0.5f, -0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  0.8f, 0.2f, 0.2f,  // 1
+>      0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  0.8f, 0.2f, 0.2f,  // 2
+>     -0.5f,  0.5f, -0.5f,  0.0f,  0.0f, -1.0f,  0.8f, 0.2f, 0.2f,  // 3
+>     // 正面 (z=0.5, 绿色, 法线 +Z)
+>     -0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  0.2f, 0.8f, 0.2f,  // 4
+>      0.5f, -0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  0.2f, 0.8f, 0.2f,  // 5
+>      0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  0.2f, 0.8f, 0.2f,  // 6
+>     -0.5f,  0.5f,  0.5f,  0.0f,  0.0f,  1.0f,  0.2f, 0.8f, 0.2f,  // 7
+>     // ... 其余 4 个面类似（左蓝、右黄、底青、顶品红）
+> };
+>
+> // 索引缓冲：12 个三角形 = 36 个索引
+> unsigned int indices[] = {
+>     0, 1, 2,  2, 3, 0,   // 背面
+>     4, 5, 6,  6, 7, 4,   // 正面
+>     // ... 其余 4 个面
+> };
+>
+> // 创建 VBO + EBO + VAO
+> GLuint VBO, EBO, VAO;
+> glGenVertexArrays(1, &VAO);
+> glGenBuffers(1, &VBO);
+> glGenBuffers(1, &EBO);
+>
+> glBindVertexArray(VAO);
+> glBindBuffer(GL_ARRAY_BUFFER, VBO);
+> glBufferData(GL_ARRAY_BUFFER, sizeof(faceVertices), faceVertices, GL_STATIC_DRAW);
+> glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, EBO);
+> glBufferData(GL_ELEMENT_ARRAY_BUFFER, sizeof(indices), indices, GL_STATIC_DRAW);
+>
+> // 顶点属性（9 floats per vertex）
+> glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)0);          // pos
+> glEnableVertexAttribArray(0);
+> glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(3*sizeof(float))); // normal
+> glEnableVertexAttribArray(1);
+> glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 9 * sizeof(float), (void*)(6*sizeof(float))); // color
+> glEnableVertexAttribArray(2);
+>
+> // 绘制：使用 glDrawElements 替代 glDrawArrays
+> glDrawElements(GL_TRIANGLES, 36, GL_UNSIGNED_INT, 0);
+> ```
+>
+> **为什么选择 24 顶点而非 8 顶点？** 如果只用 8 个顶点 + 索引，每个顶点只能有一个法线和一个颜色。但立方体的每个面需要不同的法线（如顶面法线 (0,1,0)，前面法线 (0,0,1)），共点但不共面。因此每个面需要独立的顶点副本——这是"硬边（Hard Edge）"的标准处理方法。在建模软件中，"Smooth Shading" 共享法线，"Flat Shading" 拆分法线——这个练习实现的就是 Flat Shading。
+
+> [!tip]- 练习 2 参考答案
+> ```cpp
+> // 实例化渲染：一次 Draw Call 绘制 100 个立方体（10x10 网格）
+>
+> // 1. 准备实例数据：每个立方体的 model 矩阵
+> const int GRID_SIZE = 10;
+> const float SPACING = 2.5f;
+> glm::mat4 instanceMatrices[GRID_SIZE * GRID_SIZE];
+> for (int row = 0; row < GRID_SIZE; ++row) {
+>     for (int col = 0; col < GRID_SIZE; ++col) {
+>         int idx = row * GRID_SIZE + col;
+>         glm::mat4 model = glm::mat4(1.0f);
+>         model = glm::translate(model,
+>             glm::vec3((col - GRID_SIZE/2) * SPACING, 0.0f,
+>                       (row - GRID_SIZE/2) * SPACING));
+>         model = glm::rotate(model, glm::radians(static_cast<float>(idx * 13.7f)),
+>                             glm::vec3(0.5f, 1.0f, 0.0f));
+>         instanceMatrices[idx] = model;
+>     }
+> }
+>
+> // 2. 创建实例数据缓冲
+> GLuint instanceVBO;
+> glGenBuffers(1, &instanceVBO);
+> glBindBuffer(GL_ARRAY_BUFFER, instanceVBO);
+> glBufferData(GL_ARRAY_BUFFER, sizeof(instanceMatrices), instanceMatrices, GL_STATIC_DRAW);
+>
+> // 3. 将 mat4 拆分为 4 个 vec4 属性（location 3-6）
+> glBindVertexArray(VAO); // 重新绑定以包含实例属性
+> for (int i = 0; i < 4; ++i) {
+>     glEnableVertexAttribArray(3 + i);
+>     glVertexAttribPointer(3 + i, 4, GL_FLOAT, GL_FALSE, sizeof(glm::mat4),
+>                           reinterpret_cast<void*>(i * sizeof(glm::vec4)));
+>     glVertexAttribDivisor(3 + i, 1); // ★ 关键：每个实例更新一次，而非每个顶点
+> }
+>
+> // 4. 修改顶点着色器，添加实例化输入
+> // layout(location = 3) in mat4 aInstanceModel;
+> // gl_Position = projection * view * aInstanceModel * vec4(aPos, 1.0);
+>
+> // 5. 绘制所有实例
+> glDrawArraysInstanced(GL_TRIANGLES, 0, 36, GRID_SIZE * GRID_SIZE);
+> //                  ↑ 顶点数   ↑ 实例数
+> ```
+>
+> **性能分析：** 不使用实例化需要 100 次 `glDrawArrays` + 100 次 UBO 更新 = ~100 次 CPU-GPU 同步。使用实例化只需 1 次 Draw Call。对于 100 个立方体，实例化渲染的 CPU 开销降低约 100 倍。实际项目中，实例化渲染的核心价值是——**消除 Draw Call 瓶颈**：每次 Draw Call 的 CPU 开销（状态验证、命令缓冲构建）是固定的，将 10000 个相同 mesh 的绘制合并为 1 个 Draw Call，CPU 性能可提升 10-50 倍。
+
+> [!tip]- 练习 3 参考答案（可选）
+> ```cpp
+> // 简化延迟渲染管线：G-Buffer 三附件 + 全屏光照 Pass
+>
+> // ==== 第一步：创建 G-Buffer FBO ====
+> GLuint gBufferFBO;
+> glGenFramebuffers(1, &gBufferFBO);
+> glBindFramebuffer(GL_FRAMEBUFFER, gBufferFBO);
+>
+> // G-Buffer 纹理
+> GLuint gPosition, gNormal, gAlbedoSpec, gDepth;
+> glGenTextures(1, &gPosition); glGenTextures(1, &gNormal);
+> glGenTextures(1, &gAlbedoSpec); glGenTextures(1, &gDepth);
+>
+> auto setupGBufferTex = [](GLuint tex, GLenum internalFormat, GLenum format) {
+>     glBindTexture(GL_TEXTURE_2D, tex);
+>     glTexImage2D(GL_TEXTURE_2D, 0, internalFormat, SCR_WIDTH, SCR_HEIGHT,
+>                  0, format, GL_FLOAT, nullptr);
+>     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+>     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+>     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + attachIdx++,
+>                            GL_TEXTURE_2D, tex, 0);
+> };
+>
+> int attachIdx = 0;
+> setupGBufferTex(gPosition,  GL_RGBA16F, GL_RGBA);   // 附件 0：世界位置
+> setupGBufferTex(gNormal,    GL_RGBA16F, GL_RGBA);   // 附件 1：世界法线
+> setupGBufferTex(gAlbedoSpec, GL_RGBA8,  GL_RGBA);   // 附件 2：albedo.rgb + roughness.a
+>
+> // 深度附件（Renderbuffer，不需要采样）
+> GLuint rboDepth;
+> glGenRenderbuffers(1, &rboDepth);
+> glBindRenderbuffer(GL_RENDERBUFFER, rboDepth);
+> glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, SCR_WIDTH, SCR_HEIGHT);
+> glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, rboDepth);
+>
+> // 指定多个渲染目标
+> GLuint attachments[3] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2 };
+> glDrawBuffers(3, attachments);
+>
+> // ==== 第二步：几何 Pass（写入 G-Buffer）====
+> // 片段着色器输出多个目标：
+> // layout(location = 0) out vec3 gPosition;
+> // layout(location = 1) out vec3 gNormal;
+> // layout(location = 2) out vec4 gAlbedoSpec; // r,g,b = albedo, a = roughness
+>
+> // ==== 第三步：光照 Pass（从 G-Buffer 读取）====
+> // 绑定一个全屏四边形（两个三角形覆盖屏幕）
+> // 片段着色器伪代码：
+> // uniform sampler2D gPosition;
+> // uniform sampler2D gNormal;
+> // uniform sampler2D gAlbedoSpec;
+> //
+> // void main() {
+> //     vec3 worldPos = texture(gPosition, texCoord).rgb;
+> //     vec3 normal = texture(gNormal, texCoord).rgb;
+> //     vec4 albedoSpec = texture(gAlbedoSpec, texCoord);
+> //     vec3 albedo = albedoSpec.rgb;
+> //     float roughness = albedoSpec.a;
+> //
+> //     // 每个点光源计算光照
+> //     for (int i = 0; i < MAX_LIGHTS; ++i) {
+> //         vec3 L = normalize(lights[i].position - worldPos);
+> //         float NdotL = max(dot(normal, L), 0.0);
+> //         // ... Blinn-Phong / PBR 计算
+> //     }
+> //     FragColor = vec4(finalColor, 1.0);
+> // }
+> ```
+>
+> **延迟渲染 vs 前向渲染：** 延迟渲染的核心优势是光照计算复杂度从 O(物体数 × 光源数) 降为 O(屏幕像素数 × 光源数)。对于 1000 个物体 + 100 个点光源的场景，前向渲染每条光线要遍历所有物体 → 不能高效 cull，而延迟渲染只遍历屏幕像素。代价是 G-Buffer 占用大量显存带宽（每个像素 3-4 张纹理），且不支持透明物体和 MSAA（需额外处理）。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ## 4. 扩展阅读
 
 ### 经典书籍

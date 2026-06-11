@@ -201,6 +201,203 @@ export default function redactSecrets(pi: HookAPI) {
 2. 自动隐藏输出中的 API Key 或密码
 3. 测试 OMP 读取包含敏感信息的文件后的输出
 
+
+## 3.5 参考答案
+
+> [!tip]- 练习 1 参考答案
+> 封装"运行测试"为自定义工具：
+>
+> ```typescript
+> // .omp/tools/run-tests.ts
+> import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
+>
+> const factory: CustomToolFactory = (pi) => ({
+>   name: "run_tests",
+>   label: "运行测试",
+>   description:
+>     "运行项目测试。默认运行所有测试，可指定文件路径。返回测试结果摘要。",
+>   parameters: pi.zod.object({
+>     file: pi.zod.string().optional()
+>       .describe("单个测试文件路径，不指定则运行所有测试"),
+>     watch: pi.zod.boolean().optional().default(false)
+>       .describe("是否以 watch 模式运行"),
+>   }),
+>
+>   async execute(_toolCallId, params, onUpdate, ctx, signal) {
+>     onUpdate?.({
+>       content: [{ type: "text", text: "正在运行测试..." }],
+>     });
+>
+>     const args = ["test"];
+>     if (params.file) args.push(params.file);
+>     if (params.watch) args.push("--watch");
+>
+>     // 自动检测包管理器
+>     const hasBun = await pi.fs.exists("bun.lockb").catch(() => false);
+>     const cmd = hasBun ? "bun" : "npm";
+>
+>     const result = await pi.exec(cmd, args, {
+>       cwd: pi.cwd,
+>       signal,
+>       env: { ...process.env, CI: "true" },
+>     });
+>
+>     if (result.code !== 0) {
+>       return {
+>         content: [{
+>           type: "text",
+>           text: `测试失败 (exit code: ${result.code}):\n${result.stderr || result.stdout}`,
+>         }],
+>         details: { passed: false, exitCode: result.code },
+>       };
+>     }
+>
+>     return {
+>       content: [{ type: "text", text: result.stdout }],
+>       details: { passed: true },
+>     };
+>   },
+> });
+>
+> export default factory;
+> ```
+>
+> 在 OMP 中使用：
+>
+> ```text
+> "使用 run_tests 工具运行 src/utils/ 相关的测试"
+> → OMP 调用 run_tests({ file: "src/utils/" })
+> ```
+
+> [!tip]- 练习 2 参考答案
+> 安全扩展——拦截危险命令：
+>
+> ```typescript
+> // .omp/extensions/safety-guard.ts
+> import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+>
+> export default function safetyGuard(pi: ExtensionAPI) {
+>   // 危险命令黑名单（正则匹配）
+>   const DANGEROUS_PATTERNS = [
+>     /\brm\s+-rf\b/,
+>     /\bgit\s+push\s+--force\b/,
+>     /\bDROP\s+(TABLE|DATABASE)\b/i,
+>     /\bDELETE\s+FROM\b/i,
+>     /\bchmod\s+777\b/,
+>     /\bcurl.*\|\s*(ba)?sh\b/,
+>   ];
+>
+>   pi.on("tool_call", async (event) => {
+>     if (event.toolName !== "bash") return;
+>
+>     const cmd = String(event.input.command ?? "");
+>     const dangerous = DANGEROUS_PATTERNS.find((p) => p.test(cmd));
+>
+>     if (!dangerous) return;
+>
+>     if (pi.hasUI) {
+>       const ok = await pi.ui.confirm(
+>         "⚠️ 危险命令检测",
+>         `以下命令可能造成不可逆的影响:\n\n  ${cmd}\n\n确认执行？`,
+>       );
+>       if (!ok) {
+>         return {
+>           block: true,
+>           reason: "用户在安全确认中取消了危险命令",
+>         };
+>       }
+>     } else {
+>       // 无 UI 环境（如 CI/CD）直接阻止
+>       return {
+>         block: true,
+>         reason: `危险命令被阻止（无 UI 确认）: ${cmd}`,
+>       };
+>     }
+>   });
+>
+>   // 额外：记录所有被阻止的命令
+>   pi.on("tool_result", async (event) => {
+>     if (event.toolName === "bash" && event.isError) {
+>       console.warn(`[SafetyGuard] bash 执行失败: ${event.content}`);
+>     }
+>   });
+> }
+> ```
+>
+> 测试方法：
+>
+> ```text
+> 在 OMP 中尝试：
+> "执行 rm -rf /tmp/test/"
+> → 预期：安全扩展弹窗确认（有 UI）或直接阻止（无 UI）
+>
+> "执行 ls -la"（安全命令）
+> → 预期：正常执行，不受影响
+> ```
+
+> [!tip]- 练习 3 参考答案
+> 消息过滤钩子——自动隐藏密钥：
+>
+> ```typescript
+> // .omp/hooks/pre/redact-secrets.ts
+> import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
+>
+> export default function redactSecrets(pi: HookAPI) {
+>   pi.on("tool_result", async (event) => {
+>     // 只处理 read 工具的输出
+>     if (event.toolName !== "read" || event.isError) return;
+>
+>     let changed = false;
+>     const redacted = event.content.map((chunk) => {
+>       if (chunk.type !== "text") return chunk;
+>
+>       let text = chunk.text;
+>
+>       // 模式 1：环境变量定义 KEY=value
+>       text = text.replaceAll(
+>         /(\b[A-Z][A-Z0-9_]*_(?:KEY|SECRET|TOKEN|PASSWORD))\s*=\s*[^\s\n]+/gi,
+>         "$1=[已隐藏]",
+>       );
+>
+>       // 模式 2：JSON/YAML 中的 secret 字段
+>       text = text.replaceAll(
+>         /"(apiKey|secretKey|password|token)"\s*:\s*"[^"]+"/gi,
+>         '"$1":"[已隐藏]"',
+>       );
+>
+>       // 模式 3：AWS Access Key ID
+>       text = text.replaceAll(
+>         /\bAKIA[0-9A-Z]{16}\b/g,
+>         "AKIA[HIDDEN]",
+>       );
+>
+>       if (text !== chunk.text) changed = true;
+>       return { ...chunk, text };
+>     });
+>
+>     if (changed) {
+>       return { content: redacted };
+>     }
+>     // 无变更则不返回，让原始输出通过
+>   });
+> }
+> ```
+>
+> 测试方法：
+>
+> ```bash
+> # 创建一个测试文件含假密钥
+> echo 'API_KEY=sk-test-1234567890' > test-secrets.txt
+> echo 'DATABASE_PASSWORD=super-secret' >> test-secrets.txt
+>
+> # 在 OMP 中: "读取 test-secrets.txt"
+> # 预期输出中密钥被替换为 "[已隐藏]"
+> ```
+>
+> **思考题答案：** Hook 运行在"模型看到结果之前"——`tool_result` 钩子拦截的是工具执行结果 → 传给 LLM 的中间环节。这比在 LLM 提示中告诉它"不要输出密钥"可靠得多，因为钩子是确定性代码而非概率性提示。但钩子不能替代 secrets 系统——secrets 系统在发送给 LLM 前就完成了替换，而钩子只在特定工具结果中生效。
+
+> [!note] 答案使用方式
+> 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
 ---
 
 ## 4. 扩展阅读
