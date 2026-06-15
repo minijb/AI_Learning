@@ -186,11 +186,11 @@ HeroTurnState = {
 
 三个扩展行动标志（字段而非枚举值）决定 `StopTurnAction` 走哪条分支：
 
-| 字段 | 含义 |
-|---|---|
-| `hasNewMove` | 获得**再动**：本次行动结束后，还可以额外移动一次（不可放主公技） |
-| `hasContinue` | 获得**继续行动**：移动一次后，再获得一次移动资格 |
-| `hasNewTurn` | 获得**再行动**：完整的第二次行动机会（可使用技能） |
+| 字段            | 含义                                 |
+| ------------- | ---------------------------------- |
+| `hasNewMove`  | 获得**再动**：本次行动结束后，还可以额外移动一次（不可放主公技） |
+| `hasContinue` | 获得**继续行动**：移动一次后，再获得一次移动资格         |
+| `hasNewTurn`  | 获得**再行动**：完整的第二次行动机会（可使用技能）        |
 
 注意：`hasNewTurn` 与 `hasContinue` 不能同时为 `true`，代码有断言保护：
 
@@ -310,8 +310,8 @@ UpdateBattleTurn():
             -- 通知所有该阵营英雄 OnStopTeamAction
             -- orderList[curOrderIndex].isCompleted = true
             -- 若 curOrderIndex < #orderList（还有下一阵营）
-            --     teamTurnState = StartTeamTurn  →  进入下一阵营
-            -- 若 curOrderIndex == #orderList（三个阵营都完成）
+            --     team
+            -- 若 curOrderIndex == #orderList（三个阵营都完TurnState = StartTeamTurn  →  进入下一阵营成）
             --     turnState = StopTurn  →  结束本回合
 
 

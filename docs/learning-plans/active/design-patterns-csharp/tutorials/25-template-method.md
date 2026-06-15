@@ -131,7 +131,7 @@ sequenceDiagram
 
 两者都封装算法，但封装方式完全不同：
 
-| 维度 | Template Method | [[24-strategy|Strategy]] |
+| 维度 | Template Method | [[24-strategy\|Strategy]] |
 |------|-----------------|----------|
 | 复用方式 | **继承** — 子类重写部分步骤 | **组合** — 委托给策略接口 |
 | 骨架控制 | 在基类中，子类**不能改**步骤顺序 | 在 Context 中，更换策略即可换整个算法 |

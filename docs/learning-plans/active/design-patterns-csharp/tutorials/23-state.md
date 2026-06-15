@@ -205,7 +205,7 @@ stateDiagram-v2
 
 ### State vs Strategy — 相似但意图不同
 
-| 维度 | State 模式 | [[24-strategy|策略模式]] |
+| 维度 | State 模式 | [[24-strategy\|策略模式]] |
 |------|-----------|------|
 | **谁决定切换** | Context 内部 — 状态对象自己决定下一个状态 | Context 外部 — 客户端选择策略 |
 | **Context 感知** | Context 知道自己有状态，每个操作都委托给当前状态 | Context 持有策略但不关心有几个策略 |

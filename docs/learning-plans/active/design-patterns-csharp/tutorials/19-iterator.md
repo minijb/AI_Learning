@@ -767,15 +767,15 @@ static void Demo4()
 
 **对比总结：**
 
-| 维度 | 经典 GoF Iterator | C# `IEnumerable<T>` |
-|:------|:-------------------|:---------------------|
-| 迭代器实现 | 手写 `IEnumerator` 类（管理所有状态） | `yield return` — 编译器生成状态机 |
-| 代码量 | 40-100 行样板代码 | 5-15 行 |
-| 类型安全 | `object Current` + 强制转换 | `T Current` — 泛型保证 |
-| LINQ 兼容 | 不支持 | 原生支持（所有 `IEnumerable<T>` 扩展方法） |
-| 嵌套/递归结构 | 需要手动管理 Stack/递归状态 | `yield return` 支持递归（C# 8+） |
-| 异步迭代 | 不支持 | `IAsyncEnumerable<T>` + `await foreach` |
-| 何时还用 GoF 风格 | 教育目的 / 理解原理 | **所有生产代码** |
+| 维度          | 经典 GoF Iterator            | C# `IEnumerable<T>`                     |
+| :---------- | :------------------------- | :-------------------------------------- |
+| 迭代器实现       | 手写 `IEnumerator` 类（管理所有状态） | `yield return` — 编译器生成状态机               |
+| 代码量         | 40-100 行样板代码               | 5-15 行                                  |
+| 类型安全        | `object Current` + 强制转换    | `T Current` — 泛型保证                      |
+| LINQ 兼容     | 不支持                        | 原生支持（所有 `IEnumerable<T>` 扩展方法）          |
+| 嵌套/递归结构     | 需要手动管理 Stack/递归状态          | `yield return` 支持递归（C# 8+）              |
+| 异步迭代        | 不支持                        | `IAsyncEnumerable<T>` + `await foreach` |
+| 何时还用 GoF 风格 | 教育目的 / 理解原理                | **所有生产代码**                              |
 
 ---
 

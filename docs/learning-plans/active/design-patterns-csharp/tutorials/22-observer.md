@@ -153,7 +153,7 @@ sequenceDiagram
 
 ### Observer 与 Mediator 的区别
 
-| 维度 | Observer | [[20-mediator|Mediator]] |
+| 维度 | Observer | [[20-mediator\|Mediator]] |
 |------|----------|------|
 | **核心关系** | 一对多：1 Subject → N Observers | 多对多：N Colleagues ↔ Mediator ↔ N Colleagues |
 | **通信方向** | 单向推送：Subject → Observers | 双向协调：Colleague ↔ Mediator ↔ Colleague |
@@ -167,7 +167,7 @@ sequenceDiagram
 
 ### Observer 与 Strategy 的区别
 
-| 维度 | Observer | [[24-strategy|Strategy]] |
+| 维度 | Observer | [[24-strategy\|Strategy]] |
 |------|---------|------|
 | **核心关系** | 一对多：Subject 通知多个 Observer | 一对一：Context 使用一个 Strategy |
 | **通信方向** | 推送：Subject → Observers | 调用：Context → Strategy |

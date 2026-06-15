@@ -1,6 +1,6 @@
 # 学习计划索引
 
-> 自动生成于 2026-06-11
+> 自动生成于 2026-06-15
 
 ## 进行中
 
@@ -22,6 +22,7 @@
 | mermaid-syntax | — |
 | neovim-lua-config | — |
 | oh-my-pi-code-agent-使用指南 | — |
+| shell-scripting-bash-zsh-fish | — |
 
 ## 已完成
 
