@@ -1,6 +1,6 @@
 # 深度探索索引
 
-> 自动生成于 2026-06-08
+> 自动生成于 2026-06-13
 
 - [actor-model-ue-replication-skynet](actor-model-ue-replication-skynet.md)
 - [client-server-netcode](client-server-netcode.md)
@@ -13,6 +13,7 @@
 - [cpp-smart-pointers](cpp-smart-pointers.md)
 - [cpp-special-member-functions](cpp-special-member-functions.md)
 - [cpp-std-expected](cpp-std-expected.md)
+- [csharp-cpp-stream-deep-dive](csharp-cpp-stream-deep-dive.md)
 - [csharp-di-container](csharp-di-container.md)
 - [csharp-lazy-t](csharp-lazy-t.md)
 - [csharp-record-with](csharp-record-with.md)

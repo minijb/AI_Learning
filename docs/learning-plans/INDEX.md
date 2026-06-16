@@ -23,6 +23,7 @@
 | neovim-lua-config | — |
 | oh-my-pi-code-agent-使用指南 | — |
 | shell-scripting-bash-zsh-fish | — |
+| typescript-complete | — |
 
 ## 已完成
 

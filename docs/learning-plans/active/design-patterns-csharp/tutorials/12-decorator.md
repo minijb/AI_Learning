@@ -140,12 +140,12 @@ sequenceDiagram
 
 [[13-proxy|代理模式]] 与装饰器在结构上几乎一模一样（都持有被代理/被装饰对象的引用），但**意图**完全不同：
 
-| 维度 | 装饰器 Decorator | 代理 Proxy |
-|------|-------------------|-----------|
-| 意图 | **增强**行为——在原功能之上加东西 | **控制**访问——拦截请求，代劳 |
-| 行为变化 | 是——每次加一层，行为变了 | 否——代理只是转发（或缓存/延迟加载） |
-| 创建时机 | 由**客户端**显式包装 | 通常对客户端**透明** |
-| 典型场景 | 加日志、加密、压缩、格式化 | 延迟加载、访问控制、远程代理 |
+| 维度   | 装饰器 Decorator       | 代理 Proxy            |
+| ---- | ------------------- | ------------------- |
+| 意图   | **增强**行为——在原功能之上加东西 | **控制**访问——拦截请求，代劳   |
+| 行为变化 | 是——每次加一层，行为变了       | 否——代理只是转发（或缓存/延迟加载） |
+| 创建时机 | 由**客户端**显式包装        | 通常对客户端**透明**        |
+| 典型场景 | 加日志、加密、压缩、格式化       | 延迟加载、访问控制、远程代理      |
 
 > [!tip] 一句话区分
 > 装饰器让对象"更强大"；代理让对象"更廉价"或"更安全"。装饰器是**增强**，代理是**控制**。
@@ -1281,6 +1281,7 @@ services.Decorate<IMessageSender, LoggingMessageSender>();
 - [[11-composite|组合模式]] — 装饰器 + 组合经常一起出现（装饰器包装组合树节点）
 - [Refactoring.Guru — Decorator](https://refactoring.guru/design-patterns/decorator) — 含多语言实现的详细讲解
 - [Microsoft — Stream 类文档](https://learn.microsoft.com/en-us/dotnet/api/system.io.stream) — .NET 中装饰器模式最核心的应用
+- [[csharp-cpp-stream-deep-dive|C# Stream 与 C++ iostream 深度剖析]] — 从 API 到底层源码全面理解 Stream/流体系
 - [Scrutor — Decorate](https://github.com/khellang/Scrutor) — .NET DI 容器的装饰器注册扩展
 - [Decorator Pattern with C# Records](https://learn.microsoft.com/en-us/dotnet/csharp/language-reference/builtin-types/record) — record 的不可变特性与装饰器的天然契合
 
