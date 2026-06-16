@@ -1,6 +1,6 @@
 ---
 title: "备忘录模式 Memento"
-updated: 2026-06-08
+updated: 2026-06-16
 tags: [design-patterns, behavioral, memento, undo, snapshot, csharp, cpp, record, serialization]
 ---
 
@@ -1118,7 +1118,7 @@ dotnet run --project MementoSerialization
 > [!warning] 序列化 Memento 的适用条件
 > 1. 对象图中的所有类型必须可序列化（`System.Text.Json` 要求公共属性、无参构造器或 `[JsonConstructor]`）
 > 2. 循环引用会导致 `StackOverflowException`——设置 `ReferenceHandler.Preserve`
-> 3. 大对象图的序列化成本不低——如果状态只改了一个字段，序列化全图是浪费（见练习 3 的差分存储方案）
+> 3. 大对象图的序列化成本不低——如果状态只改了一个字段，序列化全图是浪费（见 2.5 节差分存储与练习 3）
 
 > [!tip] 序列化 vs 手动复制 vs `record with`
 > | 方案 | 适用场景 | 优点 | 缺点 |
@@ -1126,6 +1126,441 @@ dotnet run --project MementoSerialization
 > | **手动逐字段复制** | 简单对象，字段少 | 最高性能，完全控制 | 极易遗漏新字段 |
 > | **`record` + `with`** | 中等复杂度，不可变对象 | 编译期安全，简洁 | 仅适用于 `record` 类型 |
 > | **序列化深度快照** | 复杂嵌套对象图 | 通用，不怕遗漏 | 有序列化成本，需可序列化约束 |
+
+
+### 2.5 进阶：差分存储 Memento (Delta Storage)
+
+2.4 的序列化方案每次保存都拷贝整个对象图。当状态很大（1000 个任务、10 MB 文档）而每次只改了一小部分时，全量快照会让历史栈以 **O(n × |S|)** 膨胀——n 是历史条目数，|S| 是单次状态大小。差分存储把内存压到 **O(|S| + n × |d|)**，其中 |d| ≪ |S| 是平均差异大小。
+
+**类比：** 视频压缩用关键帧（I-frame）+ 差异帧（P-frame/B-frame）——关键帧是全量，差异帧只编码"相对前一帧的变化"。Git 的 pack 文件、数据库的 WAL + checkpoint、游戏的自动存档 + 增量都遵循同一原理。
+
+但在动手写 Delta 之前，先问一个问题：**你真的需要差分吗？** 很多时候换成不可变数据结构就够了。下面按"从简单到复杂"的顺序介绍三种策略。
+
+#### 全量快照的内存代价
+
+以一个 100 任务的项目为例（单次全量快照 ≈ 8 KB），每次只改动一个任务：
+
+| 保存次数 | 全量快照 | 差分存储 | 节省 |
+|---------|---------|---------|------|
+| 5 | ~40 KB | ~8.2 KB | 79% |
+| 50 | ~400 KB | ~9.8 KB | 97.5% |
+| 200 | ~1.6 MB | ~15 KB | 99% |
+
+历史越长、单次改动越小，差分的优势越大。
+
+#### 策略一：结构共享——可能根本不用写 Diff
+
+如果能把状态模型改成**不可变**的（`record` + `ImmutableList` / `ImmutableDictionary`），那么"存一个完整快照"其实只新增被改动路径上的节点——`ImmutableList<T>` 是平衡树，`SetItem`/`Insert` 返回的新树**共享所有未改动的子树**。于是连续 N 个快照在内存里只占约 **|S| + n × log |S|**，而撤销只需 **O(1)**（直接返回存好的引用），**零 diff 代码、零回放**。
+
+```csharp
+using System.Collections.Immutable;
+
+// 不可变状态模型：record + 不可变集合
+public sealed record TaskItem(string Title, string Status, int Hours);
+
+public sealed record ProjectState(
+    string Name,
+    ImmutableList<TaskItem> Tasks,
+    ImmutableDictionary<string, string> Metadata
+);
+
+// ============================================
+// 结构共享历史——直接存不可变快照，O(1) 撤销，零 diff
+// ============================================
+public class SharedSnapshotHistory
+{
+    private readonly List<ProjectState> _snapshots = new();
+    private int _cursor = -1;
+
+    public void Save(ProjectState state)
+    {
+        // 新分支：丢弃 cursor 之后的快照
+        if (_cursor < _snapshots.Count - 1)
+            _snapshots.RemoveRange(_cursor + 1, _snapshots.Count - _cursor - 1);
+        _snapshots.Add(state);          // 不可变 → 直接存引用，共享未改动节点
+        _cursor = _snapshots.Count - 1;
+    }
+
+    public ProjectState? Undo() => _cursor > 0 ? _snapshots[--_cursor] : null;
+    public ProjectState? Redo() => _cursor < _snapshots.Count - 1 ? _snapshots[++_cursor] : null;
+}
+```
+
+> [!tip] 先试无聊的方案
+> 改一个任务的状态时，`state with { Tasks = state.Tasks.SetItem(i, ...) }` 只产生 ~log₂(100) ≈ 7 个新树节点，其余 93 个任务节点与旧快照共享。多数内存压力问题**仅靠结构共享就解决了**——撤销还是 O(1)。差分存储是"还不够"时的下一道防线。
+
+**那什么时候结构共享不够？** 当快照要**离开内存**时——持久化到磁盘、同步到网络、跨进程传递。序列化一个不可变快照会把共享结构"摊平"成完整字节流，结构共享在序列化边界上**完全失效**。这时每个全量快照又变成 O(|S|) 字节，差分存储才能真正压缩字节数。所以判断标准是：
+
+- **内存内撤销**（编辑器、IDE）→ 优先不可变模型 + 结构共享（最简单）
+- **持久化/传输撤销**（存档文件、协作同步、Git pack）→ 差分存储压缩序列化字节
+
+#### 策略二：差分存储——Baseline + 元素级 Delta
+
+第一个快照保存全量（Baseline），后续只存"相对前一状态的差异"（Delta）。差异用**判别式联合**（`abstract record Change` + 一组 `sealed record`）表达，模式匹配分发，类型安全且穷尽。
+
+```csharp
+// ============================================
+// Change — 相对前一状态的一个原子变更
+// ============================================
+public abstract record Change
+{
+    public sealed record SetName(string Value) : Change;
+    // 元素级差分：只记录变化的那个任务，而非整个列表
+    public sealed record ReplaceTask(int Index, TaskItem Value) : Change;
+    public sealed record InsertTask(int Index, TaskItem Value) : Change;
+    public sealed record RemoveTask(int Index, TaskItem OldValue) : Change;
+    public sealed record MetaPut(string Key, string Value) : Change;
+    public sealed record MetaDelete(string Key) : Change;
+}
+```
+
+> [!warning] 列表差分的头号陷阱：别用"整表比较"
+> 一个常见简化是把整个 `Tasks` 列表序列化成 JSON 再比较——一旦任何一个任务变了，就把**整个列表**当作 Delta 存下来（100 个任务全部存）。这等于丢掉了差分的全部收益。正确做法是**逐元素比较**（`record` 的值相等性是 O(1)），只对变化的索引生成 `ReplaceTask`/`InsertTask`/`RemoveTask`。本节下面的 `DiffTasks` 就是元素级实现；练习 3 的参考答案用了整表简化以便入门，可对照理解其代价。
+
+`StateDiffer` 负责计算差异与应用差异。应用差异时同样借助 `ImmutableList` 的结构共享，让每次 `Apply` 只花 O(log n)：
+
+```csharp
+// ============================================
+// StateDiffer — 元素级 Diff + 结构共享 Apply
+// ============================================
+public static class StateDiffer
+{
+    public static IReadOnlyList<Change> Diff(ProjectState prev, ProjectState next)
+    {
+        var changes = new List<Change>();
+        if (prev.Name != next.Name)
+            changes.Add(new Change.SetName(next.Name));
+        DiffTasks(prev.Tasks, next.Tasks, changes);
+        DiffMeta(prev.Metadata, next.Metadata, changes);
+        return changes;
+    }
+
+    private static void DiffTasks(
+        ImmutableList<TaskItem> prev, ImmutableList<TaskItem> next,
+        List<Change> changes)
+    {
+        int n = Math.Min(prev.Count, next.Count);
+        for (int i = 0; i < n; i++)            // 重叠区间：逐元素比较
+            if (prev[i] != next[i])
+                changes.Add(new Change.ReplaceTask(i, next[i]));
+        for (int i = n; i < next.Count; i++)   // next 更长：尾部新增
+            changes.Add(new Change.InsertTask(i, next[i]));
+        for (int i = prev.Count - 1; i >= next.Count; i--)  // 逆序删除，索引稳定
+            changes.Add(new Change.RemoveTask(i, prev[i]));
+    }
+
+    private static void DiffMeta(
+        ImmutableDictionary<string, string> prev,
+        ImmutableDictionary<string, string> next,
+        List<Change> changes)
+    {
+        foreach (var (k, v) in next)
+            if (!prev.TryGetValue(k, out var pv) || pv != v)
+                changes.Add(new Change.MetaPut(k, v));
+        foreach (var k in prev.Keys)
+            if (!next.ContainsKey(k))
+                changes.Add(new Change.MetaDelete(k));
+    }
+
+    public static ProjectState Apply(ProjectState state, Change c) => c switch
+    {
+        Change.SetName v      => state with { Name = v.Value },
+        Change.ReplaceTask t  => state with { Tasks = state.Tasks.SetItem(t.Index, t.Value) },
+        Change.InsertTask t   => state with { Tasks = state.Tasks.Insert(t.Index, t.Value) },
+        Change.RemoveTask t   => state with { Tasks = state.Tasks.RemoveAt(t.Index) },
+        Change.MetaPut m      => state with { Metadata = state.Metadata.SetItem(m.Key, m.Value) },
+        Change.MetaDelete m   => state with { Metadata = state.Metadata.Remove(m.Key) },
+        _ => state
+    };
+
+    public static ProjectState ApplyAll(ProjectState s, IEnumerable<Change> cs)
+    { foreach (var c in cs) s = Apply(s, c); return s; }
+}
+```
+
+#### 策略三：周期性检查点——限制回放成本
+
+差分存储的代价：撤销时不能直接"读"一个快照，而要从最近的 Baseline 检查点**回放** Delta 链。若链条很长，回放成本会累积成 O(n)。解决方法是**周期性插入全量检查点**——每 N 个 Delta 后强制存一次 Full，把任意位置的恢复成本限制在 O(N)：
+
+```
+历史时间线 ──────────────────────────────────────────────────►
+
+[Full]──►[Δ]──►[Δ]──►[Δ]──►[Δ]──►[Δ]──►[Full]──►[Δ]──►[Δ]
+  #1      #2    #3    #4    #5    #6     #7         #8    #9
+ baseline                              检查点
+
+Materialize(#9)：向左找最近的 Full(#7)，只需回放 #8、#9 两步
+Materialize(#5)：向左找最近的 Full(#1)，回放 #2..#5 四步
+任意位置的回放步数 ≤ CheckpointInterval（本例 = 5）
+```
+
+> [!tip] 检查点 = 视频编码的 I 帧
+> `Full` 快照就是关键帧（I-frame），可独立解码；`Delta` 是预测帧（P-frame），必须依赖前一帧。关键帧占空间大但能随机定位，预测帧小但需要从头解码。`CheckpointInterval` 越小，回放越快但内存越大——这是时间与空间的权衡旋钮。Git 的 GC 会把松散对象重打包成 pack（带 delta 压缩 + 周期性全量对象），正是同一思想。
+
+#### 完整实现：DeltaHistory
+
+`DeltaHistory` 把三者合一：不可变模型（结构共享的 Apply）、Baseline + 元素级 Delta（压缩字节）、周期性检查点（限制回放）：
+
+```csharp
+// ============================================
+// ProjectOriginator — 拥有状态，对外暴露 GetState / Restore
+// ============================================
+public class ProjectOriginator
+{
+    private ProjectState _state;
+    public ProjectOriginator(string name) => _state = new(
+        name, ImmutableList<TaskItem>.Empty, ImmutableDictionary<string, string>.Empty);
+
+    public string Name => _state.Name;
+    public int TaskCount => _state.Tasks.Count;
+    public TaskItem TaskAt(int i) => _state.Tasks[i];
+
+    public void Rename(string n) => _state = _state with { Name = n };
+    public void SetTaskStatus(int i, string s) =>
+        _state = _state with { Tasks = _state.Tasks.SetItem(i, _state.Tasks[i] with { Status = s }) };
+    public void AddTask(TaskItem t) => _state = _state with { Tasks = _state.Tasks.Add(t) };
+    public void SetMeta(string k, string v) =>
+        _state = _state with { Metadata = _state.Metadata.SetItem(k, v) };
+
+    public ProjectState GetState() => _state;
+    public void Restore(ProjectState s) => _state = s;
+    public void Display() =>
+        Console.WriteLine($"  项目: \"{Name}\", 任务数: {TaskCount}, 元数据: {_state.Metadata.Count} 项");
+}
+```
+
+```csharp
+// ============================================
+// Snapshot — Full 或 Delta
+// ============================================
+public sealed class Snapshot
+{
+    public bool IsFull { get; }
+    public ProjectState? FullState { get; }
+    public IReadOnlyList<Change>? Deltas { get; }
+    public DateTime Timestamp { get; }
+    private Snapshot(bool isFull, ProjectState? full, IReadOnlyList<Change>? deltas)
+    { IsFull = isFull; FullState = full; Deltas = deltas; Timestamp = DateTime.Now; }
+
+    public static Snapshot OfFull(ProjectState s) => new(true, s, null);
+    public static Snapshot OfDelta(IReadOnlyList<Change> d) => new(false, null, d);
+
+    public int EstimatedBytes => IsFull
+        ? FullState!.Tasks.Count * 80 + FullState.Metadata.Count * 40 + FullState.Name.Length * 2
+        : Deltas!.Sum(EstimateChange);
+
+    private static int EstimateChange(Change c) => c switch
+    {
+        Change.SetName v     => v.Value.Length * 2 + 8,
+        Change.ReplaceTask t => 16 + t.Value.Title.Length * 2 + t.Value.Status.Length * 2,
+        Change.InsertTask t  => 16 + t.Value.Title.Length * 2 + t.Value.Status.Length * 2,
+        Change.RemoveTask    => 8,
+        Change.MetaPut m     => m.Key.Length * 2 + m.Value.Length * 2 + 8,
+        Change.MetaDelete m  => m.Key.Length * 2 + 4,
+        _ => 8
+    };
+
+    public override string ToString() => IsFull
+        ? $"[Full {Timestamp:HH:mm:ss}] {FullState!.Tasks.Count} tasks (~{EstimatedBytes}B)"
+        : $"[Delta {Timestamp:HH:mm:ss}] {Deltas!.Count} changes (~{EstimatedBytes}B)";
+}
+
+// ============================================
+// DeltaHistory — 全量+差分链 + 周期性检查点
+// ============================================
+public class DeltaHistory
+{
+    private readonly List<Snapshot> _snapshots = new();
+    private int _cursor = -1;
+    private const int CheckpointInterval = 5;  // 每 5 个 Delta 强制一次 Full
+
+    public void Save(ProjectOriginator originator)
+    {
+        var current = originator.GetState();
+        Snapshot snap;
+
+        if (_snapshots.Count == 0 || NeedsCheckpoint())
+            snap = Snapshot.OfFull(current);           // Baseline 或检查点
+        else
+        {
+            var changes = StateDiffer.Diff(Materialize(_cursor), current);
+            snap = changes.Count == 0
+                ? Snapshot.OfFull(current)
+                : Snapshot.OfDelta(changes);
+        }
+
+        if (_cursor < _snapshots.Count - 1)             // 分支裁剪
+            _snapshots.RemoveRange(_cursor + 1, _snapshots.Count - _cursor - 1);
+        _snapshots.Add(snap);
+        _cursor = _snapshots.Count - 1;
+        Console.WriteLine($"  [Delta] 保存: {snap}");
+    }
+
+    // 距上一个 Full 超过 CheckpointInterval 个 Delta 则触发检查点
+    private bool NeedsCheckpoint()
+    {
+        int deltaRun = 0;
+        for (int i = _cursor; i >= 0; i--)
+        { if (_snapshots[i].IsFull) break; deltaRun++; }
+        return deltaRun >= CheckpointInterval;
+    }
+
+    public bool Undo(ProjectOriginator o)
+    {
+        if (_cursor <= 0) { Console.WriteLine("  [Delta] 无可撤销操作"); return false; }
+        _cursor--; o.Restore(Materialize(_cursor));
+        Console.WriteLine($"  [Delta] 撤销至快照 #{_cursor + 1}"); return true;
+    }
+
+    public bool Redo(ProjectOriginator o)
+    {
+        if (_cursor >= _snapshots.Count - 1) { Console.WriteLine("  [Delta] 无可重做操作"); return false; }
+        _cursor++; o.Restore(Materialize(_cursor));
+        Console.WriteLine($"  [Delta] 重做至快照 #{_cursor + 1}"); return true;
+    }
+
+    // 物化：从左边最近的 Full 检查点向右回放 Delta
+    private ProjectState Materialize(int index)
+    {
+        int fullIdx = index;
+        while (fullIdx >= 0 && !_snapshots[fullIdx].IsFull) fullIdx--;
+        if (fullIdx < 0) fullIdx = 0;
+        var state = _snapshots[fullIdx].FullState!;
+        for (int i = fullIdx + 1; i <= index; i++)
+            state = StateDiffer.ApplyAll(state, _snapshots[i].Deltas!);
+        return state;
+    }
+
+    public void PrintStats()
+    {
+        Console.WriteLine("\n  快照统计:");
+        int total = 0;
+        for (int i = 0; i < _snapshots.Count; i++)
+        { total += _snapshots[i].EstimatedBytes; Console.WriteLine($"    #{i + 1}: {_snapshots[i]}"); }
+        int fullCost = _snapshots.Count * (_snapshots[0].FullState!.Tasks.Count * 80);
+        double pct = fullCost > 0 ? 100.0 * (fullCost - total) / fullCost : 0;
+        Console.WriteLine($"  差分总计: ~{total}B | 若全量方案: ~{fullCost}B | 节省 {pct:F1}%");
+    }
+}
+```
+
+```csharp
+// ============================================
+// 运行演示（顶级语句）
+// ============================================
+Console.WriteLine("=== 差分存储 Memento（元素级 Delta + 检查点）===\n");
+
+var project = new ProjectOriginator("企业ERP系统");
+for (int i = 1; i <= 100; i++)
+    project.AddTask(new TaskItem($"任务 #{i}", "Todo", i % 8 + 1));
+
+Console.WriteLine("1. 初始状态（100 个任务）:");
+project.Display();
+var history = new DeltaHistory();
+history.Save(project);                       // #1 Baseline = Full
+
+Console.WriteLine("\n2. 仅修改任务 #50 的状态:");
+project.SetTaskStatus(49, "InProgress");
+history.Save(project);                       // #2 Delta: 1 个 ReplaceTask
+
+Console.WriteLine("\n3. 重命名项目:");
+project.Rename("企业ERP系统 v2.0");
+history.Save(project);                       // #3 Delta: 1 个 SetName
+
+Console.WriteLine("\n4. 新增 1 个任务:");
+project.AddTask(new TaskItem("任务 #101（紧急）", "Todo", 2));
+history.Save(project);                       // #4 Delta: 1 个 InsertTask
+
+Console.WriteLine("\n5. 新增元数据:");
+project.SetMeta("Owner", "张三");
+project.Display();
+history.Save(project);                       // #5 Delta: 1 个 MetaPut
+
+history.PrintStats();
+
+Console.WriteLine("\n--- Undo x3（验证回放正确性）---");
+history.Undo(project);                       // #5 → #4
+Console.WriteLine($"  任务 #50: [{project.TaskAt(49).Status}]");
+history.Undo(project);                       // #4 → #3（名称回到 v2.0）
+Console.WriteLine($"  任务 #50: [{project.TaskAt(49).Status}], 名称: {project.Name}");
+history.Undo(project);                       // #3 → #2（名称回到原名，任务 #50 仍为 InProgress）
+Console.WriteLine($"  任务 #50: [{project.TaskAt(49).Status}], 名称: {project.Name}");
+
+Console.WriteLine("\n--- Redo x2（验证前向回放）---");
+history.Redo(project);                       // 到 #3
+history.Redo(project);                       // 到 #4: 101 tasks
+Console.WriteLine($"  任务数: {project.TaskCount}, 任务 #101: [{project.TaskAt(100).Status}]");
+
+/* 输出:
+=== 差分存储 Memento（元素级 Delta + 检查点）===
+
+1. 初始状态（100 个任务）:
+  项目: "企业ERP系统", 任务数: 100, 元数据: 0 项
+  [Delta] 保存: [Full 20:39:07] 100 tasks (~8014B)
+
+2. 仅修改任务 #50 的状态:
+  [Delta] 保存: [Delta 20:39:07] 1 changes (~48B)
+
+3. 重命名项目:
+  [Delta] 保存: [Delta 20:39:07] 1 changes (~32B)
+
+4. 新增 1 个任务:
+  [Delta] 保存: [Delta 20:39:07] 1 changes (~46B)
+
+5. 新增元数据:
+  项目: "企业ERP系统 v2.0", 任务数: 101, 元数据: 1 项
+  [Delta] 保存: [Delta 20:39:07] 1 changes (~22B)
+
+  快照统计:
+    #1: [Full 20:39:07] 100 tasks (~8014B)
+    #2: [Delta 20:39:07] 1 changes (~48B)
+    #3: [Delta 20:39:07] 1 changes (~32B)
+    #4: [Delta 20:39:07] 1 changes (~46B)
+    #5: [Delta 20:39:07] 1 changes (~22B)
+  差分总计: ~8162B | 若全量方案: ~40000B | 节省 79.6%
+
+--- Undo x3（验证回放正确性）---
+  [Delta] 撤销至快照 #4
+  任务 #50: [InProgress]
+  [Delta] 撤销至快照 #3
+  任务 #50: [InProgress], 名称: 企业ERP系统 v2.0
+  [Delta] 撤销至快照 #2
+  任务 #50: [InProgress], 名称: 企业ERP系统
+
+--- Redo x2（验证前向回放）---
+  [Delta] 重做至快照 #3
+  [Delta] 重做至快照 #4
+  任务数: 101, 任务 #101: [Todo]
+*/
+```
+
+> [!note] 单文件编译顺序
+> C# 顶级语句必须出现在类型声明**之前**。若把本节所有代码放进一个 `Program.cs`，请将"运行演示"块放在文件顶部，类型声明（`record Change`、`Snapshot`、`StateDiffer` 等）放在其后；或在演示外层包一个 `static void Main()`。
+
+**运行方式:**
+```bash
+dotnet new console -n MementoDelta
+# 将上述代码放入 Program.cs（演示语句在前，类型声明在后）
+dotnet run --project MementoDelta
+```
+
+#### 三种策略对比
+
+| 策略 | 历史内存 | 撤销成本 | 实现复杂度 | 适用场景 |
+|------|---------|---------|-----------|---------|
+| 全量快照（可变模型） | O(n × \|S\|) 高 | O(1) | 低 | 状态小、历史短 |
+| 结构共享（不可变模型） | O(\|S\| + n·log\|S\|) | O(1) | 低 | 内存内撤销、频繁小改 |
+| 差分存储（本节） | O(\|S\| + n·\|d\|) 最低 | O(k)，k≤检查点间隔 | 中 | 持久化/传输、状态大 |
+
+> [!tip] 结构共享 + 差分可以叠加
+> 本节的 `DeltaHistory` 两者都用：`record` + `ImmutableList` 让 `Apply` 借结构共享（回放也便宜），Delta 让历史字节最小。结构共享解决"内存内复制贵"，差分解决"序列化字节多"，互不冲突。
+
+**关键设计要点：**
+- **Baseline + Delta 链**：首快照全量，后续只存元素级差异（`ReplaceTask`/`InsertTask`/`RemoveTask`），单个 Delta ≈ 30–50 B
+- **回放而非快照**：撤销从最近检查点回放 Delta——O(k)，k 受 `CheckpointInterval` 限制
+- **检查点=关键帧**：周期性 Full 把任意位置的恢复成本限制在常数级
+- **分支裁剪**：新操作丢弃 cursor 之后的快照，避免状态树分叉（与 2.1 的 `_redoStack.Clear()` 同理）
+- **深拷贝安全**：`ImmutableList` 天生不可变，`Delta` 里存的 `TaskItem`（record）也天生不可变——无需手动深拷贝，不存在 2.1 节"幽灵修改"陷阱
 
 ---
 
@@ -2146,7 +2581,7 @@ public interface IMementoDelta
 > **关键设计要点：**
 > - **Baseline + Delta 链**：第一个快照保存全量（Baseline），后续只存字段差异
 > - **Undo 实现**：从 Baseline 开始依次应用 Delta 直到目标位置——O(n) 但 n 通常很小
-> - **内存节省**：100 个任务的 Baseline ≈ 20KB，Delta 只存 1 个字段变更 ≈ 50 bytes——节省 >99%
+> - **内存节省**：标量字段（Name、单个 Meta）的 Delta ≈ 50 bytes vs 全量 ≈ 8 KB，单步节省 >99%；累计节省率随历史变长逼近 99%。注意：本答案对 `Tasks` 用了整表 JSON 比较的简化——改 1 个任务会存下整个列表，集合字段的收益打折扣；2.5 节的元素级 `ReplaceTask`/`InsertTask` 才对集合字段也成立
 > - **深拷贝注意**：Delta 中存储的引用类型（如 `List<TaskItem>`）必须在保存时深拷贝，防止后续被修改
 > - **备选方案**：JSON Patch（RFC 6902）使用 `System.Text.Json.JsonSerializer` + `JsonDocument` 对比——更通用但计算成本更高
 
