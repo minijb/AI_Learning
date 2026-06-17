@@ -1,6 +1,6 @@
 # 学习计划索引
 
-> 自动生成于 2026-06-15
+> 自动生成于 2026-06-17
 
 ## 进行中
 
@@ -24,6 +24,7 @@
 | oh-my-pi-code-agent-使用指南 | — |
 | shell-scripting-bash-zsh-fish | — |
 | typescript-complete | — |
+| unity-font-system | — |
 
 ## 已完成
 
