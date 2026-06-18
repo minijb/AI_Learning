@@ -1,74 +1,48 @@
 ---
-title: "02 — Lua 核心：table — 唯一的数据结构"
-updated: 2026-06-05
+title: "02 — Lua 核心：table、metatable 与 OOP"
+updated: 2026-06-18
 ---
 
-# 02 — Lua 核心：table — 唯一的数据结构
+# 02 — Lua 核心：table、metatable 与 OOP
 
-> 所属计划: Neovim + Lua 配置实战
-> 预计耗时: 50 分钟
-> 前置知识: 01-lua-basics（类型、控制流）
+> 所属计划: Neovim + Lua 配置实战 (现代深化版)
+> 预计耗时: 70 分钟
+> 前置知识: [[01-lua-basics]]
 
 ---
 
-## 1. 概念讲解
+## 1. Table 基础
 
 ### 为什么 table 这么重要？
 
-Lua 只有一种复合数据结构——**table**。它同时扮演了三个角色：
-- **数组**（Array）—— 按数字索引的序列
-- **字典**（Dictionary / HashMap）—— 按任意键索引的映射
-- **对象**（Object）—— 方法 + 状态的封装
-
-在 Neovim 配置中，你几乎每行代码都在操作 table：
-- 插件配置用 table 传递选项
-- 按键映射用 table 描述
-- LSP 设置用嵌套 table 组织
+Lua 只有一种复合数据结构——**table**。它同时扮演数组、字典、对象三个角色。Neovim 配置中每行代码几乎都在操作 table。
 
 ### Table 作为数组
 
 ```lua
--- 数组：索引从 1 开始
 local plugins = { "telescope", "treesitter", "lsp" }
-
--- 访问
 print(plugins[1])     -- "telescope"
-print(plugins[2])     -- "treesitter"
-print(#plugins)       -- 3（长度运算符）
+print(#plugins)       -- 3
 
--- 遍历数组
 for i, name in ipairs(plugins) do
     print(i .. ": " .. name)
 end
 
--- 追加元素
 table.insert(plugins, "cmp")
-plugins[#plugins + 1] = "which-key"  -- 等价写法
+plugins[#plugins + 1] = "which-key"
 ```
 
 > [!IMPORTANT]
-> Lua 数组索引从 **1** 开始，不是 0。`ipairs` 从索引 1 遍历到第一个 `nil`。
+> Lua 数组索引从 **1** 开始。`ipairs` 从 1 遍历到第一个 `nil`。
 
 ### Table 作为字典
 
 ```lua
--- 字典：用任意键（通常是字符串）
-local opts = {
-    number = true,
-    relativenumber = true,
-    tabstop = 4,
-    shiftwidth = 4,
-}
-
--- 访问（两种等价写法）
-print(opts.number)           -- true
-print(opts["number"])        -- true（键包含特殊字符时必须用这种）
-
--- 设置新键
+local opts = { number = true, tabstop = 4 }
+print(opts.number)      -- true
+print(opts["number"])   -- true
 opts.expandtab = true
-opts["softtabstop"] = 4
 
--- 遍历字典
 for key, value in pairs(opts) do
     print(key .. " = " .. tostring(value))
 end
@@ -78,15 +52,12 @@ end
 
 | 函数 | 遍历范围 | 顺序 | 用途 |
 |------|---------|------|------|
-| `ipairs(t)` | 只有连续数字索引（`1, 2, 3, ...`） | 保证有序 | 数组 |
-| `pairs(t)` | 所有键值对 | 不保证顺序 | 字典 / 混合 table |
+| `ipairs(t)` | 连续数字索引 | 有序 | 数组 |
+| `pairs(t)` | 所有键值对 | 无序 | 字典 / 混合 table |
 
-### Table 嵌套
-
-Neovim 配置中大量使用嵌套 table 描述复杂选项：
+### Table 嵌套与常用操作
 
 ```lua
--- 典型的插件配置结构
 local lsp_config = {
     servers = {
         lua_ls = {
@@ -97,47 +68,379 @@ local lsp_config = {
                 },
             },
         },
-        rust_analyzer = {},
     },
 }
 
--- 链式访问
 print(lsp_config.servers.lua_ls.settings.Lua.runtime.version)  -- "LuaJIT"
-```
 
-### 常用 Table 操作
-
-```lua
 local t = { "a", "b", "c" }
-
--- 拼接成字符串
 local s = table.concat(t, ", ")  -- "a, b, c"
-
--- 删除最后一个元素
-table.remove(t)  -- t = {"a", "b"}
-
--- 删除指定位置
-table.remove(t, 1)  -- t = {"b"}
-
--- 数组长度（遇到 nil 会中断，不可靠于稀疏数组）
-print(#t)
+table.remove(t)                  -- 删除末尾
+table.remove(t, 1)               -- 删除首位
 ```
 
 ---
 
-## 2. 代码示例
+## 2. metatable：table 的行为控制器
+
+metatable 让你自定义 table 行为：访问不存在的键、table 相加、打印显示等。
+
+```lua
+local t = setmetatable({}, {
+    __tostring = function() return "custom table" end
+})
+print(t)  -- custom table
+```
+
+### `setmetatable` / `getmetatable`
+
+```lua
+local mt = { __index = { name = "default" } }
+local t = setmetatable({}, mt)
+print(t.name)                 -- "default"
+print(getmetatable(t) == mt)  -- true
+```
+
+### 核心元方法
+
+#### `__index`：默认值与继承
+
+```lua
+local defaults = { theme = "tokyonight", font_size = 14 }
+local user_config = setmetatable({ font_size = 16 }, { __index = defaults })
+print(user_config.theme)      -- "tokyonight"
+print(user_config.font_size)  -- 16
+```
+
+也可以是函数：
+
+```lua
+local t = setmetatable({}, {
+    __index = function(_, key)
+        print("missing: " .. tostring(key))
+        return nil
+    end
+})
+print(t.foo)  -- missing: foo / nil
+```
+
+#### `__newindex`：拦截赋值
+
+```lua
+local proxy = setmetatable({}, {
+    __newindex = function(_, key)
+        error("readonly: " .. tostring(key))
+    end
+})
+proxy.name = "x"  -- 报错
+```
+
+#### `__call`：让 table 可调用
+
+```lua
+local Animal = {}
+Animal.__index = Animal
+
+function Animal.new(name)
+    return setmetatable({ name = name }, Animal)
+end
+
+setmetatable(Animal, {
+    __call = function(_, ...) return Animal.new(...) end
+})
+
+local a = Animal("Rex")
+print(a.name)  -- Rex
+```
+
+#### `__tostring`：控制打印
+
+```lua
+local Point = {}
+Point.__index = Point
+function Point.new(x, y)
+    return setmetatable({ x = x, y = y }, Point)
+end
+function Point.__tostring(p)
+    return string.format("Point(%d, %d)", p.x, p.y)
+end
+print(Point.new(3, 4))  -- Point(3, 4)
+```
+
+#### `__eq` / `__lt` / `__le`：比较
+
+```lua
+local Vec2D = {}
+Vec2D.__index = Vec2D
+function Vec2D.new(x, y)
+    return setmetatable({ x = x, y = y }, Vec2D)
+end
+function Vec2D.__eq(a, b)
+    return a.x == b.x and a.y == b.y
+end
+function Vec2D.__lt(a, b)
+    return a.x * a.x + a.y * a.y < b.x * b.x + b.y * b.y
+end
+
+print(Vec2D.new(1, 2) == Vec2D.new(1, 2))  -- true
+print(Vec2D.new(1, 2) < Vec2D.new(3, 4))   -- true
+```
+
+> [!WARNING]
+> `__eq` 要求两个操作数 metatable 相同，否则直接返回 `false`。
+
+#### `__add` / `__sub` / `__mul`：算术运算
+
+```lua
+local Vec2D = {}
+Vec2D.__index = Vec2D
+function Vec2D.new(x, y)
+    return setmetatable({ x = x or 0, y = y or 0 }, Vec2D)
+end
+function Vec2D.__add(a, b)
+    return Vec2D.new(a.x + b.x, a.y + b.y)
+end
+function Vec2D.__sub(a, b)
+    return Vec2D.new(a.x - b.x, a.y - b.y)
+end
+function Vec2D.__mul(v, s)
+    return Vec2D.new(v.x * s, v.y * s)
+end
+function Vec2D.__tostring(v)
+    return string.format("Vec2D(%g, %g)", v.x, v.y)
+end
+
+local a = Vec2D.new(1, 2)
+local b = Vec2D.new(3, 4)
+print(a + b)   -- Vec2D(4, 6)
+print(a - b)   -- Vec2D(-2, -2)
+print(a * 2)   -- Vec2D(2, 4)
+```
+
+#### `__len`：自定义 `#`
+
+```lua
+local Counter = {}
+Counter.__index = Counter
+function Counter.new()
+    return setmetatable({ _count = 0 }, Counter)
+end
+function Counter:inc()
+    self._count = self._count + 1
+end
+function Counter.__len(t)
+    return t._count
+end
+
+local c = Counter.new()
+c:inc(); c:inc(); c:inc()
+print(#c)  -- 3
+```
+
+#### `__pairs` / `__ipairs`：自定义迭代
+
+```lua
+local OrderedSet = {}
+OrderedSet.__index = OrderedSet
+function OrderedSet.new(...)
+    local self = { keys = {} }
+    for _, v in ipairs({ ... }) do
+        self.keys[#self.keys + 1] = v
+    end
+    return setmetatable(self, OrderedSet)
+end
+function OrderedSet.__pairs(self)
+    local i = 0
+    return function()
+        i = i + 1
+        return self.keys[i], true
+    end
+end
+
+for k in pairs(OrderedSet.new("lua", "neovim", "vim")) do
+    print(k)  -- lua, neovim, vim
+end
+```
+
+---
+
+## 3. OOP 模式完整范式
+
+### 类、构造函数、冒号语法糖
+
+```lua
+local Stack = {}
+Stack.__index = Stack  -- 关键：实例查找类方法
+
+function Stack.new()
+    return setmetatable({ _items = {} }, Stack)
+end
+
+function Stack:push(item)
+    table.insert(self._items, item)
+end
+
+-- 冒号等价于显式 self
+function Stack.pop(self)
+    return table.remove(self._items)
+end
+
+local s = Stack.new()
+s:push("hello")     -- 推荐
+s.push(s, "world")  -- 等价
+```
+
+### 完整示例：Stack 类
+
+```lua
+local Stack = {}
+Stack.__index = Stack
+
+function Stack.new()
+    return setmetatable({ _items = {} }, Stack)
+end
+function Stack:push(item)
+    table.insert(self._items, item)
+end
+function Stack:pop()
+    return table.remove(self._items)
+end
+function Stack:peek()
+    return self._items[#self._items]
+end
+function Stack:size()
+    return #self._items
+end
+function Stack.__tostring(s)
+    return "Stack[" .. table.concat(s._items, ", ") .. "]"
+end
+
+local s = Stack.new()
+s:push("a"); s:push("b"); s:push("c")
+print(s)           -- Stack[a, b, c]
+print(s:pop())     -- c
+print(s:peek())    -- b
+print(s:size())    -- 2
+```
+
+### 继承
+
+```lua
+local Animal = {}
+Animal.__index = Animal
+function Animal.new(name)
+    return setmetatable({ name = name }, Animal)
+end
+function Animal:speak()
+    return self.name .. " makes a sound"
+end
+
+local Dog = {}
+Dog.__index = Dog
+setmetatable(Dog, { __index = Animal })  -- Dog 继承 Animal
+
+function Dog.new(name)
+    return setmetatable(Animal.new(name), Dog)
+end
+function Dog:speak()
+    return self.name .. " barks"
+end
+
+print(Dog.new("Rex"):speak())  -- Rex barks
+```
+
+### 完整示例：Vector2D 类
+
+```lua
+local Vector2D = {}
+Vector2D.__index = Vector2D
+
+function Vector2D.new(x, y)
+    return setmetatable({ x = x or 0, y = y or 0 }, Vector2D)
+end
+
+function Vector2D.__add(a, b)
+    return Vector2D.new(a.x + b.x, a.y + b.y)
+end
+
+function Vector2D.__sub(a, b)
+    return Vector2D.new(a.x - b.x, a.y - b.y)
+end
+
+function Vector2D.__mul(v, s)
+    return Vector2D.new(v.x * s, v.y * s)
+end
+
+function Vector2D.__eq(a, b)
+    return a.x == b.x and a.y == b.y
+end
+
+function Vector2D:magnitude()
+    return math.sqrt(self.x * self.x + self.y * self.y)
+end
+
+function Vector2D:normalize()
+    local mag = self:magnitude()
+    if mag == 0 then return Vector2D.new(0, 0) end
+    return self * (1 / mag)
+end
+
+function Vector2D.__tostring(v)
+    return string.format("Vector2D(%g, %g)", v.x, v.y)
+end
+
+local a = Vector2D.new(3, 4)
+local b = Vector2D.new(1, 2)
+print(a + b)                   -- Vector2D(4, 6)
+print(a - b)                   -- Vector2D(2, 2)
+print(a * 2)                   -- Vector2D(6, 8)
+print(a:magnitude())           -- 5
+print(a:normalize())           -- Vector2D(0.6, 0.8)
+print(a == Vector2D.new(3, 4)) -- true
+```
+
+---
+
+## 4. 弱表（weak table）简介
+
+弱表通过 metatable 的 `__mode` 控制键/值是否被垃圾回收。
+
+| `__mode` | 含义 |
+|----------|------|
+| `"k"` | key 弱引用 |
+| `"v"` | value 弱引用 |
+| `"kv"` | key 和 value 都弱引用 |
+
+```lua
+local cache = setmetatable({}, { __mode = "v" })
+
+local function get_data(key)
+    if cache[key] then return cache[key] end
+    local value = { data = "computed " .. key }
+    cache[key] = value
+    return value
+end
+
+local a = get_data("foo")
+print(a.data)
+-- 当外部不再引用 a 时，cache["foo"] 可能被回收
+```
+
+> [!WARNING]
+> 弱表的 key/value 必须是对象类型。字符串和数字没有弱引用语义。
+
+---
+
+## 5. 代码示例
 
 ```lua
 -- table_demo.lua
-
--- ====== 数组用法 ======
 local fruits = { "apple", "banana", "cherry" }
 print("水果列表（ipairs）:")
 for i, fruit in ipairs(fruits) do
     print(string.format("  %d: %s", i, fruit))
 end
 
--- ====== 字典用法 ======
 local config = {
     theme = "tokyonight",
     font_size = 14,
@@ -153,27 +456,36 @@ for key, value in pairs(config) do
     end
 end
 
--- ====== 嵌套访问 ======
-print("\n启用的功能:")
-for _, feat in ipairs(config.features) do
-    print("  - " .. feat)
+local defaults = { timeout = 30, retries = 3 }
+local user_opts = setmetatable({ timeout = 60 }, { __index = defaults })
+print("\n合并后选项:")
+print("  timeout =", user_opts.timeout)
+print("  retries =", user_opts.retries)
+
+local Vector2D = {}
+Vector2D.__index = Vector2D
+function Vector2D.new(x, y)
+    return setmetatable({ x = x or 0, y = y or 0 }, Vector2D)
+end
+function Vector2D.__add(a, b)
+    return Vector2D.new(a.x + b.x, a.y + b.y)
+end
+function Vector2D:magnitude()
+    return math.sqrt(self.x * self.x + self.y * self.y)
+end
+function Vector2D.__tostring(v)
+    return string.format("Vector2D(%g, %g)", v.x, v.y)
 end
 
--- ====== 模拟 Neovim 插件配置风格 ======
+local v1 = Vector2D.new(1, 2)
+local v2 = Vector2D.new(3, 4)
+print("\n向量运算:")
+print("  v1 + v2 =", v1 + v2)
+print("  |v1| =", v1:magnitude())
+
 local lazy_plugins = {
-    {
-        "folke/tokyonight.nvim",
-        priority = 1000,
-        opts = {
-            style = "night",
-            transparent = false,
-        },
-    },
-    {
-        "nvim-telescope/telescope.nvim",
-        dependencies = { "nvim-lua/plenary.nvim" },
-        keys = { "<leader>ff", "<leader>fg" },
-    },
+    { "folke/tokyonight.nvim", priority = 1000, opts = { style = "night" } },
+    { "nvim-telescope/telescope.nvim", dependencies = { "nvim-lua/plenary.nvim" } },
 }
 
 print("\n插件列表:")
@@ -199,10 +511,13 @@ lua table_demo.lua
   font_size = 14
   features = {lsp, treesitter, telescope}
 
-启用的功能:
-  - lsp
-  - treesitter
-  - telescope
+合并后选项:
+  timeout = 60
+  retries = 3
+
+向量运算:
+  v1 + v2 = Vector2D(4, 6)
+  |v1| = 2.23607
 
 插件列表:
   folke/tokyonight.nvim
@@ -211,16 +526,15 @@ lua table_demo.lua
 
 ---
 
-## 3. 练习
+## 6. 练习
 
 ### 练习 1: 数组操作
-创建一个包含 5 个数字的 table。用 `table.insert` 追加 2 个新数字，用 `table.remove` 删除第 3 个元素。最后用 `ipairs` 打印所有元素和当前长度。
+创建包含 5 个数字的 table。追加 2 个数字，删除第 3 个元素。用 `ipairs` 打印所有元素和长度。
 
 ### 练习 2: 配置字典
-创建以下 table，表示 Neovim 的一个插件配置，然后用 `pairs` 遍历打印：
+创建以下 table，用 `pairs` 遍历打印：
 
 ```lua
--- 目标结构
 {
     name = "nvim-cmp",
     lazy = false,
@@ -231,113 +545,142 @@ lua table_demo.lua
 }
 ```
 
-### 练习 3: 统计词频（可选）
-写一个函数，接受一个字符串数组，返回一个 table，key 是单词，value 是出现次数。用 `pairs` 打印结果。
+### 练习 3: 实现 Queue 类
+用 OOP 实现 `Queue`，支持 `new`、`enqueue`、`dequeue`、`peek`、`size`、`__tostring`。
 
+### 练习 4: 用 __add 实现向量加法
+定义 `Point` 类，实现 `__add` 和 `__eq`。打印 `Point.new(1,2) + Point.new(3,4)` 和 `Point.new(1,2) == Point.new(1,2)`。
 
-## 3.5 参考答案
+### 练习 5: 统计词频（可选）
+写一个函数，接受字符串数组，返回词频 table。
+
+## 6.5 参考答案
 
 > [!tip]- 练习 1 参考答案
 > ```lua
-> -- exercise1_array.lua
 > local nums = { 10, 20, 30, 40, 50 }
->
-> -- 追加两个新数字
 > table.insert(nums, 60)
 > table.insert(nums, 70)
->
-> -- 删除第 3 个元素（索引为 3，值为 30）
 > table.remove(nums, 3)
->
-> -- 打印所有元素和长度
-> print("当前数组内容:")
 > for i, v in ipairs(nums) do
->     print("  nums[" .. i .. "] = " .. v)
+>     print("nums[" .. i .. "] = " .. v)
 > end
-> print("数组长度: " .. #nums)  -- 应为 6
+> print("长度: " .. #nums)
 > ```
->
-> **预期结果：** 删除 30 后数组变为 `{10, 20, 40, 50, 60, 70}`，长度 6。`table.remove` 会压缩数组，后续元素自动前移。
 
 > [!tip]- 练习 2 参考答案
 > ```lua
-> -- exercise2_plugin_config.lua
 > local plugin_config = {
 >     name = "nvim-cmp",
 >     lazy = false,
 >     dependencies = { "hrsh7th/cmp-nvim-lsp", "hrsh7th/cmp-buffer" },
->     opts = {
->         mapping = { ["<CR>"] = "confirm", ["<Tab>"] = "select_next" },
->     },
+>     opts = { mapping = { ["<CR>"] = "confirm", ["<Tab>"] = "select_next" } },
 > }
 >
-> print("插件配置:")
 > for key, value in pairs(plugin_config) do
 >     if type(value) == "table" then
->         -- 递归打印嵌套 table
->         print("  " .. key .. ":")
+>         print(key .. ":")
 >         for k2, v2 in pairs(value) do
 >             if type(v2) == "table" then
->                 print("    " .. k2 .. ":")
->                 for k3, v3 in pairs(v2) do
->                     print("      " .. k3 .. " = " .. v3)
->                 end
+>                 print("  " .. k2 .. ":")
+>                 for k3, v3 in pairs(v2) do print("    " .. k3 .. " = " .. v3) end
 >             else
->                 print("    " .. k2 .. " = " .. tostring(v2))
+>                 print("  " .. k2 .. " = " .. tostring(v2))
 >             end
 >         end
 >     else
->         print("  " .. key .. " = " .. tostring(value))
+>         print(key .. " = " .. tostring(value))
 >     end
 > end
 > ```
->
-> **关键点：** 键含特殊字符（如 `<CR>`）时必须用 `["<CR>"]` 方括号语法，不能用 `.` 语法。遍历嵌套 table 时需要判断 `type(value) == "table"` 来决定是否继续深入。
 
-> [!tip]- 练习 3 参考答案（可选）
+> [!tip]- 练习 3 参考答案
 > ```lua
-> -- exercise3_wordcount.lua
+> local Queue = {}
+> Queue.__index = Queue
+> function Queue.new()
+>     return setmetatable({ _items = {} }, Queue)
+> end
+> function Queue:enqueue(item)
+>     table.insert(self._items, item)
+> end
+> function Queue:dequeue()
+>     return table.remove(self._items, 1)
+> end
+> function Queue:peek()
+>     return self._items[1]
+> end
+> function Queue:size()
+>     return #self._items
+> end
+> function Queue.__tostring(q)
+>     return "Queue[" .. table.concat(q._items, ", ") .. "]"
+> end
+>
+> local q = Queue.new()
+> q:enqueue("a"); q:enqueue("b"); q:enqueue("c")
+> print(q)
+> print(q:peek())
+> print(q:dequeue())
+> print(q:size())
+> ```
+
+> [!tip]- 练习 4 参考答案
+> ```lua
+> local Point = {}
+> Point.__index = Point
+> function Point.new(x, y)
+>     return setmetatable({ x = x, y = y }, Point)
+> end
+> function Point.__add(a, b)
+>     return Point.new(a.x + b.x, a.y + b.y)
+> end
+> function Point.__eq(a, b)
+>     return a.x == b.x and a.y == b.y
+> end
+> function Point.__tostring(p)
+>     return string.format("Point(%d, %d)", p.x, p.y)
+> end
+>
+> print(Point.new(1, 2) + Point.new(3, 4))
+> print(Point.new(1, 2) == Point.new(1, 2))
+> ```
+
+> [!tip]- 练习 5 参考答案（可选）
+> ```lua
 > local function word_count(words)
 >     local counts = {}
 >     for _, word in ipairs(words) do
->         if counts[word] then
->             counts[word] = counts[word] + 1
->         else
->             counts[word] = 1
->         end
+>         counts[word] = (counts[word] or 0) + 1
 >     end
 >     return counts
 > end
 >
-> -- 测试
-> local sample = { "lua", "neovim", "lua", "vim", "neovim", "lua" }
-> local result = word_count(sample)
->
-> print("词频统计:")
-> for word, count in pairs(result) do
->     print("  " .. word .. ": " .. count .. " 次")
+> for word, count in pairs(word_count({ "lua", "neovim", "lua", "vim", "neovim", "lua" })) do
+>     print(word .. ": " .. count)
 > end
-> -- 预期: lua: 3, neovim: 2, vim: 1
 > ```
->
-> **技巧：** `counts[word]` 初值为 `nil`（等价于 `false`），所以 `if counts[word]` 可判断是否已存在该键。也可以写成 `counts[word] = (counts[word] or 0) + 1` 一行搞定。
 
 > [!note] 答案使用方式
 > 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
 ---
 
-## 4. 扩展阅读
+## 7. 扩展阅读
 
 - [Programming in Lua — Tables](https://www.lua.org/pil/2.5.html)
+- [Programming in Lua — Metatables and Metamethods](https://www.lua.org/pil/13.html)
 - [Lua 5.1 参考手册 — Table Manipulation](https://www.lua.org/manual/5.1/manual.html#5.5)
-- [Lua table 的实现原理（数组部分 + 哈希部分）](https://www.lua.org/gems/sample.pdf)
+- [Lua 5.1 参考手册 — Metatables](https://www.lua.org/manual/5.1/manual.html#2.8)
 
 ---
 
 ## 常见陷阱
 
-- **`#` 对稀疏 table 不可靠**：如果数组中有 `nil` 洞，`#` 返回的值是不确定的。配置中通常用 `ipairs` 或 `table.insert` 保持数组连续。
-- **`ipairs` 遇到 `nil` 就停止**：即使后面还有元素，也不继续遍历。
-- **键为数字的 table 既是数组也是字典**：`t = {10, 20, name = "test"}` —— `t[1]` 和 `t.name` 都存在，但 `#t` 可能不是 2。
-- **字典 key 不能是 nil**：`t[nil] = 1` 会报错。
-- **table 是引用类型**：`local a = {1}; local b = a; b[1] = 99` 后 `a[1]` 也是 99。需要拷贝时用 `vim.deepcopy`（Neovim）或手动递归。
+- **`#` 对稀疏 table 不可靠**：数组中有 `nil` 洞时结果不确定。
+- **`ipairs` 遇到 `nil` 就停止**：即使后面还有元素。
+- **table 是引用类型**：`local b = a; b[1] = 99` 会改变 `a`。
+- **忘记设置 `__index`**：OOP 中类的 `__index` 必须指向自己。
+- **`__eq` 要求 metatable 相同**：不同 metatable 的对象比较直接返回 `false`。
+- **`__call` 放错 metatable**：想让 `Class(...)` 工作，要把 `__call` 放在 `Class` 自己的 metatable 里。
+- **弱表只能弱引用对象类型**：字符串/数字作为 key 不会被弱引用。

@@ -1,13 +1,13 @@
 ---
 title: "14 — kickstart.nvim 架构深度解析"
-updated: 2026-06-05
+updated: 2026-06-18
 ---
 
 # 14 — kickstart.nvim 架构深度解析
 
-> 所属计划: Neovim + Lua 配置实战 (现代版)
-> 预计耗时: 60 分钟
-> 前置知识: 07-vim-pack、08-modern-plugin-patterns、09-modern-lsp、10-blink-cmp
+> 所属计划: Neovim + Lua 配置实战 (现代深化版)
+> 预计耗时: 65 分钟
+> 前置知识: [[07-vim-pack]]、[[08-modern-plugin-patterns]]、[[09-modern-lsp]]、[[10-blink-cmp]]、[[11-treesitter]]
 
 ---
 
@@ -15,277 +15,593 @@ updated: 2026-06-05
 
 ### kickstart.nvim 是什么
 
-kickstart.nvim 是 Neovim 核心开发者 TJ DeVries 维护的一个**单文件配置模板**。它不是发行版（distribution），而是一个"启动点"——你可以从头到尾读懂每一行代码，然后在此基础上构建自己的配置。
+kickstart.nvim 是 Neovim 核心开发者 TJ DeVries 维护的**单文件配置模板**。它不是发行版（distribution），而是一个"启动点"——你可以从头到尾读懂每一行代码，然后在此基础上构建自己的配置。
 
 > "The goal is that you can read every line of code, top-to-bottom, understand what your configuration is doing, and modify it to suit your needs."
 
 ### 设计哲学
 
-1. **单文件优先** — 整个配置在一个 `init.lua` 中，约 1000 行，完全可读
-2. **注释即文档** — 代码中的注释数量远超一般配置，解释每个选择的原因
-3. **零魔法** — `vim.pack.add()` 后直接 `.setup()`，没有隐式依赖
-4. **do 块分区** — 9 个 do 块，清晰的职责边界
-5. **渐进式揭示** — 每个 section 既可独立理解，组合起来又完整
-6. **可扩展** — 内置 `kickstart.plugins.*` 和 `custom.plugins` 扩展机制
+1. **单文件优先** — 整个配置在 `init.lua` 中，约 1000 行，完全可读；
+2. **注释即文档** — 注释数量远超一般配置，解释每个选择的原因；
+3. **零魔法** — `vim.pack.add()` 后直接 `.setup()`，没有隐式依赖；
+4. **`do ... end` 分区** — 10 个 `do` 块，职责边界清晰；
+5. **渐进式揭示** — 每个 section 既可独立理解，组合起来又完整；
+6. **可扩展** — 内置 `kickstart.plugins.*` 和 `custom.plugins` 扩展机制。
 
-### 整体架构
+### 2026-06 master 分支的 10 个 section
 
 ```
-init.lua (983 行，9 个 section)
+init.lua (~1000 行，10 个 section)
 
-SECTION 1: FOUNDATION (行 96-237)
+SECTION 1: OPTIONS
   ├── vim.loader.enable()           ← 缓存 Lua 模块，加速启动
-  ├── vim.g.mapleader               ← Leader 键设置（必须在插件之前）
-  ├── vim.o 选项配置                 ← number, mouse, clipboard, ...
+  ├── leader 设置                    ← 必须在插件之前
+  └── vim.o / vim.opt 选项体系       ← number, mouse, clipboard, listchars
+
+SECTION 2: KEYMAPS
   ├── vim.diagnostic.config()       ← 全局诊断配置
-  └── 基础 keymaps + autocmds       ← Esc 清理搜索、分屏导航、复制高亮
+  ├── <Esc> 清搜索高亮
+  ├── <C-hjkl> 窗口导航
+  ├── 终端 <Esc><Esc> 退出
+  └── TextYankPost → vim.hl.on_yank()
 
-SECTION 2: PLUGIN MANAGER INTRO (行 242-310)
-  ├── vim.pack 介绍注释
-  ├── run_build() 辅助函数
-  └── PackChanged autocmd           ← 安装/更新后的构建钩子
+SECTION 3: PLUGIN MANAGER INTRO
+  ├── run_build() 辅助函数           ← vim.system() 同步执行构建
+  └── PackChanged autocmd           ← 安装/更新后自动编译
 
-SECTION 3: UI / CORE UX (行 314-420)
+SECTION 4: UI / CORE UX
   ├── guess-indent.nvim             ← 自动检测缩进
-  ├── gitsigns.nvim                 ← Git 标记（条件配置）
+  ├── gitsigns.nvim                 ← Git 标记
   ├── which-key.nvim                ← 按键提示
-  ├── tokyonight.nvim               ← 配色方案
-  ├── todo-comments.nvim            ← 注释高亮
-  └── mini.nvim 模块                ← ai, surround, statusline
+  ├── tokyonight.nvim               ← colorscheme
+  ├── todo-comments.nvim            ← TODO 高亮
+  └── mini.nvim 模块                ← ai, surround, statusline, icons
 
-SECTION 4: SEARCH & NAVIGATION (行 424-520)
+SECTION 5: SEARCH & NAVIGATION
   ├── telescope.nvim                ← 模糊查找器
-  ├── telescope-fzf-native          ← 可选 fzf 后端（条件安装）
-  ├── telescope-ui-select           ← 下拉选择
-  ├── Telescope 内置 keymaps        ← <leader>sh, <leader>sf, ...
-  └── LSP 相关的 picker keymaps     ← grr, gri, grd, ...
+  ├── telescope-fzf-native          ← 可选 fzf 后端
+  ├── telescope-ui-select           ← 接管 vim.ui.select
+  └── LSP picker 覆盖 grr/gri/gO/grd/grt
 
-SECTION 5: LSP (行 524-660)
+SECTION 6: LSP
   ├── fidget.nvim                   ← LSP 状态通知
-  ├── LspAttach autocmd             ← 重命名、代码操作、文档高亮
+  ├── LspAttach autocmd             ← 手动映射（部分与默认重叠）
   ├── servers 配置表                ← lua_ls, stylua, ...
-  ├── mason 系列插件                ← 自动管理 LSP 安装
+  ├── mason 工具链                  ← mason-org 组织
   └── vim.lsp.config() + vim.lsp.enable()
 
-SECTION 6: FORMATTING (行 664-700)
+SECTION 7: FORMATTING
   ├── conform.nvim                  ← 格式化引擎
-  └── <leader>f 格式化键位
+  └── <leader>f 键位
 
-SECTION 7: AUTOCOMPLETE & SNIPPETS (行 704-760)
+SECTION 8: AUTOCOMPLETE & SNIPPETS
   ├── LuaSnip                       ← Snippet 引擎
-  ├── blink.cmp                     ← 补全引擎（版本锁定）
-  └── blink.cmp.setup()             ← keymap, sources, fuzzy, signature
+  └── blink.cmp (V1)                ← 补全引擎
 
-SECTION 8: TREESITTER (行 764-900)
-  ├── nvim-treesitter               ← 语法引擎
-  ├── parsers 列表                  ← 预装的基础解析器
-  └── FileType autocmd              ← 按需安装和启用解析器
+SECTION 9: TREESITTER
+  ├── nvim-treesitter (main 分支)    ← 语法引擎
+  ├── parsers 列表                  ← 预装基础解析器
+  ├── treesitter_try_attach         ← 条件启用
+  └── foldexpr
 
-SECTION 9: OPTIONAL / NEXT STEPS (行 904-980)
-  ├── require 'kickstart.plugins.debug'
-  ├── require 'kickstart.plugins.indent_line'
-  ├── require 'kickstart.plugins.lint'
-  ├── require 'kickstart.plugins.autopairs'
-  ├── require 'kickstart.plugins.neo-tree'
-  ├── require 'kickstart.plugins.gitsigns'
-  └── require 'custom.plugins'
+SECTION 10: OPTIONAL EXAMPLES
+  └── kickstart.plugins.* / custom.plugins
 ```
 
 ### 关键设计决策
 
 #### 决策 1: 为什么是单文件？
 
-**单文件 vs 模块化的权衡:**
-
 | | 单文件 | 模块化 |
 |---|--------|--------|
 | 学习成本 | 低——从上读到下 | 高——需要在文件间跳转 |
-| 发现性 | 高——所有配置可见 | 低——需要知道文件结构 |
-| 维护性 | 适中——文件长度可控（~1000 行） | 高——职责清晰 |
+| 发现性 | 高——所有配置可见 | 中——需要知道文件结构 |
+| 维护性 | 适中——文件长度可控 | 高——职责清晰 |
 | 启动速度 | 相当 | 相当 |
+| 团队协作 | 低 | 高 |
 
-kickstart 选择了单文件，因为它首先是**教学工具**。当你理解了每个 section 后，可以随时把它拆成多个文件。
+kickstart 选择单文件，因为它首先是**教学工具**。理解后可随时拆成多文件，详见 [[15-modular-config]]。
 
-#### 决策 2: 为什么用 `do ... end` 块？
-
-```lua
-do
-  -- 所有变量在这里都是局部的
-  local map = function(...) end
-  -- 不会污染全局命名空间
-end
-```
-
-每个 `do` 块创建了一个局部作用域，section 之间的变量不会互相干扰。
-
-#### 决策 3: 为什么显式调用 `.setup()` 而不是用 `opts`？
+#### 决策 2: 显式 `.setup()` 与 `do ... end`
 
 ```lua
--- kickstart 风格（显式、可打断点、可逐行理解）
 vim.pack.add { gh 'folke/which-key.nvim' }
 require('which-key').setup {
   delay = 0,
   icons = { mappings = vim.g.have_nerd_font },
 }
-
--- 对比 lazy.nvim 的 opts 风格（隐式、magical）
-{
-  "folke/which-key.nvim",
-  opts = { delay = 0 },
-}
 ```
 
-显式调用 `.setup()` 让你：
-- 看到哪个函数被调用了
-- 可以在前后添加任意逻辑
-- 可以在 `setup()` 参数中使用变量和条件
-
-#### 决策 4: 为什么注释这么多？
-
-注释量远超一般配置。kickstart 的注释承担了两个角色：
-1. **教学**: 解释每个配置项的作用和 `:help` 入口
-2. **文档**: 作为你后续修改的参考
-
-你可以在理解后删除大量注释，让配置回归简洁。
+显式调用让你看到哪个函数被调用、在前后添加任意逻辑、在 `setup()` 参数中使用变量和条件。每个 `do ... end` 块创建局部作用域，section 之间的变量不会互相干扰，也不需要 `local M = {}` 的模块样板。
 
 ---
 
-## 2. 代码精读：关键模式
+## 2. 代码精读：十个 section
 
-### 模式 1: 条件插件安装
+### SECTION 1: OPTIONS
 
 ```lua
--- 只有安装了 make 才编译 fzf 后端
-if vim.fn.executable 'make' == 1 then
-  table.insert(telescope_plugins, gh 'nvim-telescope/telescope-fzf-native.nvim')
-end
+vim.loader.enable()  -- 缓存编译后的 Lua 模块，加速启动
 
--- 只有 Nerd Font 才装图标插件
-if vim.g.have_nerd_font then
-  vim.pack.add { gh 'nvim-tree/nvim-web-devicons' }
-end
+vim.g.mapleader = ' '
+vim.g.maplocalleader = ' '
+vim.g.have_nerd_font = false
+
+vim.o.number = true
+vim.o.relativenumber = false
+vim.o.mouse = 'a'
+
+vim.schedule(function()
+  vim.o.clipboard = 'unnamedplus'
+end)
+
+vim.o.ignorecase = true
+vim.o.smartcase = true
+vim.o.hlsearch = true
+vim.o.breakindent = true
+vim.o.undofile = true
+
+vim.o.signcolumn = 'yes'
+vim.o.cursorline = true
+vim.o.scrolloff = 10
+vim.o.showmode = false
+vim.o.inccommand = 'split'
+vim.o.confirm = true
+
+vim.o.list = true
+vim.opt.listchars = { tab = '» ', trail = '·', nbsp = '␣' }
+
+vim.o.splitright = true
+vim.o.splitbelow = true
+
+vim.o.updatetime = 250
+vim.o.timeoutlen = 300
 ```
 
-### 模式 2: helper 函数减少重复
+**设计要点**：
+- `vim.loader.enable()` 放在**第一行**，这是 kickstart master 的现代做法；
+- `vim.schedule` 延迟 clipboard 设置，避免启动时立即与系统剪贴板同步；
+- `vim.opt.listchars` 用表赋值，`tab = '» '` 中的空格也是显示内容。
+
+### SECTION 2: KEYMAPS
 
 ```lua
--- 在 LspAttach 中的局部 map 函数
-local map = function(keys, func, desc, mode)
-  mode = mode or 'n'
-  vim.keymap.set(mode, keys, func, { buffer = event.buf, desc = 'LSP: ' .. desc })
-end
-
-map('grn', vim.lsp.buf.rename, '[R]e[n]ame')
-map('gra', vim.lsp.buf.code_action, 'Code [A]ction', { 'n', 'x' })
-```
-
-### 模式 3: 自动依赖安装
-
-```lua
--- mason + mason-lspconfig + mason-tool-installer 三件套
-vim.pack.add {
-  gh 'neovim/nvim-lspconfig',
-  gh 'mason-org/mason.nvim',
-  gh 'mason-org/mason-lspconfig.nvim',
-  gh 'WhoIsSethDaniel/mason-tool-installer.nvim',
+vim.diagnostic.config {
+  update_in_insert = false,
+  severity_sort = true,
+  float = { border = 'rounded', source = 'if_many' },
+  underline = { severity = { min = vim.diagnostic.severity.WARN } },
+  virtual_text = true,
+  virtual_lines = false,
+  jump = {
+    on_jump = function(_, bufnr)
+      vim.diagnostic.open_float { bufnr = bufnr, scope = 'cursor', focus = false }
+    end,
+  },
 }
 
-require('mason').setup {}
+vim.keymap.set('n', '\u003cleader\u003eq', vim.diagnostic.setloclist, { desc = 'Open diagnostic [Q]uickfix list' })
+vim.keymap.set('n', '\u003cEsc\u003e', '\u003ccmd\u003enohlsearch\u003ccr\u003e')
 
-local ensure_installed = vim.tbl_keys(servers or {})
-require('mason-tool-installer').setup { ensure_installed = ensure_installed }
+vim.keymap.set('n', '\u003cC-h\u003e', '\u003cC-w\u003e\u003cC-h\u003e', { desc = 'Move focus to the left window' })
+vim.keymap.set('n', '\u003cC-l\u003e', '\u003cC-w\u003e\u003cC-l\u003e', { desc = 'Move focus to the right window' })
+vim.keymap.set('n', '\u003cC-j\u003e', '\u003cC-w\u003e\u003cC-j\u003e', { desc = 'Move focus to the lower window' })
+vim.keymap.set('n', '\u003cC-k\u003e', '\u003cC-w\u003e\u003cC-k\u003e', { desc = 'Move focus to the upper window' })
+
+vim.keymap.set('t', '\u003cEsc\u003e\u003cEsc\u003e', '\u003cC-\\\\\u003e\u003cC-n\u003e', { desc = 'Exit terminal mode' })
+
+vim.api.nvim_create_autocmd('TextYankPost', {
+  desc = 'Highlight when yanking (copying) text',
+  group = vim.api.nvim_create_augroup('kickstart-highlight-yank', { clear = true }),
+  callback = function()
+    vim.hl.on_yank()
+  end,
+})
 ```
 
-### 模式 4: Treesitter 按需安装
+**现代要点**：
+- `vim.hl.on_yank()` 是 0.11+ 的 API（旧名 `vim.highlight.on_yank`）；
+- `vim.diagnostic.config.jump.on_jump` 让 `[d` / `]d` 跳转诊断时自动打开浮动窗口；
+- `virtual_lines` 是 0.11+ 新选项，默认关闭以节省空间。
+
+### SECTION 3: PLUGIN MANAGER INTRO
 
 ```lua
--- 用 FileType autocmd 实现：第一次打开某语言文件时自动安装对应的 treesitter parser
-vim.api.nvim_create_autocmd('FileType', {
-  callback = function(args)
-    local language = vim.treesitter.language.get_lang(args.match)
-    local installed = require('nvim-treesitter').get_installed 'parsers'
+local function run_build(name, cmd, cwd)
+  local result = vim.system(cmd, { cwd = cwd }):wait()
+  if result.code ~= 0 then
+    vim.notify(
+      ('Build failed for %s:\n%s'):format(name, result.stderr or result.stdout or 'No output'),
+      vim.log.levels.ERROR
+    )
+  end
+end
 
-    if vim.tbl_contains(installed, language) then
-      -- 已安装，直接启用
-      treesitter_try_attach(args.buf, language)
-    elseif vim.tbl_contains(available_parsers, language) then
-      -- 有 parser 可用，自动安装后启用
-      require('nvim-treesitter').install(language):await(function()
-        treesitter_try_attach(args.buf, language)
-      end)
+vim.api.nvim_create_autocmd('PackChanged', {
+  callback = function(ev)
+    local name, kind, path = ev.data.spec.name, ev.data.kind, ev.data.path
+    if kind ~= 'install' and kind ~= 'update' then return end
+
+    if name == 'telescope-fzf-native.nvim' and vim.fn.executable 'make' == 1 then
+      run_build(name, { 'make' }, path)
+    elseif name == 'LuaSnip' and vim.fn.has 'win32' ~= 1 and vim.fn.executable 'make' == 1 then
+      run_build(name, { 'make', 'install_jsregexp' }, path)
+    elseif name == 'nvim-treesitter' then
+      if not ev.data.active then vim.cmd.packadd 'nvim-treesitter' end
+      vim.cmd 'TSUpdate'
     end
   end,
 })
 ```
 
+**设计要点**：
+- `run_build` + `vim.system()` 是 kickstart 的统一构建范式；
+- `PackChanged` 在首次安装/更新时触发，自动编译需要 native 扩展的插件；
+- 该 autocmd 必须放在 `vim.pack.add()` 之前，否则首次安装 hook 不生效。
+
+### SECTION 4: UI / CORE UX
+
+```lua
+do
+  local gh = function(repo) return 'https://github.com/' .. repo end
+
+  vim.pack.add { gh 'nmac427/guess-indent.nvim' }
+  require('guess-indent').setup {}
+
+  vim.pack.add { gh 'lewis6991/gitsigns.nvim' }
+  require('gitsigns').setup {
+    signs = {
+      add = { text = '+' },
+      change = { text = '~' },
+      delete = { text = '_' },
+      topdelete = { text = '‾' },
+      changedelete = { text = '~' },
+    },
+  }
+
+  vim.pack.add { gh 'folke/which-key.nvim' }
+  require('which-key').setup {
+    delay = 0,
+    icons = {
+      mappings = vim.g.have_nerd_font,
+    },
+    spec = {
+      { '\u003cleader\u003ec', group = '[C]ode', mode = { 'n', 'x' } },
+      { '\u003cleader\u003ed', group = '[D]ocument' },
+      { '\u003cleader\u003er', group = '[R]ename' },
+      { '\u003cleader\u003es', group = '[S]earch', mode = { 'n', 'x' } },
+      { '\u003cleader\u003ew', group = '[W]orkspace' },
+      { '\u003cleader\u003et', group = '[T]oggle' },
+      { '\u003cleader\u003eh', group = 'Git [H]unk', mode = { 'n', 'v' } },
+    },
+  }
+
+  vim.pack.add { gh 'folke/tokyonight.nvim' }
+  require('tokyonight').setup {
+    styles = {
+      comments = { italic = false },
+    },
+  }
+  vim.cmd.colorscheme 'tokyonight-night'
+
+  vim.pack.add { gh 'folke/todo-comments.nvim' }
+  require('todo-comments').setup { signs = false }
+
+  vim.pack.add { gh 'nvim-mini/mini.nvim' }
+
+  require('mini.ai').setup {
+    mappings = { around_next = 'aa', inside_next = 'ii' },
+    n_lines = 500,
+  }
+
+  require('mini.surround').setup()
+
+  local statusline = require 'mini.statusline'
+  statusline.setup { use_icons = vim.g.have_nerd_font }
+  ---@diagnostic disable-next-line: duplicate-set-field
+  statusline.section_location = function()
+    return '%2l:%-2v'
+  end
+
+  require('mini.icons').setup { style = 'glyph' }
+  MiniIcons.mock_nvim_web_devicons()
+end
+```
+
+**现代要点**：
+- `mini.ai` 的 `around_next` / `inside_next` 改为 `aa` / `ii`，因为 Neovim 0.12 内置了 `an` / `in` treesitter 文本对象，避免冲突；
+- colorscheme 放在 UI section 最前面，确保后续插件高亮组正确；
+- `mini.icons` + `mock_nvim_web_devicons()` 提供对老图插件的兼容。
+
+### SECTION 5: SEARCH & NAVIGATION
+
+```lua
+do
+  local gh = function(repo) return 'https://github.com/' .. repo end
+  local builtin = require 'telescope.builtin'
+
+  vim.pack.add { gh 'nvim-lua/plenary.nvim' }
+  vim.pack.add { gh 'nvim-telescope/telescope.nvim' }
+
+  require('telescope').setup {
+    extensions = {
+      ['ui-select'] = {
+        require('telescope.themes').get_dropdown {},
+      },
+    },
+  }
+
+  -- 可选 fzf-native
+  if vim.fn.executable 'make' == 1 then
+    vim.pack.add { gh 'nvim-telescope/telescope-fzf-native.nvim' }
+    pcall(require('telescope').load_extension, 'fzf')
+  end
+
+  -- ui-select 扩展
+  vim.pack.add { gh 'nvim-telescope/telescope-ui-select.nvim' }
+  pcall(require('telescope').load_extension, 'ui-select')
+
+  -- 全局搜索映射
+  vim.keymap.set('n', '<leader>sh', builtin.help_tags, { desc = '[S]earch [H]elp' })
+  vim.keymap.set('n', '<leader>sk', builtin.keymaps, { desc = '[S]earch [K]eymaps' })
+  vim.keymap.set('n', '<leader>sf', builtin.find_files, { desc = '[S]earch [F]iles' })
+  vim.keymap.set('n', '<leader>ss', builtin.builtin, { desc = '[S]earch [S]elect Telescope' })
+  vim.keymap.set('n', '<leader>sw', builtin.grep_string, { desc = '[S]earch current [W]ord' })
+  vim.keymap.set('n', '<leader>sg', builtin.live_grep, { desc = '[S]earch by [G]rep' })
+  vim.keymap.set('n', '<leader>sd', builtin.diagnostics, { desc = '[S]earch [D]iagnostics' })
+  vim.keymap.set('n', '<leader>sr', builtin.resume, { desc = '[S]earch [R]esume' })
+  vim.keymap.set('n', '<leader>s.', builtin.oldfiles, { desc = '[S]earch Recent Files' })
+  vim.keymap.set('n', '<leader><leader>', builtin.buffers, { desc = '[ ] Find existing buffers' })
+end
+```
+
+**LSP picker 覆盖**在 SECTION 6 的 `LspAttach` 中完成。
+
+### SECTION 6: LSP
+
+```lua
+do
+  local gh = function(repo) return 'https://github.com/' .. repo end
+
+  vim.pack.add { gh 'j-hui/fidget.nvim' }
+  require('fidget').setup {}
+
+  vim.api.nvim_create_autocmd('LspAttach', {
+    group = vim.api.nvim_create_augroup('kickstart-lsp-attach', { clear = true }),
+    callback = function(ev)
+      local map = function(keys, func, desc, mode)
+        mode = mode or 'n'
+        vim.keymap.set(mode, keys, func, { buffer = ev.buf, desc = 'LSP: ' .. desc })
+      end
+
+      local builtin = require 'telescope.builtin'
+      local client = vim.lsp.get_client_by_id(ev.data.client_id)
+
+      -- 0.12 默认已有 grn/gra/gri/grr/gO/grt；kickstart 仍显式保留部分映射
+      map('grn', vim.lsp.buf.rename, '[R]e[n]ame')
+      map('gra', vim.lsp.buf.code_action, '[G]oto Code [A]ction', { 'n', 'x' })
+      map('grD', vim.lsp.buf.declaration, '[G]oto [D]eclaration')
+
+      -- 用 Telescope picker 覆盖默认的引用/实现/符号/类型定义
+      map('grr', builtin.lsp_references, '[G]oto [R]eferences')
+      map('gri', builtin.lsp_implementations, '[G]oto [I]mplementation')
+      map('gO', builtin.lsp_document_symbols, 'Open Document Symbols')
+      map('grt', builtin.lsp_type_definitions, '[G]oto [T]ype Definition')
+
+      if client:supports_method('textDocument/inlayHint', ev.buf) then
+        map('\u003cleader\u003eth', function()
+          vim.lsp.inlay_hint.enable(not vim.lsp.inlay_hint.is_enabled { bufnr = ev.buf })
+        end, '[T]oggle Inlay [H]ints')
+      end
+    end,
+  })
+
+  local servers = {
+    lua_ls = {
+      settings = {
+        Lua = {
+          completion = { callSnippet = 'Replace' },
+          format = { enable = false },
+          runtime = { version = 'LuaJIT' },
+        },
+      },
+    },
+  }
+
+  vim.pack.add {
+    gh 'neovim/nvim-lspconfig',
+    gh 'mason-org/mason.nvim',
+    gh 'mason-org/mason-lspconfig.nvim',
+    gh 'WhoIsSethDaniel/mason-tool-installer.nvim',
+  }
+
+  require('mason').setup {}
+
+  local ensure_installed = vim.tbl_keys(servers or {})
+  require('mason-tool-installer').setup { ensure_installed = ensure_installed }
+
+  for name, server in pairs(servers) do
+    vim.lsp.config(name, server)
+    vim.lsp.enable(name)
+  end
+end
+```
+
+**现代要点**：
+- Neovim 0.12 已内置 `grn`/`gra`/`gri`/`grr`/`gO`/`grt` 等默认映射；kickstart 保留 `grn`/`gra`/`grD` 与默认重叠但不报错；
+- `grr`/`gri`/`gO`/`grt` 被 Telescope picker 覆盖，`lua_ls.format.enable = false` 把格式化交给 conform；
+- mason 已迁移到 `mason-org` 组织；`vim.lsp.config()` 注册配置，`vim.lsp.enable()` 根据 filetypes 自动启动。
+
+### SECTION 7: FORMATTING
+
+```lua
+do
+  local gh = function(repo) return 'https://github.com/' .. repo end
+
+  vim.pack.add { gh 'stevearc/conform.nvim' }
+  require('conform').setup {
+    notify_on_error = false,
+    format_on_save = function(bufnr)
+      local enabled = { lua = true }  -- 按需启用
+      return enabled[vim.bo[bufnr].filetype] and { timeout_ms = 500 } or nil
+    end,
+    default_format_opts = {
+      lsp_format = 'fallback',  -- 优先外部 formatter，回退 LSP
+    },
+    formatters_by_ft = {
+      lua = { 'stylua' },
+      -- python = { 'isort', 'black' },
+      -- javascript = { 'prettierd', 'prettier', stop_after_first = true },
+    },
+  }
+
+  vim.keymap.set({ 'n', 'v' }, '<leader>f', function()
+    require('conform').format { async = true }
+  end, { desc = '[F]ormat' })
+end
+```
+
+**设计要点**：
+- `lsp_format = 'fallback'` 表示优先使用外部 formatter，没有时再回退到 LSP；
+- `format_on_save` 用函数按文件类型动态启用，避免所有文件都触发格式化。
+
+### SECTION 8: AUTOCOMPLETE & SNIPPETS
+
+```lua
+do
+  local gh = function(repo) return 'https://github.com/' .. repo end
+
+  vim.pack.add {
+    { src = gh 'L3MON4D3/LuaSnip', version = vim.version.range '2.*' },
+    { src = gh 'saghen/blink.cmp', version = vim.version.range '1.*' },
+  }
+
+  require('luasnip').setup {}
+
+  require('blink.cmp').setup {
+    keymap = { preset = 'default' },
+    appearance = {
+      nerd_font_variant = 'mono',
+    },
+    completion = {
+      documentation = { auto_show = false, auto_show_delay_ms = 500 },
+    },
+    sources = {
+      default = { 'lsp', 'path', 'snippets' },
+    },
+    snippets = { preset = 'luasnip' },
+    fuzzy = { implementation = 'lua' },
+    signature = { enabled = true },
+  }
+end
+```
+
+**现代要点**：
+- blink.cmp V1 通过 `version = vim.version.range '1.*'` 锁定，避免 V2 的破坏性变更；
+- `keymap = { preset = 'default' }` 使用 `<C-y>` 确认、`<C-n>`/`<C-p>` 上下选择；
+- `fuzzy.implementation = 'lua'` 是纯 Lua 实现，也可选 `'prefer_rust_with_warning'` 使用 Rust 后端。
+
+### SECTION 9: TREESITTER
+
+```lua
+do
+  local gh = function(repo) return 'https://github.com/' .. repo end
+
+  -- main 分支：现代 nvim-treesitter API
+  vim.pack.add { { src = gh 'nvim-treesitter/nvim-treesitter', version = 'main' } }
+
+  local available_parsers = require('nvim-treesitter').get_available 'parsers'
+
+  -- 预装基础解析器
+  local base_parsers = { 'bash', 'c', 'lua', 'markdown', 'markdown_inline', 'vim', 'vimdoc', 'query' }
+  require('nvim-treesitter').install(base_parsers):await(function()
+    for _, lang in ipairs(base_parsers) do
+      vim.treesitter.language.add(lang)
+    end
+  end)
+
+  local function treesitter_try_attach(bufnr, lang)
+    if vim.treesitter.language.add(lang) then
+      vim.treesitter.start(bufnr, lang)
+      vim.wo[0].foldexpr = 'v:lua.vim.treesitter.foldexpr()'
+    end
+  end
+
+  vim.api.nvim_create_autocmd('FileType', {
+    callback = function(args)
+      local language = vim.treesitter.language.get_lang(args.match)
+      local installed = require('nvim-treesitter').get_installed 'parsers'
+
+      if vim.tbl_contains(installed, language) then
+        treesitter_try_attach(args.buf, language)
+      elseif vim.tbl_contains(available_parsers, language) then
+        require('nvim-treesitter').install(language):await(function()
+          treesitter_try_attach(args.buf, language)
+        end)
+      end
+    end,
+  })
+end
+```
+
+**现代要点**：
+- 使用 `nvim-treesitter` 的 `main` 分支，不再用 `:TSInstall` 或 `ensure_installed`；
+- `install():await()` 异步安装 parser；`vim.treesitter.start()` 启用高亮，`vim.treesitter.language.add()` 注册 parser；
+- `foldexpr` 使用 treesitter 折叠表达式。
+
+### SECTION 10: OPTIONAL EXAMPLES
+
+```lua
+-- 在 init.lua 末尾按需取消注释启用
+-- require 'kickstart.plugins.debug'
+-- require 'kickstart.plugins.indent_line'
+-- require 'kickstart.plugins.lint'
+-- require 'kickstart.plugins.autopairs'
+-- require 'kickstart.plugins.neo-tree'
+-- require 'kickstart.plugins.gitsigns'
+
+-- 用户自定义插件
+-- require 'custom.plugins'
+```
 ---
 
 ## 3. 扩展路径
 
-kickstart.nvim 内置了从单文件到模块化的渐进路径：
-
 ### 阶段 1: 直接用（初学者）
-
 直接使用 `init.lua`，逐步阅读注释理解每个 section。
 
 ### 阶段 2: 微调（熟悉后）
-
-修改 `servers` 表添加你的语言。修改 keymaps。更换 colorscheme。
+修改 `servers` 表添加语言，修改 keymaps，更换 colorscheme。
 
 ### 阶段 3: 启用可选模块
-
-```lua
--- 取消注释以启用：
-require 'kickstart.plugins.debug'       -- DAP 调试
-require 'kickstart.plugins.indent_line' -- 缩进线
-require 'kickstart.plugins.lint'        -- Lint 集成
-require 'kickstart.plugins.autopairs'   -- 自动括号配对
-require 'kickstart.plugins.neo-tree'    -- 文件树
-```
-
-每个模块在 `lua/kickstart/plugins/` 下是一个独立文件。
+取消 SECTION 10 的注释，启用 debug、indent_line、lint、autopairs、neo-tree 等。
 
 ### 阶段 4: 自定义插件
+在 `lua/custom/plugins/` 下创建文件，然后 `require 'custom.plugins'`。
 
-```lua
--- 在 lua/custom/plugins/ 下创建你的插件文件
-require 'custom.plugins'
-```
+### 阶段 5: 完全模块化
+当 `init.lua` 太长时，按 section 拆成多个文件。详见 [[15-modular-config]]。
 
-### 阶段 5: 完全模块化（高级）
+---
 
-当 `init.lua` 太长时，把一个 section 提取成独立文件。详见 **[[15-modular-config|第 15 节：模块化配置架构]]**，其中包含了完整的迁移步骤、目录结构设计和常见陷阱。
-
-```lua
--- 从:
-do
-  vim.pack.add { ... }
-  -- 50 行配置 ...
-end
-
--- 变成:
-require 'myconfig.lsp'
-```
 ## 4. 练习
 
 ### 练习 1: 逐 section 阅读 init.lua
 
-在浏览器中打开 [kickstart.nvim 的 init.lua](https://github.com/nvim-lua/kickstart.nvim/blob/master/init.lua)，从 Section 1 开始，每读完一个 section：
-1. 用一句话总结这个 section 做了什么
-2. 找出一个你不理解的配置项，用 `:help` 查阅
-3. 记下至少一个你想在自己的配置中修改的地方
+在浏览器打开 [kickstart.nvim 的 init.lua](https://github.com/nvim-lua/kickstart.nvim/blob/master/init.lua)，从 Section 1 开始：
+1. 用一句话总结每个 section 做了什么；
+2. 找出一个不理解的配置项，用 `:help` 查阅；
+3. 记下至少一个想修改的地方。
 
-### 练习 2: 追踪一个插件的完整生命周期
+### 练习 2: 验证默认 LSP 按键
 
-以 `which-key.nvim` 为例，追踪它在 kickstart 中的完整路径：
-1. 在哪一行 `vim.pack.add()`？
-2. `require('which-key').setup()` 传入了什么参数？
-3. 在 `PackChanged` autocmd 中有它的 build hook 吗？
-4. 为什么它不需要 lazy loading？
+用 `:verbose map grr`、`:verbose map gri`、`:verbose map gO` 分别验证：
+- 默认状态绑定的是原生 `vim.lsp.buf.*` 还是 Telescope picker；
+- 在 LspAttach 覆盖后，这些按键指向哪里。
 
-### 练习 3: 设计你自己的模块拆分方案
+### 练习 3: 设计模块化拆分方案
 
-假设你要把 kickstart 拆成模块化结构，设计一个文件划分方案。提示：
+假设要把 kickstart 拆成模块化结构，设计一个文件划分方案：
 - 哪些 section 应该合并到一个文件？
 - 哪些需要拆分得更细？
 - 如何在拆分后保持"按执行顺序可理解"？
@@ -295,100 +611,96 @@ require 'myconfig.lsp'
 ## 4.5 参考答案
 
 > [!tip]- 练习 1 参考答案
-> kickstart.nvim `init.lua` 的 9 个 section 总结：
+> kickstart.nvim master 的 10 个 section 总结：
 >
-> | Section | 行号范围 | 一句话总结 | 值得关注的关键配置项 |
-> |---------|---------|-----------|-------------------|
-> | 1. FOUNDATION | ~96-237 | 编辑器核心选项 + 基础 keymaps + 诊断配置 + yank 高亮 | `vim.o.inccommand = 'split'`（实时显示替换效果）；`vim.diagnostic.config.jump.on_jump`（跳转诊断时自动浮动窗口） |
-> | 2. PLUGIN MANAGER INTRO | ~242-310 | `run_build()` 辅助函数 + `PackChanged` autocmd（安装/更新后编译） | `ev.data.kind` 分别判断 `install` 和 `update`；`run_build` 使用 `vim.system`（0.12 新 API） |
-> | 3. UI / CORE UX | ~314-420 | colorscheme、gitsigns、which-key、todo-comments、mini.ai/surround/statusline | `vim.g.have_nerd_font` 控制图标显示（一处修改全局生效）；`mini.statusline.section_location` 自定义格式 |
-> | 4. SEARCH & NAVIGATION | ~424-520 | Telescope + fzf-native + LSP picker keymaps | `<leader>s` 前缀组（sh/sf/sg/sd）；`telescope-ui-select` 替换 `vim.ui.select` |
-> | 5. LSP | ~524-660 | LspAttach + 服务器表 + mason 三件套 + vim.lsp.config/enable | `on_init` 中禁用 lua_ls 的 formatting（交给 conform）；`mason-tool-installer` 从 servers keys 自动推导安装列表 |
-> | 6. FORMATTING | ~664-700 | conform.nvim + `<leader>f` 格式化 | `lsp_format = 'fallback'`（优先 LSP，fallback 到其他 formatter） |
-> | 7. AUTOCOMPLETE & SNIPPETS | ~704-760 | LuaSnip + blink.cmp | blink.cmp 版本锁定 `1.*`；fuzzy `'lua'` vs `'prefer_rust'` 的选择 |
-> | 8. TREESITTER | ~764-900 | 预装基础 parsers + FileType 按需安装 | `treesitter_try_attach` 条件函数（只启用有 parser 的语言）；`:await()` 异步安装 |
-> | 9. OPTIONAL / NEXT STEPS | ~904-980 | `kickstart.plugins.*` 可选模块 + `custom.plugins` 扩展点 | 按需取消注释启用 DAP、indent_line、lint、neo-tree 等 |
+> | Section | 内容 | 关键配置项 |
+> |---------|------|-----------|
+> | 1. OPTIONS | 核心选项（vim.loader/leader/vim.o/listchars） | `vim.loader.enable()` |
+> | 2. KEYMAPS | 诊断配置、基础 keymaps、yank 高亮 | `vim.hl.on_yank()`；`vim.diagnostic.config.jump.on_jump` |
+> | 3. PLUGIN MANAGER | `run_build()` + `PackChanged` autocmd | `vim.system()` 构建；treesitter/fzf-native/LuaSnip 钩子 |
+> | 4. UI / CORE UX | guess-indent, gitsigns, which-key, tokyonight, todo-comments, mini.* | `mini.ai` 用 `aa`/`ii`；`mini.statusline.section_location` |
+> | 5. SEARCH & NAVIGATION | Telescope + fzf-native + ui-select + `<leader>s` 映射 | `pcall(load_extension, 'fzf')` |
+> | 6. LSP | fidget, LspAttach, servers, mason, vim.lsp.config/enable | `lua_ls.format.enable = false`；mason-org |
+> | 7. FORMATTING | conform.nvim | `lsp_format = 'fallback'` |
+> | 8. AUTOCOMPLETE | LuaSnip + blink.cmp V1 | `version = vim.version.range '1.*'` |
+> | 9. TREESITTER | nvim-treesitter main 分支 | `install():await()`；`treesitter_try_attach()` |
+> | 10. OPTIONAL | kickstart.plugins.* / custom.plugins | 按需启用 |
 >
-> **容易困惑的配置项及 `:help` 入口**：
-> - `vim.loader.enable()` → `:help vim.loader`（缓存 Lua 模块，启动加速）
-> - `vim.o.inccommand = 'split'` → `:help 'inccommand'`（键入 `:s` 时预览替换效果）
-> - `vim.schedule(function() vim.o.clipboard = 'unnamedplus' end)` → `:help 'clipboard'`（延迟设置以减少启动时间）
-> - `vim.diagnostic.config.jump.on_jump` → `:help vim.diagnostic.config`（跳转诊断时打开浮动窗口）
+> 容易困惑的 `:help` 入口：
+> - `vim.loader.enable()` → `:help vim.loader`
+> - `vim.hl.on_yank()` → `:help vim.hl`
+> - `vim.diagnostic.config.jump.on_jump` → `:help vim.diagnostic.config`
+> - `vim.lsp.config()` / `vim.lsp.enable()` → `:help vim.lsp.config`
 
 > [!tip]- 练习 2 参考答案
-> `which-key.nvim` 在 kickstart.nvim 中的完整生命周期追踪：
+> 在没有任何 LSP buffer 打开时，`:verbose map grr` 会显示：
 >
-> 1. **`vim.pack.add()` 的位置**：Section 3（UI / CORE UX），大致在 init.lua 的第 ~340 行。实际代码：
-> ```lua
-> vim.pack.add { gh 'folke/which-key.nvim' }
+> ```
+> n  grr         *@* Lua vim.lsp.buf.references()
+>         Last set from Lua (run Nvim with -V1 for more details)
 > ```
 >
-> 2. **`.setup()` 传入的参数**：
-> ```lua
-> require('which-key').setup {
->   delay = 0,           -- 按 leader 后立即显示提示，不等待
->   icons = {
->     mappings = vim.g.have_nerd_font,  -- 有 Nerd Font 时才显示图标
->   },
->   spec = {
->     { '<leader>s', group = '[S]earch', mode = { 'n', 'v' } },
->     { '<leader>t', group = '[T]oggle' },
->     -- ... 更多 group 定义
->   },
-> }
+> 这表示 0.12 内置默认映射。打开一个 LSP 附着的 buffer 后，`:verbose map grr` 会显示：
+>
 > ```
->   关键参数：`delay = 0` 使得按 leader 后无需等待即可看到提示弹窗；`spec` 定义了 leader 组合键的分组标签。
+> n  grr         *@* <Lua function 42>
+>         Last set from Lua
+> ```
 >
-> 3. **PackChanged 中的 build hook**：**没有**。`which-key.nvim` 是纯 Lua 插件，不需要编译步骤。`PackChanged` 只处理需要构建的插件（treesitter 编译、telescope-fzf-native 的 make）。
->
-> 4. **为什么不需要 lazy loading**：which-key.nvim 本身极其轻量（几十 KB），且它的初始化只是注册 autocmd（监听按键序列）。`vim.pack.add()` 注册后 `.setup()` 立即配置好键位监听，按需触发弹窗——这是"内置 lazy"模式。相比 lazy.nvim 的 `event = "VeryLazy"` 等魔法，kickstart 的方式更透明：你明确知道 setup() 在什么时候被调用了。
+> 说明 LspAttach 中的 `vim.keymap.set('n', 'grr', builtin.lsp_references, ...)` 覆盖了默认映射。同理可验证 `gri` / `gO` / `grt`。`grn` / `gra` 在 kickstart 中仍手动映射，与默认重叠（不会报错，后定义覆盖）。
 
 > [!tip]- 练习 3 参考答案
-> 模块化拆分方案设计——一个实际可操作的划分：
+> 一个实际可操作的模块化拆分方案：
 >
 > ```
 > lua/
-> ├── config/                   ← 非插件配置（无 vim.pack.add）
-> │   ├── options.lua           ← Section 1: vim.o/vim.opt 全部选项
-> │   ├── keymaps.lua           ← Section 1: 全局 keymaps
-> │   ├── autocmds.lua          ← Section 1: TextYankPost + 其他全局 autocmds
-> │   └── diagnostics.lua       ← Section 1: vim.diagnostic.config + <leader>q
-> ├── utils/                    ← 纯工具函数
-> │   ├── init.lua              ← 聚合导出
-> │   └── helpers.lua           ← gh(), run_build(), 通用 map 函数
-> └── plugins/                  ← 每个文件对应一个 Section
->     ├── init.lua              ← PackChanged + require 各子模块
->     ├── ui.lua                ← Section 3: colorscheme, gitsigns, which-key, mini.*
->     ├── search.lua            ← Section 4: Telescope
->     ├── lsp.lua               ← Section 5: LSP 全部
->     ├── formatting.lua        ← Section 6: conform.nvim
->     ├── completion.lua        ← Section 7: blink.cmp + LuaSnip
->     ├── treesitter.lua        ← Section 8: nvim-treesitter
->     └── optional.lua          ← Section 9: kickstart.plugins.* + custom.plugins
+> ├── config/
+> │   ├── options.lua      ← Section 1 的 vim.o/vim.opt
+> │   ├── keymaps.lua      ← Section 2 的全局 keymaps
+> │   ├── autocmds.lua     ← Section 2 的 TextYankPost 等 autocmd
+> │   └── diagnostics.lua  ← Section 2 的 vim.diagnostic.config
+> ├── utils/
+> │   ├── helpers.lua      ← gh(), run_build(), map()
+> │   └── init.lua         ← 聚合导出
+> └── plugins/
+>     ├── init.lua         ← PackChanged + require 子模块
+>     ├── ui.lua           ← Section 4
+>     ├── search.lua       ← Section 5
+>     ├── lsp.lua          ← Section 6
+>     ├── formatting.lua   ← Section 7
+>     ├── completion.lua   ← Section 8
+>     ├── treesitter.lua   ← Section 9
+>     └── optional.lua     ← Section 10
 > ```
 >
 > **设计决策**：
-> - **Section 1 拆成 4 个文件** 而非 1 个 `foundation.lua`——因为 options、keymaps、autocmds、diagnostics 是 4 个独立关注点，修改频率和时机不同。但每个文件至少 20 行有意义的配置。
-> - **Section 2（PackChanged + 工具函数）拆入 `utils/helpers.lua`（纯函数）和 `plugins/init.lua`（副作用）**——分离"是什么"和"做什么"。
-> - **保持顺序**：`plugins/init.lua` 中的 require 顺序就是 Section 3→8→9 的顺序——阅读者仍然可以从上到下理解加载顺序。
-> - **不拆得太细**：不把 `mini.ai` 和 `mini.surround` 分别拆成独立文件——它们在 UI section 内是紧凑的 mini.nvim 统一加载。
-> - **after/ 目录留给用户个性化**：不把覆盖配置放在插件模块中。
+> - Section 1 拆成 `options.lua`；Section 2 拆成 `keymaps.lua` / `autocmds.lua` / `diagnostics.lua`；
+> - Section 3 的 `gh()` / `run_build()` 放入 `utils/helpers.lua`，`PackChanged` 注册放入 `plugins/init.lua`；
+> - `plugins/init.lua` 按 Section 4→10 顺序 require，保持可读性；
+> - 不把 `mini.ai` / `mini.surround` 分别拆成独立文件——它们在 UI section 内是紧凑的 mini.nvim 统一加载。
 
 > [!note] 答案使用方式
 > 先独立完成练习，再展开查看参考答案。参考答案不是唯一解——如果你的实现通过了测试或达到了题目要求，就是正确的。
+
+---
 
 ## 5. 扩展阅读
 
 - [kickstart.nvim 源码](https://github.com/nvim-lua/kickstart.nvim) — 完整仓库
 - [kickstart.nvim README](https://github.com/nvim-lua/kickstart.nvim/blob/master/README.md) — 安装和使用指南
-- [TJ DeVries — kickstart.nvim 设计哲学](https://www.youtube.com/@teej_dv) — YouTube 频道
 - [A Guide to vim.pack](https://echasnovski.com/blog/2026-03-13-a-guide-to-vim-pack) — 深入理解 kickstart 使用的插件管理器
+- [mason.nvim 文档](https://github.com/mason-org/mason.nvim)
+- [blink.cmp 文档](https://github.com/Saghen/blink.cmp)
 
 ---
 
 ## 常见陷阱
 
-- **不要直接复制整个 init.lua 而不理解**：kickstart 是起点，不是终点。每复制一行，确保你理解了它。
-- **lockfile 被 gitignore 了**：kickstart 仓库的 `.gitignore` 忽略了 `nvim-pack-lock.json`（为了方便维护）。你自己的 fork 应该**取消这个忽略**，把 lockfile 提交到版本控制。
-- **v0.11 vs v0.12 差异巨大**：网上很多教程还在用 lazy.nvim + nvim-cmp。如果你看到 `lazy.setup()` 或 `cmp.setup()`，那些教程针对的是旧版本。kickstart.nvim master 分支始终针对最新的 Neovim。
-- **fork 后需要定期同步上游**：kickstart 会持续更新以跟随 Neovim 最新 API。建议添加 upstream remote 定期 merge。
+- **不要直接复制整个 init.lua 而不理解**：kickstart 是起点，不是终点。
+- **lockfile 应纳入版本控制**：kickstart 仓库的 `.gitignore` 可能忽略了 `nvim-pack-lock.json`（方便维护），但你的 fork 应该提交它。
+- **v0.11 vs v0.12 差异巨大**：看到 `lazy.setup()` 或 `cmp.setup()` 的教程针对的是旧版本。kickstart master 始终跟随最新 Neovim。
+- **`vim.highlight` 已重命名为 `vim.hl`**：旧配置需要更新。
+- **mason 已迁移到 `mason-org` 组织**：旧地址 `williamboman/mason.nvim` 仍重定向，但新配置应写 `mason-org/mason.nvim`。
+- **mini.ai 默认 `an`/`in` 与 0.12 内置冲突**：必须改为 `aa`/`ii`。
+- **nvim-treesitter 使用 main 分支 API**：旧教程中的 `:TSInstall` 和 `ensure_installed` 配置已过时。
+- **fork 后需要定期同步上游**：kickstart 会持续更新。建议添加 upstream remote 定期 merge。

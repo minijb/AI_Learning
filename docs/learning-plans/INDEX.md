@@ -1,6 +1,6 @@
 # 学习计划索引
 
-> 自动生成于 2026-06-17
+> 自动生成于 2026-06-18
 
 ## 进行中
 
@@ -8,6 +8,7 @@
 |---------|---------|
 | advanced-pathfinding | — |
 | battle-system | — |
+| c-family-interop | — |
 | cmake-deep-dive | — |
 | cpp-async-programming | — |
 | cpp-for-game-engineers | — |
