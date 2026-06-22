@@ -1,6 +1,6 @@
 # 学习计划索引
 
-> 自动生成于 2026-06-18
+> 自动生成于 2026-06-22
 
 ## 进行中
 
@@ -18,6 +18,7 @@
 | ecs-system | — |
 | frame-state-sync | — |
 | game-ai-fsm-bt | — |
+| game-architecture-design | — |
 | game-engine-dev | — |
 | game-performance-optimization | — |
 | mermaid-syntax | — |
