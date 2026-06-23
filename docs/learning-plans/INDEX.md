@@ -1,6 +1,6 @@
 # 学习计划索引
 
-> 自动生成于 2026-06-22
+> 自动生成于 2026-06-23
 
 ## 进行中
 
@@ -9,8 +9,10 @@
 | advanced-pathfinding | — |
 | battle-system | — |
 | c-family-interop | — |
+| cicd | — |
 | cmake-deep-dive | — |
 | cpp-async-programming | — |
+| cpp-dependency-injection | — |
 | cpp-for-game-engineers | — |
 | cpp-memory-model | — |
 | design-patterns-csharp | — |
@@ -21,6 +23,7 @@
 | game-architecture-design | — |
 | game-engine-dev | — |
 | game-performance-optimization | — |
+| git-deep-dive | — |
 | mermaid-syntax | — |
 | neovim-lua-config | — |
 | oh-my-pi-code-agent-使用指南 | — |
