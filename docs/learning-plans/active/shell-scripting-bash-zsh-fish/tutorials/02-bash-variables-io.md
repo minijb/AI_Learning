@@ -50,15 +50,15 @@ ls "$file"   # 正确：ls "my document.txt"（一个文件）
 
 ### 输入输出
 
-| 命令 | 用途 | 示例 |
-|------|------|------|
-| `echo` | 输出文本（简单） | `echo "Hello"` |
+| 命令       | 用途          | 示例                            |
+| -------- | ----------- | ----------------------------- |
+| `echo`   | 输出文本（简单）    | `echo "Hello"`                |
 | `printf` | 格式化输出（精确控制） | `printf "Name: %s\n" "$name"` |
-| `read` | 读取用户输入 | `read -p "Name: " name` |
-| `cat` | 输出文件内容 | `cat file.txt` |
-| 重定向 `>` | 输出到文件（覆盖） | `echo "hi" > file.txt` |
-| 重定向 `>>` | 输出到文件（追加） | `echo "hi" >> file.txt` |
-| 管道 `\|` | 将输出传给下一个命令 | `cat file.txt \| wc -l` |
+| `read`   | 读取用户输入      | `read -p "Name: " name`       |
+| `cat`    | 输出文件内容      | `cat file.txt`                |
+| 重定向 `>`  | 输出到文件（覆盖）   | `echo "hi" > file.txt`        |
+| 重定向 `>>` | 输出到文件（追加）   | `echo "hi" >> file.txt`       |
+| 管道 `\|`  | 将输出传给下一个命令  | `cat file.txt \| wc -l`       |
 
 ### 命令替换
 

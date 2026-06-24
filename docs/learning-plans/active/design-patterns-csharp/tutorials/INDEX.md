@@ -1,6 +1,6 @@
 ---
 title: "教程索引: 设计模式 (C# + C++)"
-updated: 2026-06-08
+updated: 2026-06-23
 tags: [design-patterns, csharp, cpp, index]
 ---
 # 教程索引: 设计模式 (C# + C++)
@@ -58,3 +58,10 @@ tags: [design-patterns, csharp, cpp, index]
 |------|--------|------|
 | 27 | C# 惯用模式实现 | [[27-csharp-idiomatic-patterns]] |
 | 28 | 依赖注入 + DI 容器 | [[28-dependency-injection]] |
+
+## 第六阶段：总结与实战
+
+| 序号 | 知识点 | 文件 |
+|------|--------|------|
+| 29 | 总结与游戏开发实战指南 | [[29-summary-and-game-dev]] |
+

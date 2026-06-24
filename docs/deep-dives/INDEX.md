@@ -1,6 +1,6 @@
 # 深度探索索引
 
-> 自动生成于 2026-06-13
+> 自动生成于 2026-06-23
 
 - [actor-model-ue-replication-skynet](actor-model-ue-replication-skynet.md)
 - [client-server-netcode](client-server-netcode.md)
@@ -15,6 +15,7 @@
 - [cpp-std-expected](cpp-std-expected.md)
 - [csharp-cpp-stream-deep-dive](csharp-cpp-stream-deep-dive.md)
 - [csharp-di-container](csharp-di-container.md)
+- [csharp-dynamic-keyword](csharp-dynamic-keyword.md)
 - [csharp-lazy-t](csharp-lazy-t.md)
 - [csharp-record-with](csharp-record-with.md)
 - [custom-allocators-arena](custom-allocators-arena.md)

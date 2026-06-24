@@ -544,7 +544,7 @@ Console.WriteLine(exporter.GetHtml());
 
 **dynamic 的代价：**
 
-- 运行时类型检查 → 没有编译期安全保障 → 如果 Visitor 缺少某个元素的 `Visit` 重载，会在运行时抛出 `RuntimeBinderException`
+- 运行时类型 检查 → 没有编译期安全保障 → 如果 Visitor 缺少某个元素的 `Visit` 重载，会在运行时抛出 `RuntimeBinderException`
 - 轻微性能开销（DLR 缓存后会减少，但仍高于虚方法调用）
 - 无法在 AOT 编译环境（如 NativeAOT）中使用
 
