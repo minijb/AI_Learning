@@ -26,14 +26,14 @@ tags: [coupling, cohesion, dependency-inversion, ioc, di, dependency-injection, 
 
 耦合描述模块间相互依赖的紧密程度。Stevens、Myers 与 Constantine 在经典结构化设计中定义了六种耦合，至今仍是判断设计质量的重要标尺：
 
-| 耦合类型 | 描述 | 典型游戏场景 |
-|---------|------|-----------|
-| **内容耦合** | 一个模块直接修改另一个模块的内部数据或控制流 | A 脚本直接 `other.health = 0` |
-| **公共耦合** | 多个模块共享全局数据区 | 全局 `static Dictionary<string, object> GameData` |
-| **外部耦合** | 模块共享外部定义的通信协议/数据格式 | 多个系统直接解析同一 JSON 配置的字典结构 |
-| **控制耦合** | 一个模块通过传递控制信号影响另一个模块的内部逻辑 | `TakeDamage(bool shouldLog, bool shouldShake)` |
-| **印记耦合** | 传递整个数据结构但只使用其中一部分 | `TakeDamage(PlayerStats stats)` 却只读取 `stats.defense` |
-| **数据耦合** | 仅通过参数传递基本数据类型 | `TakeDamage(float amount, DamageType type)` |
+| 耦合类型     | 描述                       | 典型游戏场景                                               |
+| -------- | ------------------------ | ---------------------------------------------------- |
+| **内容耦合** | 一个模块直接修改另一个模块的内部数据或控制流   | A 脚本直接 `other.health = 0`                            |
+| **公共耦合** | 多个模块共享全局数据区              | 全局 `static Dictionary<string, object> GameData`      |
+| **外部耦合** | 模块共享外部定义的通信协议/数据格式       | 多个系统直接解析同一 JSON 配置的字典结构                              |
+| **控制耦合** | 一个模块通过传递控制信号影响另一个模块的内部逻辑 | `TakeDamage(bool shouldLog, bool shouldShake)`       |
+| **印记耦合** | 传递整个数据结构但只使用其中一部分        | `TakeDamage(PlayerStats stats)` 却只读取 `stats.defense` |
+| **数据耦合** | 仅通过参数传递基本数据类型            | `TakeDamage(float amount, DamageType type)`          |
 
 **原则**：追求数据耦合，消除内容耦合。控制耦合和印记耦合在业务复杂度上升时往往难以避免，但应有意识地通过接口抽象来降级。
 
@@ -122,11 +122,11 @@ flowchart TD
 
 游戏项目的物理边界选择：
 
-| 边界策略 | 实现方式 | 适用场景 |
-|---------|---------|---------|
-| 按特性分包 | `Combat/`、`Inventory/`、`Quest/` | 业务模块清晰，团队按特性分工 |
-| 按层分包 | `Domain/`、`Application/`、`Infrastructure/` | 需要严格分层防御，大型项目 |
-| 混合策略 | 特性包内再分层 `Combat/Domain/`、`Combat/Infrastructure/` | 多数游戏项目的务实选择 |
+| 边界策略  | 实现方式                                              | 适用场景           |
+| ----- | ------------------------------------------------- | -------------- |
+| 按特性分包 | `Combat/`、`Inventory/`、`Quest/`                   | 业务模块清晰，团队按特性分工 |
+| 按层分包  | `Domain/`、`Application/`、`Infrastructure/`        | 需要严格分层防御，大型项目  |
+| 混合策略  | 特性包内再分层 `Combat/Domain/`、`Combat/Infrastructure/` | 多数游戏项目的务实选择    |
 
 **关键决策**：接口与实现是否分离到不同 Assembly？
 - 分离：编译隔离最强，但增加项目复杂度
@@ -160,12 +160,12 @@ DI 的三种注入方式：
 
 Unity 的 MonoBehaviour 与 DI 存在天然张力：
 
-| 问题 | 原因 | 解决方案 |
-|-----|------|---------|
-| 构造函数注入不可行 | MonoBehaviour 由引擎 `AddComponent` 构造 | Zenject/Extenject 的 `Inject` 属性；VContainer 的源生成 |
-| 场景对象需要注入 | 非代码创建的对象 | SceneInstaller / 预制体绑定 |
-| 热路径性能敏感 | 反射解析在 `Update` 中不可接受 | 预生成代码（VContainer）、编译时注入（Extenject） |
-| 生命周期与引擎事件耦合 | `Awake`/`Start`/`OnDestroy` 顺序 | Composition Root 统一控制，Installer 显式配置 |
+| 问题          | 原因                                  | 解决方案                                            |
+| ----------- | ----------------------------------- | ----------------------------------------------- |
+| 构造函数注入不可行   | MonoBehaviour 由引擎 `AddComponent` 构造 | Zenject/Extenject 的 `Inject` 属性；VContainer 的源生成 |
+| 场景对象需要注入    | 非代码创建的对象                            | SceneInstaller / 预制体绑定                          |
+| 热路径性能敏感     | 反射解析在 `Update` 中不可接受                | 预生成代码（VContainer）、编译时注入（Extenject）              |
+| 生命周期与引擎事件耦合 | `Awake`/`Start`/`OnDestroy` 顺序      | Composition Root 统一控制，Installer 显式配置            |
 
 **Composition Root** 模式：游戏启动时唯一一处调用容器注册，之后不再新增。避免运行时随意解析，防止容器沦为全局 Service Locator。
 
